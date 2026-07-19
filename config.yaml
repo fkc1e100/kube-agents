@@ -1,0 +1,77 @@
+approvals:
+  cron_mode: approve
+display:
+  platforms:
+    google_chat:
+      busy_ack_detail: false
+      interim_assistant_messages: false
+      long_running_notifications: true
+      memory_notifications: "off"
+      tool_progress: "off"
+mcp_servers:
+  agent_common:
+    args:
+    - /opt/data/scripts/agent_common_server.py
+    command: /opt/hermes/.venv/bin/python3
+  developer_knowledge:
+    args:
+    - /opt/mcp-remote/dist/proxy.js
+    - https://developerknowledge.googleapis.com/mcp
+    command: node
+  gke:
+    args:
+    - /opt/mcp-remote/dist/proxy.js
+    - https://container.googleapis.com/mcp
+    command: node
+  platform_control:
+    args:
+    - /opt/data/scripts/platform_mcp_server.py
+    command: /opt/hermes/.venv/bin/python3
+    connect_timeout: 120
+    env:
+      API_SERVER_KEY: ${API_SERVER_KEY}
+      GOOGLE_CHAT_PROJECT_ID: ${GOOGLE_CHAT_PROJECT_ID}
+      GOOGLE_CHAT_SUBSCRIPTION_NAME: ${GOOGLE_CHAT_SUBSCRIPTION_NAME}
+      HERMES_HOME: ${HERMES_HOME}
+      KUBERNETES_SERVICE_HOST: ${KUBERNETES_SERVICE_HOST}
+      KUBERNETES_SERVICE_PORT: ${KUBERNETES_SERVICE_PORT}
+    timeout: 300
+memory:
+  memory_enabled: false
+  provider: multiuser_memory
+  user_profile_enabled: false
+model:
+  api_key: none
+  base_url: http://litellm.kubeagents-system.svc.cluster.local/v1
+  default: model-default
+  model: model-default
+  provider: custom
+platform_toolsets:
+  api_server:
+  - hermes-api-server
+  - mcp-agent_common
+  - mcp-platform_control
+  - mcp-developer_knowledge
+  - mcp-gke
+  cli:
+  - hermes-cli
+  - mcp-agent_common
+  - mcp-platform_control
+  - mcp-developer_knowledge
+  - mcp-gke
+platforms:
+  google_chat:
+    enabled: true
+  slack:
+    enabled: false
+plugins:
+  enabled:
+  - hermes_otel
+  - session_store
+  - session_otel_bridge
+  - tool_call_audit
+terminal:
+  backend: local
+  cwd: /opt/data
+web:
+  backend: ddgs
