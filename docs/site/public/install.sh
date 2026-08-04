@@ -16,7 +16,6 @@ C_GREEN='\e[92m'
 C_YELLOW='\e[93m'
 C_MAGENTA='\e[95m'
 C_RED='\e[91m'
-C_BLUE='\e[94m'
 C_RESET='\e[0m'
 C_BOLD='\e[1m'
 
@@ -44,19 +43,19 @@ print_banner() {
 
   printf '%b\n' "${C_CYAN}${C_BOLD}"
   draw_separator
-  printf '\n'
 
   if [ "$term_w" -ge 60 ]; then
-    printf '%b\n' "  ${C_BLUE}${C_BOLD}_  ___   _ ___ ${C_RED}_____   ${C_GREEN}_   ___ ___ _  _ _____ ___${C_RESET}"
-    printf '%b\n' " ${C_BLUE}${C_BOLD}| |/ / | | | _ )${C_RED} __\\ \\ / /${C_GREEN}  /_\\ / __| \\| |_   _/ __|${C_RESET}"
-    printf '%b\n' " ${C_BLUE}${C_BOLD}| ' <| |_| | _ \\${C_RED} _| \\ V /${C_GREEN}  / _ \\ (_ | .\` | | | \\__ \\${C_RESET}"
-    printf '%b\n' " ${C_BLUE}${C_BOLD}|_|\\_\\___/|___/${C_RED}___| |_|${C_GREEN}  /_/ \\_\\___|_|\\_| |_| |___/${C_RESET}"
-    printf '\n'
+    cat << "EOF"
+  _  ___   _ ___ _____   _   ___ ___ _  _ _____ ___ 
+ | |/ / | | | _ ) __\ \ / /  /_\ / __| \| |_   _/ __|
+ | ' <| |_| | _ \ _| \ V /  / _ \ (_ | .` | | | \__ \
+ |_|\_\\___/|___/___| |_|  /_/ \_\___|_|\_| |_| |___/
+EOF
   else
-    printf '%b\n' "🤖 ${C_BOLD}KUBE-AGENTS PLATFORM HARNESS${C_RESET}\n"
+    printf '%b\n' "🤖 KUBE-AGENTS PLATFORM HARNESS"
   fi
 
-  printf '%b\n' "${C_CYAN}${C_BOLD}🤖 Kubernetes Agentic Harness (kube-agents) Zero-Friction Installer"
+  printf '\n%b\n' "🤖 Kubernetes Agentic Harness (kube-agents) Zero-Friction Installer"
   draw_separator
   printf '%b\n\n' "${C_RESET}"
 }
