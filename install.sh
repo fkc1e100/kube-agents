@@ -21,15 +21,13 @@ C_RESET='\033[0m'
 C_BOLD='\033[1m'
 
 print_banner() {
-  echo -e "  ${C_BLUE}${C_BOLD}_${C_RESET}  ${C_RED}${C_BOLD}___${C_RESET}   ${C_YELLOW}${C_BOLD}_${C_RESET} ${C_BLUE}${C_BOLD}___${C_RESET} ${C_GREEN}${C_BOLD}_____${C_RESET}   ${C_RED}${C_BOLD}_${C_RESET}   ${C_BLUE}${C_BOLD}___${C_RESET} ${C_RED}${C_BOLD}___${C_RESET} ${C_YELLOW}${C_BOLD}_  _${C_RESET} ${C_BLUE}${C_BOLD}_____${C_RESET} ${C_GREEN}${C_BOLD}___${C_RESET}"
-  echo -e " ${C_BLUE}${C_BOLD}| |/ /${C_RESET} ${C_RED}${C_BOLD}| | |${C_RESET} ${C_YELLOW}${C_BOLD}| _ )${C_RESET} ${C_BLUE}${C_BOLD}__\\${C_RESET} ${C_GREEN}${C_BOLD}\\ V /${C_RESET}  ${C_RED}${C_BOLD}/_\\${C_RESET} ${C_BLUE}${C_BOLD}/ __|${C_RESET} ${C_RED}${C_BOLD}\\| |${C_RESET} ${C_YELLOW}${C_BOLD}|_   _|${C_RESET} ${C_GREEN}${C_BOLD}/ __|${C_RESET}"
-  echo -e " ${C_BLUE}${C_BOLD}| ' <${C_RESET} ${C_RED}${C_BOLD}| |_| |${C_RESET} ${C_YELLOW}${C_BOLD}| _ \\${C_RESET} ${C_BLUE}${C_BOLD}_|${C_RESET}   ${C_GREEN}${C_BOLD}| |${C_RESET}  ${C_RED}${C_BOLD}/ _ \\${C_RESET} ${C_BLUE}${C_BOLD}| (_ |${C_RESET} ${C_RED}${C_BOLD}| .\` |${C_RESET} ${C_YELLOW}${C_BOLD}| |${C_RESET}  ${C_GREEN}${C_BOLD}\\__ \\${C_RESET}"
-  echo -e " ${C_BLUE}${C_BOLD}|_|\\_\\${C_RESET}${C_RED}${C_BOLD}\\___/${C_RESET} ${C_YELLOW}${C_BOLD}|___/${C_RESET}${C_BLUE}${C_BOLD}___|${C_RESET}  ${C_GREEN}${C_BOLD}|_|${C_RESET}  ${C_RED}${C_BOLD}/_/ \\_\\${C_RESET}${C_BLUE}${C_BOLD}\\___|${C_RESET}${C_RED}${C_BOLD}_|\\_|${C_RESET} ${C_YELLOW}${C_BOLD}|_|${C_RESET}  ${C_GREEN}${C_BOLD}|___/${C_RESET}"
-  echo -e "${C_CYAN}${C_BOLD}"
-  echo '============================================================================='
+  echo -e "  ${C_BLUE}${C_BOLD}_  ___   _ ___ ${C_RED}_____   ${C_GREEN}_   ___ ___ _  _ _____ ___${C_RESET}"
+  echo -e " ${C_BLUE}${C_BOLD}| |/ / | | | _ )${C_RED} __\\ \\ / /${C_GREEN}  /_\\ / __| \\| |_   _/ __|${C_RESET}"
+  echo -e " ${C_BLUE}${C_BOLD}| ' <| |_| | _ \\${C_RED} _| \\ V /${C_GREEN}  / _ \\ (_ | .\` | | | \\__ \\${C_RESET}"
+  echo -e " ${C_BLUE}${C_BOLD}|_|\\_\\___/|___/${C_RED}___| |_|${C_GREEN}  /_/ \\_\\___|_|\\_| |_| |___/${C_RESET}"
+  echo -e "\n${C_CYAN}${C_BOLD}============================================================================="
   echo '🤖  Kubernetes Agentic Harness (kube-agents) Zero-Friction Installer'
-  echo '============================================================================='
-  echo -e "${C_RESET}"
+  echo -e "=============================================================================${C_RESET}\n"
 }
 
 print_step() { echo -e "\n${C_MAGENTA}${C_BOLD}>>> $1 <<<${C_RESET}"; }
