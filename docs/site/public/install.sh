@@ -16,16 +16,16 @@ C_GREEN='\033[92m'
 C_YELLOW='\033[93m'
 C_MAGENTA='\033[95m'
 C_RED='\033[91m'
+C_BLUE='\033[94m'
 C_RESET='\033[0m'
 C_BOLD='\033[1m'
 
 print_banner() {
+  echo -e "  ${C_BLUE}${C_BOLD}_${C_RESET}  ${C_RED}${C_BOLD}___${C_RESET}   ${C_YELLOW}${C_BOLD}_${C_RESET} ${C_BLUE}${C_BOLD}___${C_RESET} ${C_GREEN}${C_BOLD}_____${C_RESET}   ${C_RED}${C_BOLD}_${C_RESET}   ${C_BLUE}${C_BOLD}___${C_RESET} ${C_RED}${C_BOLD}___${C_RESET} ${C_YELLOW}${C_BOLD}_  _${C_RESET} ${C_BLUE}${C_BOLD}_____${C_RESET} ${C_GREEN}${C_BOLD}___${C_RESET}"
+  echo -e " ${C_BLUE}${C_BOLD}| |/ /${C_RESET} ${C_RED}${C_BOLD}| | |${C_RESET} ${C_YELLOW}${C_BOLD}| _ )${C_RESET} ${C_BLUE}${C_BOLD}__\\${C_RESET} ${C_GREEN}${C_BOLD}\\ V /${C_RESET}  ${C_RED}${C_BOLD}/_\\${C_RESET} ${C_BLUE}${C_BOLD}/ __|${C_RESET} ${C_RED}${C_BOLD}\\| |${C_RESET} ${C_YELLOW}${C_BOLD}|_   _|${C_RESET} ${C_GREEN}${C_BOLD}/ __|${C_RESET}"
+  echo -e " ${C_BLUE}${C_BOLD}| ' <${C_RESET} ${C_RED}${C_BOLD}| |_| |${C_RESET} ${C_YELLOW}${C_BOLD}| _ \\${C_RESET} ${C_BLUE}${C_BOLD}_|${C_RESET}   ${C_GREEN}${C_BOLD}| |${C_RESET}  ${C_RED}${C_BOLD}/ _ \\${C_RESET} ${C_BLUE}${C_BOLD}| (_ |${C_RESET} ${C_RED}${C_BOLD}| .\` |${C_RESET} ${C_YELLOW}${C_BOLD}| |${C_RESET}  ${C_GREEN}${C_BOLD}\\__ \\${C_RESET}"
+  echo -e " ${C_BLUE}${C_BOLD}|_|\\_\\${C_RESET}${C_RED}${C_BOLD}\\___/${C_RESET} ${C_YELLOW}${C_BOLD}|___/${C_RESET}${C_BLUE}${C_BOLD}___|${C_RESET}  ${C_GREEN}${C_BOLD}|_|${C_RESET}  ${C_RED}${C_BOLD}/_/ \\_\\${C_RESET}${C_BLUE}${C_BOLD}\\___|${C_RESET}${C_RED}${C_BOLD}_|\\_|${C_RESET} ${C_YELLOW}${C_BOLD}|_|${C_RESET}  ${C_GREEN}${C_BOLD}|___/${C_RESET}"
   echo -e "${C_CYAN}${C_BOLD}"
-  printf '%s\n' '  _  ___   _ ___ _____   _   ___ ___ _  _ _____ ___ '
-  printf '%s\n' ' | |/ / | | | _ ) __\ \ / /  /_\ / __| \| |_   _/ __|'
-  printf '%s\n' " | ' <| |_| | _ \ _| \ V /  / _ \ (_ | .\` | | | \__ \\"
-  printf '%s\n' ' |_|\_\\___/|___/___| |_|  /_/ \_\___|_|\_| |_| |___/'
-  echo ''
   echo '============================================================================='
   echo '🤖  Kubernetes Agentic Harness (kube-agents) Zero-Friction Installer'
   echo '============================================================================='
