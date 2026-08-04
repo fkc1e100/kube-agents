@@ -629,6 +629,27 @@ EOF
   chmod +x "$vars_file"
   print_success "Configuration saved to: $vars_file"
 
+  # Pre-Flight Summary & Final Confirmation Checkpoint
+  print_step "10. Pre-Flight Configuration Summary"
+  echo -e "${C_BOLD}Please review your selections before provisioning begins:${C_RESET}"
+  echo -e "  • ${C_CYAN}GCP Target Project:${C_RESET} ${project_id} (Project Number: ${project_number:-unknown})"
+  echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${cluster_name} (${region}, type: ${cluster_type})"
+  echo -e "  • ${C_CYAN}Node Machine Spec:${C_RESET} ${machine_type} (${min_nodes}-${max_nodes} nodes, autoscaling: ${enable_autoscaling})"
+  echo -e "  • ${C_CYAN}gVisor Sandbox Isolation:${C_RESET} ${enable_gvisor}"
+  echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
+  echo -e "  • ${C_CYAN}Permission Boundary:${C_RESET} ${permission_set}"
+  if [ -n "$github_repo" ]; then
+    echo -e "  • ${C_CYAN}GitOps Infrastructure Repo:${C_RESET} https://github.com/${github_org}/${github_repo}"
+  fi
+
+  local confirm_choice=""
+  prompt_read "\nProceed with automated GKE cluster & Platform Agent provisioning? (Y/n)" confirm_choice "y"
+  if [[ ! "$confirm_choice" =~ ^[Yy]$ ]]; then
+    print_warning "Provisioning paused by user. Configuration saved to: $vars_file"
+    print_info "To launch provisioning later, run: ${C_BOLD}cd k8s-operator && make gcp-provision${C_RESET}"
+    exit 0
+  fi
+
   # 12. Execute Automated Provisioning
   print_step "11. Launching Automated GKE Provisioning Pipeline"
   print_info "Provisioning GCP APIs, GKE Cluster, cert-manager, Operator, LiteLLM gateway, and Platform Agent..."
