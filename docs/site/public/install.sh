@@ -10,24 +10,55 @@
 
 set -euo pipefail
 
-# ─── ANSI Colors & UI Helpers ──────────────────────────────────────────────────
-C_CYAN='\033[96m'
-C_GREEN='\033[92m'
-C_YELLOW='\033[93m'
-C_MAGENTA='\033[95m'
-C_RED='\033[91m'
-C_BLUE='\033[94m'
-C_RESET='\033[0m'
-C_BOLD='\033[1m'
+# ─── ANSI Colors & Terminal Responsive Helpers ─────────────────────────────────
+C_CYAN='\e[96m'
+C_GREEN='\e[92m'
+C_YELLOW='\e[93m'
+C_MAGENTA='\e[95m'
+C_RED='\e[91m'
+C_BLUE='\e[94m'
+C_RESET='\e[0m'
+C_BOLD='\e[1m'
+
+get_term_width() {
+  local cols
+  cols=$(tput cols 2>/dev/null || echo 80)
+  if ! [[ "$cols" =~ ^[0-9]+$ ]] || [ "$cols" -lt 40 ]; then
+    cols=80
+  fi
+  echo "$cols"
+}
+
+draw_separator() {
+  local width
+  width=$(get_term_width)
+  if [ "$width" -gt 75 ]; then
+    width=75
+  fi
+  printf '%*s' "$width" '' | tr ' ' '='
+}
 
 print_banner() {
-  echo -e "  ${C_BLUE}${C_BOLD}_  ___   _ ___ ${C_RED}_____   ${C_GREEN}_   ___ ___ _  _ _____ ___${C_RESET}"
-  echo -e " ${C_BLUE}${C_BOLD}| |/ / | | | _ )${C_RED} __\\ \\ / /${C_GREEN}  /_\\ / __| \\| |_   _/ __|${C_RESET}"
-  echo -e " ${C_BLUE}${C_BOLD}| ' <| |_| | _ \\${C_RED} _| \\ V /${C_GREEN}  / _ \\ (_ | .\` | | | \\__ \\${C_RESET}"
-  echo -e " ${C_BLUE}${C_BOLD}|_|\\_\\___/|___/${C_RED}___| |_|${C_GREEN}  /_/ \\_\\___|_|\\_| |_| |___/${C_RESET}"
-  echo -e "\n${C_CYAN}${C_BOLD}============================================================================="
-  echo '🤖  Kubernetes Agentic Harness (kube-agents) Zero-Friction Installer'
-  echo -e "=============================================================================${C_RESET}\n"
+  local term_w
+  term_w=$(get_term_width)
+
+  printf '%b\n' "${C_CYAN}${C_BOLD}"
+  draw_separator
+  printf '\n'
+
+  if [ "$term_w" -ge 60 ]; then
+    printf '%b\n' "  ${C_BLUE}${C_BOLD}_  ___   _ ___ ${C_RED}_____   ${C_GREEN}_   ___ ___ _  _ _____ ___${C_RESET}"
+    printf '%b\n' " ${C_BLUE}${C_BOLD}| |/ / | | | _ )${C_RED} __\\ \\ / /${C_GREEN}  /_\\ / __| \\| |_   _/ __|${C_RESET}"
+    printf '%b\n' " ${C_BLUE}${C_BOLD}| ' <| |_| | _ \\${C_RED} _| \\ V /${C_GREEN}  / _ \\ (_ | .\` | | | \\__ \\${C_RESET}"
+    printf '%b\n' " ${C_BLUE}${C_BOLD}|_|\\_\\___/|___/${C_RED}___| |_|${C_GREEN}  /_/ \\_\\___|_|\\_| |_| |___/${C_RESET}"
+    printf '\n'
+  else
+    printf '%b\n' "🤖 ${C_BOLD}KUBE-AGENTS PLATFORM HARNESS${C_RESET}\n"
+  fi
+
+  printf '%b\n' "${C_CYAN}${C_BOLD}🤖 Kubernetes Agentic Harness (kube-agents) Zero-Friction Installer"
+  draw_separator
+  printf '%b\n\n' "${C_RESET}"
 }
 
 print_step() { echo -e "\n${C_MAGENTA}${C_BOLD}>>> $1 <<<${C_RESET}"; }
