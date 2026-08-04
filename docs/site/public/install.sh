@@ -631,9 +631,11 @@ EOF
 
   # Pre-Flight Summary & Final Confirmation Checkpoint
   print_step "10. Pre-Flight Configuration Summary"
-  echo -e "${C_BOLD}Please review your selections before provisioning begins:${C_RESET}"
-  echo -e "  • ${C_CYAN}GCP Target Project:${C_RESET} ${project_id} (Project Number: ${project_number:-unknown})"
-  echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${cluster_name} (${region}, type: ${cluster_type})"
+  echo -e "${C_CYAN}${C_BOLD}"
+  draw_separator
+  echo -e "${C_RESET}${C_BOLD}Please review your selections before provisioning begins:${C_RESET}"
+  echo -e "  • ${C_CYAN}GCP Target Project:${C_RESET} ${C_BOLD}${project_id}${C_RESET} (Project Number: ${project_number:-unknown})"
+  echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${C_BOLD}${cluster_name}${C_RESET} (${region}, type: ${cluster_type})"
   echo -e "  • ${C_CYAN}Node Machine Spec:${C_RESET} ${machine_type} (${min_nodes}-${max_nodes} nodes, autoscaling: ${enable_autoscaling})"
   echo -e "  • ${C_CYAN}gVisor Sandbox Isolation:${C_RESET} ${enable_gvisor}"
   echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
@@ -641,6 +643,9 @@ EOF
   if [ -n "$github_repo" ]; then
     echo -e "  • ${C_CYAN}GitOps Infrastructure Repo:${C_RESET} https://github.com/${github_org}/${github_repo}"
   fi
+  echo -e "${C_CYAN}${C_BOLD}"
+  draw_separator
+  echo -e "${C_RESET}"
 
   local confirm_choice=""
   prompt_read "\nProceed with automated GKE cluster & Platform Agent provisioning? (Y/n)" confirm_choice "y"
