@@ -185,9 +185,9 @@ prompt_read() {
   fi
 
   if [ -n "$default_val" ]; then
-    prompt_text="$prompt_text [default: ${C_BOLD}$default_val${C_RESET}]: "
+    prompt_text="$prompt_text [default: ${C_BOLD}$default_val${C_RESET}, 'b' for back]: "
   else
-    prompt_text="$prompt_text: "
+    prompt_text="$prompt_text ['b' for back]: "
   fi
 
   echo -ne "${C_CYAN}${prompt_text}${C_RESET}" >/dev/tty
@@ -200,7 +200,10 @@ prompt_read() {
     read -r input_val </dev/tty
   fi
 
-  if [ -z "$input_val" ] && [ -n "$default_val" ]; then
+  if [ "$input_val" = "b" ] || [ "$input_val" = "back" ] || [ "$input_val" = "0" ]; then
+    eval "$var_name=\"BACK\""
+    return 10
+  elif [ -z "$input_val" ] && [ -n "$default_val" ]; then
     eval "$var_name=\"$default_val\""
   else
     eval "$var_name=\"$input_val\""
@@ -225,15 +228,21 @@ prompt_menu() {
   for i in "${!options[@]}"; do
     echo -e "  ${C_YELLOW}$((i+1)))${C_RESET} ${options[$i]}" >/dev/tty
   done
+  echo -e "  ${C_YELLOW}b)${C_RESET} Go back to previous step" >/dev/tty
 
   local choice=""
   while true; do
     prompt_read "Select an option (1-${#options[@]})" choice "1"
+    local ret_code=$?
+    if [ $ret_code -eq 10 ] || [ "$choice" = "BACK" ]; then
+      eval "$var_name=\"BACK\""
+      return 10
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
       eval "$var_name=\"$choice\""
       break
     else
-      print_error "Invalid selection. Please enter a number between 1 and ${#options[@]}." >/dev/tty
+      print_error "Invalid selection. Please enter a number between 1 and ${#options[@]} or 'b' to go back." >/dev/tty
     fi
   done
 }
@@ -437,8 +446,12 @@ main() {
   # 5. GKE Cluster Selection & Provisioning Strategy
   print_step "4. GKE Cluster Topology & Capacity Setup"
   local cluster_choice=""
-  if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-    cluster_choice="1"
+  if [ "$PARAM_NON_INTERACTIVE" = "true" ] || [ -n "$PARAM_CLUSTER_NAME" ]; then
+    if [ -n "$PARAM_CLUSTER_NAME" ]; then
+      cluster_choice="2"
+    else
+      cluster_choice="1"
+    fi
   else
     prompt_menu "How would you like to handle the GKE Cluster?" \
       "Provision a NEW GKE Cluster from scratch (Recommended)" \
@@ -455,7 +468,7 @@ main() {
   local enable_autoscaling="${PARAM_ENABLE_AUTOSCALING:-true}"
 
   if [ "$cluster_choice" = "1" ]; then
-    if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
+    if [ "$PARAM_NON_INTERACTIVE" != "true" ] && [ -z "$PARAM_CLUSTER_NAME" ]; then
       local size_choice=""
       prompt_menu "Select GKE Cluster Size & Machine Spec:" \
         "Small Standard (e2-standard-4, 1-3 nodes, Autoscaling enabled)" \
@@ -476,32 +489,36 @@ main() {
       prompt_read "New GKE Cluster Name" cluster_name "kube-agents-platform"
     fi
   else
-    # Auto-discover existing clusters
-    print_info "Querying existing GKE clusters in project '$project_id'..."
-    local cluster_lines=""
-    cluster_lines=$(gcloud container clusters list --project="$project_id" --format="value(name,location)" 2>/dev/null || echo "")
+    if [ -n "$PARAM_CLUSTER_NAME" ]; then
+      cluster_name="$PARAM_CLUSTER_NAME"
+    else
+      # Auto-discover existing clusters
+      print_info "Querying existing GKE clusters in project '$project_id'..."
+      local cluster_lines=""
+      cluster_lines=$(gcloud container clusters list --project="$project_id" --format="value(name,location)" 2>/dev/null || echo "")
 
-    if [ -n "$cluster_lines" ]; then
-      local cluster_opts=()
-      local cluster_names=()
-      while IFS=$'\t' read -r c_name c_loc; do
-        if [ -n "$c_name" ]; then
-          cluster_names+=("$c_name")
-          cluster_opts+=("$c_name (location: $c_loc)")
+      if [ -n "$cluster_lines" ]; then
+        local cluster_opts=()
+        local cluster_names=()
+        while IFS=$'\t' read -r c_name c_loc; do
+          if [ -n "$c_name" ]; then
+            cluster_names+=("$c_name")
+            cluster_opts+=("$c_name (location: $c_loc)")
+          fi
+        done <<< "$cluster_lines"
+        cluster_opts+=("Type an unlisted cluster name manually")
+
+        local c_choice=""
+        prompt_menu "Select existing GKE cluster:" "${cluster_opts[@]}" c_choice
+        if [ "$c_choice" -le "${#cluster_names[@]}" ]; then
+          cluster_name="${cluster_names[$((c_choice-1))]}"
+        else
+          prompt_read "Existing GKE Cluster Name" cluster_name "platform-agent-host"
         fi
-      done <<< "$cluster_lines"
-      cluster_opts+=("Type an unlisted cluster name manually")
-
-      local c_choice=""
-      prompt_menu "Select existing GKE cluster:" "${cluster_opts[@]}" c_choice
-      if [ "$c_choice" -le "${#cluster_names[@]}" ]; then
-        cluster_name="${cluster_names[$((c_choice-1))]}"
       else
+        print_warning "No existing GKE clusters found in project '$project_id'."
         prompt_read "Existing GKE Cluster Name" cluster_name "platform-agent-host"
       fi
-    else
-      print_warning "No existing GKE clusters found in project '$project_id'."
-      prompt_read "Existing GKE Cluster Name" cluster_name "platform-agent-host"
     fi
   fi
   print_success "Selected Cluster Name: ${C_BOLD}${cluster_name}${C_RESET}"
@@ -509,7 +526,7 @@ main() {
   # 6. Chat & Messaging Platform Integration
   print_step "5. Chat & Messaging Integrations Setup"
   local chat_choice=""
-  if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
+  if [ "$PARAM_NON_INTERACTIVE" = "true" ] || [ "${PARAM_ENABLE_GOOGLE_CHAT:-false}" = "true" ]; then
     if [ "${PARAM_ENABLE_GOOGLE_CHAT:-false}" = "true" ]; then
       chat_choice="1"
     else
