@@ -70,7 +70,7 @@ execute_cluster() {
     print_info "Creating GKE Standard Cluster '$CLUSTER_NAME' (Type: $machine_type, Autoscaling: $enable_autoscaling [$min_nodes..$max_nodes])..."
     print_info "⏱  Estimated Duration: ~3-5 minutes (Phase 1: Control Plane ~2m | Phase 2: Node Pool ~2m)."
     local create_cmd=(
-      gcloud beta container clusters create "$CLUSTER_NAME"
+      gcloud container clusters create "$CLUSTER_NAME"
       --region "$REGION"
       --machine-type="$machine_type"
       --num-nodes="$num_nodes"
