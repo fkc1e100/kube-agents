@@ -196,14 +196,23 @@ prompt_read() {
     prompt_text="$prompt_text ['b' for back]: "
   fi
 
-  echo -ne "${C_CYAN}${prompt_text}${C_RESET}" >/dev/tty
-
   local input_val=""
-  if [ "$secret_mode" = "true" ]; then
-    read -r -s input_val </dev/tty
-    echo "" >/dev/tty
+  if [ -t 0 ]; then
+    echo -ne "${C_CYAN}${prompt_text}${C_RESET}" >/dev/tty
+    if [ "$secret_mode" = "true" ]; then
+      read -r -s input_val </dev/tty
+      echo "" >/dev/tty
+    else
+      read -r input_val </dev/tty
+    fi
   else
-    read -r input_val </dev/tty
+    echo -ne "${C_CYAN}${prompt_text}${C_RESET}"
+    if [ "$secret_mode" = "true" ]; then
+      read -r -s input_val
+      echo ""
+    else
+      read -r input_val
+    fi
   fi
 
   if [ "$input_val" = "b" ] || [ "$input_val" = "back" ] || [ "$input_val" = "0" ]; then
@@ -223,18 +232,26 @@ prompt_menu() {
   local var_name="${options[${#options[@]}-1]}"
   unset 'options[${#options[@]}-1]'
 
-  if [ "$PARAM_NON_INTERACTIVE" = "true" ] || [ ! -c /dev/tty ]; then
+  if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
     local current_choice="${!var_name:-1}"
     eval "$var_name=\"$current_choice\""
     print_info "Auto-selected option ($var_name): $current_choice"
     return 0
   fi
 
-  echo -e "\n${C_BOLD}$prompt_text${C_RESET}" >/dev/tty
-  for i in "${!options[@]}"; do
-    echo -e "  ${C_YELLOW}$((i+1)))${C_RESET} ${options[$i]}" >/dev/tty
-  done
-  echo -e "  ${C_YELLOW}b)${C_RESET} Go back to previous step" >/dev/tty
+  if [ -t 0 ]; then
+    echo -e "\n${C_BOLD}$prompt_text${C_RESET}" >/dev/tty
+    for i in "${!options[@]}"; do
+      echo -e "  ${C_YELLOW}$((i+1)))${C_RESET} ${options[$i]}" >/dev/tty
+    done
+    echo -e "  ${C_YELLOW}b)${C_RESET} Go back to previous step" >/dev/tty
+  else
+    echo -e "\n${C_BOLD}$prompt_text${C_RESET}"
+    for i in "${!options[@]}"; do
+      echo -e "  ${C_YELLOW}$((i+1)))${C_RESET} ${options[$i]}"
+    done
+    echo -e "  ${C_YELLOW}b)${C_RESET} Go back to previous step"
+  fi
 
   local choice=""
   while true; do
