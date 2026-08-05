@@ -192,7 +192,7 @@ init_var() {
   local current_val="${!var_name:-}"
   if [ -z "$current_val" ]; then
     local final_val
-    if [ "${DRY_RUN:-0}" -eq 1 ] || is_ci_pipeline; then
+    if is_non_interactive; then
       final_val="$default_val"
     else
       echo -ne "  ${C_CYAN}${prompt_msg} [${C_WHITE}${default_val}${C_CYAN}]: ${C_RESET}"
