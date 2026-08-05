@@ -2,6 +2,7 @@ name: Installer Cross-OS Validation Matrix
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
     paths:
       - "install.sh"
       - "uninstall.sh"
