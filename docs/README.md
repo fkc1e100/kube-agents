@@ -14,7 +14,7 @@ editing any doc.
 
 ## 1. Directory overview
 
-The repository tracks **142** `.md`/`.mdx` documents outside the root-level
+The repository tracks **143** `.md`/`.mdx` documents outside the root-level
 dot-directories — `docs-check-map` verifies this total against `git ls-files`
 and fails CI when it drifts. Dot-directories at the repository root
 (`.agents/`, `.github/`, `.claude/`) hold tooling — review skills, PR
@@ -230,6 +230,7 @@ only what the title does not say.
 | `concepts/inference-gateway.md`            | Site page | Model access as a config toggle: LiteLLM for hosted models, vLLM for local, optional replay caching.                                     | Provider choice, replay modes                                  | —                                                                         |
 | `concepts/observability.md`                | Site page | OTel traces, Prometheus metrics, and Cloud Logging routing for agent and gateway.                                                        | Exports per component, console links, tool-call audit          | —                                                                         |
 | `install/quickstart-gke.mdx`               | Site page | One-command bootstrap of cluster, operator, and Platform Agent; what just happened; common flags.                                        | `provision.sh`, toggles, uninstall pointer                     | —                                                                         |
+| `install/guided-tour.mdx`                  | Site page | Visual walkthroughs of the interactive installer, step-back navigation, and the raspi-config style Day-2 Control Panel with video demos. | Video demos, interactive installer, control panel, Web UI toggling | —                                                                         |
 | `install/prerequisites.md`                 | Site page | What must be in place before provisioning: tooling, GCP project, cert-manager, chat platform, LLM credentials.                           | Prerequisites                                                  | —                                                                         |
 | `install/manual.md`                        | Site page | Installing the Platform Agent workspace into an existing Hermes-compatible harness by hand.                                              | Copy workspace, register, wire infra                           | —                                                                         |
 | `install/helm-and-kind.md`                 | Site page | States that neither a Helm chart nor a Kind-based local install ships today, and what to use instead.                                    | Non-goals                                                      | —                                                                         |

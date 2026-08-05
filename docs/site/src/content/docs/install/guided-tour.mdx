@@ -1,0 +1,72 @@
+---
+title: Guided Tour & Terminal Demos
+description: Visual walkthroughs of the interactive installer, step-back navigation, and the raspi-config style Day-2 Control Panel.
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+This page provides video walkthroughs and terminal demonstrations of the `kube-agents` Zero-Friction Installer (`install.sh`) and Day-2 Control Panel (`install.sh --menu`).
+
+---
+
+## 🟢 1. Interactive Setup Wizard (`./install.sh`)
+
+The interactive setup wizard auto-discovers your local environment, GCP authentication, and active GKE clusters. If you make a selection error, type **`b`** or **`back`** at any prompt to step back without restarting!
+
+![Interactive Setup Wizard Demo](/kube-agents/demos/interactive_wizard_demo.webp)
+
+<Aside type="tip">
+  You can run the interactive setup wizard directly via `curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash`.
+</Aside>
+
+---
+
+## 🟡 2. Day-2 Control Panel — Enabling Web UI (`./install.sh --menu`)
+
+Running `./install.sh --menu` launches an interactive control panel (modelled after Raspberry Pi's `raspi-config`). It displays active cluster state and lets you toggle features live in ~15 seconds.
+
+![Day-2 Control Panel Enabling Web UI](/kube-agents/demos/control_panel_demo.webp)
+
+<Steps>
+
+1. **Launch Menu**: Run `./install.sh --menu` on any active cluster.
+2. **Toggle Feature**: Press `1` to toggle Hermes Web UI (Port 9119 Dashboard) between `ENABLED` and `DISABLED`.
+3. **Save & Apply**: Press `6` to re-apply `platform-agent.yaml` to GKE in 15 seconds without downtime.
+
+</Steps>
+
+---
+
+## 🔵 3. Non-Interactive Automated CI/CD Setup (`./install.sh -y`)
+
+For GitHub Actions workflows or automated AI Agent execution, pass `-y` / `--non-interactive` with CLI parameters:
+
+![Non-Interactive Automated CI/CD Setup](/kube-agents/demos/non_interactive_demo.webp)
+
+```bash
+./install.sh \
+  --non-interactive \
+  --project-id="gca-gke-2025" \
+  --cluster-name="kcc-dash-dont-delete" \
+  --enable-web-ui=true
+```
+
+---
+
+## 🟣 4. Day-2 Control Panel — Updating Chat Integrations
+
+Add user permissions (`sre-team@google.com`) or update Google Chat / Slack settings on live clusters without re-entering GCP configuration:
+
+![Updating Chat Integrations](/kube-agents/demos/update_chat_demo.webp)
+
+---
+
+## 🔴 5. Day-2 Control Panel — Disabling Web UI for Hardening
+
+When debugging is complete, turn OFF the Web UI dashboard to harden the container attack surface:
+
+![Disabling Web UI Security Hardening](/kube-agents/demos/disable_webui_demo.webp)
+
+<Aside type="caution">
+  Disabling the Web UI removes the `platform-agent-dashboard` container and port `9119` from the pod spec, saving container memory and reducing attack surface.
+</Aside>
