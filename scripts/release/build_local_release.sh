@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Local Release Builder & Verification Script for kube-agents
-TAG_NAME="${1:-v0.22.0}"
+TAG_NAME="${1:-v0.1.0}"
 VERSION_NUM="${TAG_NAME#v}"
 BUNDLE_PREFIX="kube-agents-${TAG_NAME}"
 REPO_ROOT="$(pwd)"

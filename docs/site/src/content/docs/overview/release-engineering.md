@@ -13,7 +13,7 @@ This document describes the release engineering architecture, versioning guarant
 
 `kube-agents` strictly follows **Semantic Versioning 2.0.0**:
 
-- **Pre-1.0 Era (`v0.X.Y`)**: Weekly minor releases (`v0.21.0`, `v0.22.0`) during active feature development. Patch releases (`v0.22.1`) for critical hotfixes.
+- **Pre-1.0 Era (`v0.X.Y`)**: Weekly minor releases (`v0.1.0`, `v0.2.0`) starting from initial version `v0.1.0` during active feature development. Patch releases (`v0.1.1`) for critical hotfixes.
 - **1.0+ GA Era (`v1.X.Y`)**:
   - `X` (Major): Breaking changes to Custom Resource Definitions (CRDs), CLI flags, or agent API protocols.
   - `Y` (Minor): Backward-compatible new capabilities, agent skills, and operator features.
