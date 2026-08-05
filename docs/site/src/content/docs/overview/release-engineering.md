@@ -77,8 +77,9 @@ flowchart TD
     D -->|FAIL| F["Abort Release & Notify Maintainers"]
 ```
 
-1. **Gate 1: Static & Code Verification (`gate-1-static-build-verification`)**:
+1. **Gate 1: Static, Security & Code Verification (`gate-1-static-build-verification`)**:
    - Operator Go unit tests (`go test ./...` in `k8s-operator/`).
+   - Google OSV Vulnerability Scanner (`google/osv-scanner-action`) checking dependencies against the Open Source Vulnerability database.
    - `shellcheck` for all shell scripts (`install.sh`, `uninstall.sh`, `upgrade.sh`).
    - Repository structure validation (`make validate`) and link checks (`make docs-check`).
 2. **Gate 2: Container & Helm Packaging Verification (`gate-2-packaging-verification`)**:
@@ -97,10 +98,12 @@ flowchart TD
 When a bug or regression is discovered in a release (e.g. `v0.22.0`) that requires an immediate fix without introducing new functionality:
 
 ### Semantic Patch Rules
+
 - **Increment Patch Digit**: Move from `v0.22.0` to **`v0.22.1`**.
 - **Zero New Features**: Patch releases must contain **only the isolated bug fix** (`fix: ...`) to guarantee zero risk of secondary regressions.
 
 ### Hotfix Git & Release Workflow
+
 1. **Submit Bugfix PR**: Merge the bug fix into `main` with Conventional Commit prefix `fix:`.
 2. **Tag Patch Release**: Create and push the patch tag:
    ```bash
