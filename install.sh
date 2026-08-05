@@ -708,6 +708,16 @@ main() {
     if [ "$gvisor_choice" = "2" ]; then
       enable_gvisor="true"
     fi
+
+    local webui_choice=""
+    prompt_menu "Enable Hermes Web UI (Port 9119 Dashboard) for Agent Observability?" \
+      "No - Disabled for reduced attack surface (Default)" \
+      "Yes - Enabled for local browser debugging (port 9119)" \
+      webui_choice
+
+    if [ "$webui_choice" = "2" ]; then
+      PARAM_ENABLE_WEBUI="true"
+    fi
   fi
 
   # 10. Repository Cloning & Execution Context
