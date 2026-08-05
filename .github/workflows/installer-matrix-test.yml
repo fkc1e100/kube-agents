@@ -51,3 +51,15 @@ jobs:
       - name: Validate Dry-Run Upgrade (Non-Interactive)
         run: |
           ./upgrade.sh --dry-run -y --upgrade-mode=skills
+
+      - name: Create Ephemeral Kind Kubernetes Cluster (Linux)
+        if: runner.os == 'Linux'
+        uses: helm/kind-action@0025e7512861e65337e72ab66e3abce2327de800 # v1.10.0
+        with:
+          cluster_name: kube-agents-ci
+
+      - name: Validate Live Kind Kubernetes API Context
+        if: runner.os == 'Linux'
+        run: |
+          kubectl get nodes
+          kubectl cluster-info
