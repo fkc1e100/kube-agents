@@ -22,17 +22,18 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
           echo "PR #${PR_NUMBER} was merged into main without an explicit milestone."
 
           # Fetch active open milestones sorted by due date or title
-          MILESTONE_TITLE=$(gh api "repos/${{ github.repository }}/milestones?state=open&sort=due_on&direction=asc" --jq '.[0].title // empty')
+          MILESTONE_TITLE=$(gh api "repos/${REPO}/milestones?state=open&sort=due_on&direction=asc" --jq '.[0].title // empty')
 
           if [ -z "${MILESTONE_TITLE}" ]; then
-            echo "No open GitHub Milestones found for repository ${{ github.repository }}. Skipping auto-assignment."
+            echo "No open GitHub Milestones found for repository ${REPO}. Skipping auto-assignment."
             exit 0
           fi
 
           echo "Assigning active release milestone '${MILESTONE_TITLE}' to PR #${PR_NUMBER}..."
-          gh pr edit "${PR_NUMBER}" --repo "${{ github.repository }}" --milestone "${MILESTONE_TITLE}"
+          gh pr edit "${PR_NUMBER}" --repo "${REPO}" --milestone "${MILESTONE_TITLE}"
           echo "Successfully assigned milestone '${MILESTONE_TITLE}' to PR #${PR_NUMBER}!"
