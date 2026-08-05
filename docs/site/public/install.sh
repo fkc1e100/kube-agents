@@ -67,7 +67,7 @@ Flags for AI Agents & Automation:
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
   --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
   --reset, --factory-reset      Uninstall resources and reset repository to clean factory default state
-  -h, --help                    Show this help message
+  -h, --help, -?                Show this help message
 EOF
 }
 
@@ -92,7 +92,7 @@ parse_args() {
       --permission-set=*) PARAM_PERMISSION_SET="${1#*=}"; shift ;;
       --gvisor=*) PARAM_ENABLE_GVISOR="${1#*=}"; shift ;;
       --enable-google-chat|--google-chat) PARAM_ENABLE_GOOGLE_CHAT="true"; shift ;;
-      -h|--help) show_help; exit 0 ;;
+      -h|--help|-\?|help) show_help; exit 0 ;;
       *) shift ;;
     esac
   done
