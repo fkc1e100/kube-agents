@@ -90,8 +90,8 @@ cleanup() { tput cnorm 2>/dev/null || true; }
 trap cleanup EXIT
 
 # ─── Universal Argument Parsing ──────────────────────────────────────────────
-DRY_RUN=0
-NO_CONFIRM=0
+DRY_RUN="${DRY_RUN:-0}"
+NO_CONFIRM="${NO_CONFIRM:-0}"
 for arg in "$@"; do
   case $arg in
     --dry-run) DRY_RUN=1 ;;
