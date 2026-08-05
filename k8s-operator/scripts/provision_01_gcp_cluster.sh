@@ -60,13 +60,15 @@ execute_cluster() {
   local enable_autoscaling="${ENABLE_AUTOSCALING:-true}"
 
   if [ "$cluster_type" = "autopilot" ]; then
-    print_info "Creating GKE Autopilot Cluster '$CLUSTER_NAME'. This takes approximately 5-8 minutes..."
+    print_info "Creating GKE Autopilot Cluster '$CLUSTER_NAME'..."
+    print_info "⏱  Estimated Duration: ~5-8 minutes (GCP managed control plane & node auto-provisioning)."
     gcloud container clusters create-auto "$CLUSTER_NAME" \
         --region "$REGION" \
         --project "$PROJECT_ID" \
         --quiet
   else
     print_info "Creating GKE Standard Cluster '$CLUSTER_NAME' (Type: $machine_type, Autoscaling: $enable_autoscaling [$min_nodes..$max_nodes])..."
+    print_info "⏱  Estimated Duration: ~3-5 minutes (Phase 1: Control Plane ~2m | Phase 2: Node Pool ~2m)."
     local create_cmd=(
       gcloud beta container clusters create "$CLUSTER_NAME"
       --region "$REGION"
