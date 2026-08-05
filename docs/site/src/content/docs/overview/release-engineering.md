@@ -99,25 +99,25 @@ flowchart TD
 
 ---
 
-## 6. Enterprise & Regulated Industry Compliance
+## 6. Enterprise Air-Gapped & Security Governance
 
-For enterprise customers in highly regulated industries (Financial Services, Healthcare, FedRAMP, Defense) with strict InfoSec and air-gapped network policies:
+For enterprise deployments with strict InfoSec policies or air-gapped network environments:
 
 ### A. Air-Gapped Private Registry Support
 
-Regulated clusters blocking outbound internet traffic (`ghcr.io`) can mirror all container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-override` flag during installation and upgrade:
+Clusters blocking outbound internet traffic (`ghcr.io`) can mirror container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-override` flag during installation and upgrade:
 
 ```bash
-./install.sh --registry-override="us-docker.pkg.dev/my-bank-registry/kube-agents"
+./install.sh --registry-override="us-docker.pkg.dev/my-company-registry/kube-agents"
 ```
 
-### B. Software Bill of Materials (SBOM) & Executive Order 14028
+### B. Software Bill of Materials (SBOM)
 
-Every official release publishes a machine-readable **SPDX SBOM** (`kube-agents-v0.22.0.spdx.json`) detailing all Go modules, system packages, and open-source licenses for security vulnerability and license compliance auditing.
+Every official release publishes a machine-readable **SPDX SBOM** (`kube-agents-v0.22.0.spdx.json`) detailing all Go modules, system packages, and open-source licenses for security vulnerability and license auditing.
 
-### C. GitOps Pipeline Compatibility (No `curl | bash`)
+### C. Declarative GitOps Compatibility
 
-Regulated InfoSec policies banning raw `curl | bash` shell script execution in production can deploy via declarative **Helm Charts** (`charts/kube-agents`) or **Terraform Modules** (`terraform/`) wired directly into ArgoCD or Flux GitOps pipelines.
+Environments restricting raw shell script execution in production can deploy via declarative **Helm Charts** (`charts/kube-agents`) or **Terraform Modules** (`terraform/`) wired directly into ArgoCD or Flux GitOps pipelines.
 
 ---
 
