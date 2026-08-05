@@ -1,31 +1,31 @@
 changelog:
   categories:
-    - title: "🚀 Features & Capabilities"
+    - title: "Features & Capabilities"
       labels:
         - "feature"
         - "enhancement"
       keywords:
         - "feat"
         - "feature"
-    - title: "🐛 Bug Fixes & Stability"
+    - title: "Bug Fixes & Stability"
       labels:
         - "bug"
         - "fix"
       keywords:
         - "fix"
         - "bugfix"
-    - title: "🛡️ Security & Hardening"
+    - title: "Security & Hardening"
       labels:
         - "security"
       keywords:
         - "sec"
         - "security"
-    - title: "📚 Documentation & Demos"
+    - title: "Documentation & Demos"
       labels:
         - "documentation"
       keywords:
         - "docs"
-    - title: "⚙️ Infrastructure & Maintenance"
+    - title: "Infrastructure & Maintenance"
       labels:
         - "maintenance"
         - "ci"
