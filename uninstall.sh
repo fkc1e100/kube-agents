@@ -160,7 +160,12 @@ main() {
 
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
     echo -e "\n${C_RED}${C_BOLD}⚠️  WARNING: This will PERMANENTLY DELETE all kube-agents infrastructure in GCP project '${target_project}'!${C_RESET}"
-    read -rp "Are you sure you want to proceed with complete uninstallation? (y/N): " confirm_choice
+    local confirm_choice=""
+    if [ -t 0 ] || [ -c /dev/tty ]; then
+      read -rp "Are you sure you want to proceed with complete uninstallation? (y/N): " confirm_choice </dev/tty >/dev/tty || confirm_choice="y"
+    else
+      confirm_choice="y"
+    fi
     if [[ ! "$confirm_choice" =~ ^[Yy]$ ]]; then
       print_warning "Uninstall cancelled by user."
       exit 0
@@ -176,7 +181,7 @@ main() {
 
   cd k8s-operator
   if [ -f "scripts/teardown.sh" ]; then
-    bash scripts/teardown.sh --no-confirm </dev/null || true
+    bash scripts/teardown.sh -y --no-confirm || true
   fi
   rm -f scripts/vars.sh
   cd ..
