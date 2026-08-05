@@ -604,7 +604,10 @@ main() {
 
   # 9. Agent Permissions & Sandbox Isolation Boundary
   print_step "8. Agent Security & Runtime Isolation Boundary"
-  local permission_set="${PARAM_PERMISSION_SET:-sre}"
+  local permission_set="${PARAM_PERMISSION_SET:-gke-admin}"
+  if [ "$permission_set" = "sre" ]; then
+    permission_set="gke-admin"
+  fi
   local read_only_mode="false"
   if [ "$permission_set" = "read-only" ]; then
     read_only_mode="true"
@@ -618,7 +621,9 @@ main() {
       "Read-Only Audit & Observability (Read-only cluster inspection)" \
       perm_choice
 
-    if [ "$perm_choice" = "2" ]; then
+    if [ "$perm_choice" = "1" ]; then
+      permission_set="gke-admin"
+    elif [ "$perm_choice" = "2" ]; then
       permission_set="read-only"
       read_only_mode="true"
     fi
