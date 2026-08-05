@@ -1,0 +1,53 @@
+name: Installer Cross-OS Validation Matrix
+
+on:
+  pull_request:
+    paths:
+      - "install.sh"
+      - "uninstall.sh"
+      - "upgrade.sh"
+      - ".github/workflows/installer-matrix-test.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-installer:
+    name: Validate Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install shellcheck (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Install shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck || true
+
+      - name: Run shellcheck static analysis
+        run: |
+          shellcheck install.sh
+          shellcheck uninstall.sh
+          shellcheck upgrade.sh
+
+      - name: Validate Dry-Run Installer (Non-Interactive)
+        run: |
+          ./install.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1"
+
+      - name: Validate Dry-Run Teardown (Non-Interactive)
+        run: |
+          ./uninstall.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1"
+
+      - name: Validate Dry-Run Upgrade (Non-Interactive)
+        run: |
+          ./upgrade.sh --dry-run -y --upgrade-mode=skills
