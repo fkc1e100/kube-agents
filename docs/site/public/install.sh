@@ -60,6 +60,7 @@ PARAM_GITOPS_ORG="${GITHUB_ORG:-}"
 PARAM_GITOPS_REPO="${GITHUB_REPO:-}"
 PARAM_PERMISSION_SET="${PLATFORM_AGENT_PERMISSION_SET:-sre}"
 PARAM_ENABLE_GVISOR="${ENABLE_GVISOR:-false}"
+PARAM_ENABLE_WEBUI="${ENABLE_WEBUI:-false}"
 
 show_help() {
   cat << EOF
@@ -84,6 +85,7 @@ Flags for AI Agents & Automation:
   --gitops-repo=REPO            GitOps IaC Repository Name (default: gke-fleet-iac)
   --permission-set=SET          Agent permission boundary: sre | read-only (default: sre)
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
+  --enable-web-ui=true|false    Enable Hermes Web UI port 9119 dashboard (default: false)
   --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
   --reset, --factory-reset      Uninstall resources and reset repository to clean factory default state
   -h, --help, -?                Show this help message
@@ -110,6 +112,8 @@ parse_args() {
       --gitops-repo=*) PARAM_GITOPS_REPO="${1#*=}"; shift ;;
       --permission-set=*) PARAM_PERMISSION_SET="${1#*=}"; shift ;;
       --gvisor=*) PARAM_ENABLE_GVISOR="${1#*=}"; shift ;;
+      --enable-web-ui=*|--enable-webui=*|--webui=*) PARAM_ENABLE_WEBUI="${1#*=}"; shift ;;
+      --enable-web-ui|--enable-webui|--webui) PARAM_ENABLE_WEBUI="true"; shift ;;
       --enable-google-chat|--google-chat) PARAM_ENABLE_GOOGLE_CHAT="true"; shift ;;
       -h|--help|-\?|help) show_help; exit 0 ;;
       *) shift ;;
@@ -771,6 +775,7 @@ export GITHUB_TOKEN="${github_token}"
 export MEMORY_ENABLED="false"
 export MEMORY_PROVIDER="multiuser_memory"
 export USER_PROFILE_ENABLED="false"
+export HERMES_DASHBOARD_ENABLED="${PARAM_ENABLE_WEBUI:-false}"
 export IMAGE_TAG="latest"
 export REGISTRY_PREFIX="${registry_prefix}"
 export OPERATOR_IMAGE="${registry_prefix}/k8s-operator"
