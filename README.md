@@ -28,6 +28,19 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash
 
 This interactive installer guides you through GCP authentication, project selection, GKE cluster options (Autopilot or Standard with autoscaling), chat integrations (Google Chat & Slack), and LLM model provider credentials.
 
+### 🤖 AI Agent & Automation Usage
+
+AI Agents and CI/CD pipelines can invoke `install.sh` non-interactively using CLI flags or `--dry-run` inspection:
+
+```bash
+curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
+  --non-interactive \
+  --project-id="my-gcp-project" \
+  --cluster-name="platform-agent" \
+  --model-provider="gemini" \
+  --permission-set="sre"
+```
+
 Or delegate setup directly to your AI coding agent:
 
 ```text

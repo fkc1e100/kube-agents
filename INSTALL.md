@@ -50,6 +50,25 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash
 - **GCP Project & Region Selection**: Auto-detects active project and prompts for confirmation.
 - **GKE Cluster Provisioning Options**:
   - **New Cluster**: Select from **GKE Autopilot**, or **GKE Standard** (Small, Medium, Large) with node pool autoscaling.
+
+### Non-Interactive & AI Agent Execution Mode
+
+AI Agent harnesses and automated CI scripts can execute `install.sh` without interactive prompts:
+
+```bash
+curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
+  --non-interactive \
+  --project-id="my-gcp-project" \
+  --cluster-name="platform-agent" \
+  --model-provider="gemini" \
+  --permission-set="sre"
+```
+
+To run pre-flight checks and output configuration state (`vars.sh` and `/tmp/kube-agents-install-report.json`) without creating cloud resources:
+
+```bash
+./install.sh --dry-run --non-interactive --project-id="my-gcp-project"
+```
   - **Existing Cluster**: Select an existing GKE cluster from your GCP project.
 - **Chat Integrations Setup**:
   - Configures **Google Chat** (Pub/Sub endpoint, allowed user permissions) and/or **Slack** (Socket Mode Bot Token / App Token).
