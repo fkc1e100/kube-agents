@@ -84,13 +84,14 @@ Before pushing, run the checks CI enforces:
 - Every issue, PR, and bug fix belongs to a **GitHub Milestone** (e.g. `v0.22.0`).
 - Use GitHub Milestones to communicate feature availability to customers (_"Upgrade to `v0.22.0` for feature X"_).
 
-### Automated Release Artifacts
+### 3-Gate Release Verification Pipeline
 
-Pushing a release tag (`v0.22.0`) triggers `.github/workflows/release-build-publish.yml` to automatically:
+Pushing a release tag (`v0.22.0`) triggers `.github/workflows/release-build-publish.yml` which enforces 3 sequential release gates before publishing official assets:
 
-- Build and publish container images (`ghcr.io/gke-labs/kube-agents/*:v0.22.0`).
-- Package and publish Helm charts (`charts/kube-agents`).
-- Generate categorized release notes grouped by Conventional Commits (`feat`, `fix`, `sec`).
+1. **Gate 1 (Static & Code Verification)**: Runs `make validate`, `make docs-check`, `shellcheck`, and Go unit tests (`k8s-operator`).
+2. **Gate 2 (Packaging Verification)**: Lints Helm charts (`charts/kube-agents`), validates `helm template` rendering, and packages chart tarballs (`*.tgz`).
+3. **Gate 3 (Ephemeral E2E Smoke Tests)**: Provisions an ephemeral `Kind` Kubernetes cluster inside CI to validate installer, upgrade, and teardown scripts.
+4. **Publish GA Release**: Automatically generates release notes categorized by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles once all gates pass.
 
 ## Code review
 
