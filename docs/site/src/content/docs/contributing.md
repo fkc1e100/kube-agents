@@ -86,12 +86,12 @@ Before pushing, run the checks CI enforces:
 
 ### 3-Gate Release Verification Pipeline
 
-Pushing a release tag (`v0.22.0`) triggers `.github/workflows/release-build-publish.yml` which enforces 3 sequential release gates before publishing official assets:
+Pushing a release tag (`v0.1.0`) triggers `.github/workflows/release-build-publish.yml` alongside the container image publishing workflows (`.github/workflows/docker-publish-ghcr.yml` and `.github/workflows/docker-publish-k8s-operator.yml`). For complete tag-to-artifact mapping rules, see [Release Versioning](/kube-agents/deploy/release-versioning/).
 
-1. **Gate 1 (Static & Code Verification)**: Runs `make validate`, `make docs-check`, `shellcheck`, and Go unit tests (`k8s-operator`).
-2. **Gate 2 (Packaging Verification)**: Lints Helm charts (`charts/kube-agents`), validates `helm template` rendering, and packages chart tarballs (`*.tgz`).
+1. **Gate 1 (Static & Security Verification)**: Runs `make validate`, `make docs-check`, `shellcheck`, Google OSV Scanner, and Go unit tests (`k8s-operator`).
+2. **Gate 2 (Packaging & SBOM Verification)**: Lints Helm charts (`charts/kube-agents`), generates SPDX SBOMs (`*.spdx.json`), and packages web download bundles (`.tar.gz`, `.zip`).
 3. **Gate 3 (Ephemeral E2E Smoke Tests)**: Provisions an ephemeral `Kind` Kubernetes cluster inside CI to validate installer, upgrade, and teardown scripts.
-4. **Publish GA Release**: Automatically generates release notes categorized by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles once all gates pass.
+4. **Publish GA Release**: Automatically generates release notes categorized by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles, SBOMs, and web download archives once all gates pass.
 
 ## Code review
 

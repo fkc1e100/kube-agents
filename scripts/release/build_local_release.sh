@@ -66,7 +66,7 @@ helm lint charts/kube-agents "${SET_FLAGS[@]}"
 helm template test-release charts/kube-agents "${SET_FLAGS[@]}" > /dev/null
 
 echo "2.2 Packaging Helm Chart..."
-helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${VERSION_NUM}" -d "${BUILD_DIR}"
+helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${TAG_NAME}" -d "${BUILD_DIR}"
 
 echo "2.3 Staging Release Source & Manifest Bundle..."
 mkdir -p "${STAGE_DIR}"
