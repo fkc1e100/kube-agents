@@ -54,10 +54,13 @@ This document describes the release engineering architecture, versioning guarant
 
 ---
 
-## 🏷️ 3. GitHub Milestones & Customer Feature Attribution
+## 🏷️ 3. GitHub Milestones & Automated Milestone Assignment
 
 Every issue, pull request, and Buganizer item is assigned a **GitHub Milestone** (e.g. `v0.22.0`):
 
+- **Automated Milestone Assignment on Merge**:
+  - The repository workflow `.github/workflows/auto-assign-milestone.yml` automatically triggers whenever a PR is merged into `main`.
+  - If a merged PR does not have an explicit milestone set, the workflow queries active open release milestones and automatically tags the PR with the current release milestone (e.g., `v0.22.0`).
 - **Customer Communication**:
   > _"To get the gVisor sandbox feature, upgrade to **`v0.22.0`**."_  
   > _"Bug `b/422969391` was resolved in patch **`v0.22.1`**."_
