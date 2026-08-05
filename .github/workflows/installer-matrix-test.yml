@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   validate-installer:
-    name: Validate Installer (${{ matrix.os }})
+    name: Validate Host OS (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -63,3 +63,44 @@ jobs:
         run: |
           kubectl get nodes
           kubectl cluster-info
+
+  validate-distros:
+    name: Validate Linux Distro Container (${{ matrix.container }})
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        container:
+          - "fedora:latest"
+          - "debian:stable-slim"
+          - "alpine:latest"
+
+    steps:
+      - name: Install bash & git (Alpine)
+        if: matrix.container == 'alpine:latest'
+        run: apk add --no-cache bash git openssl
+
+      - name: Install bash & git (Fedora)
+        if: matrix.container == 'fedora:latest'
+        run: dnf install -y bash git openssl
+
+      - name: Install bash & git (Debian)
+        if: matrix.container == 'debian:stable-slim'
+        run: apt-get update && apt-get install -y bash git openssl
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate Dry-Run Installer in Container
+        run: |
+          bash ./install.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1"
+
+      - name: Validate Dry-Run Teardown in Container
+        run: |
+          bash ./uninstall.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1"
+
+      - name: Validate Dry-Run Upgrade in Container
+        run: |
+          bash ./upgrade.sh --dry-run -y --upgrade-mode=skills
