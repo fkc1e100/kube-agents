@@ -16,9 +16,9 @@ set -euo pipefail
 
 # ─── ANSI Colors & Terminal Responsive Helpers ─────────────────────────────────
 if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
-  C_CYAN='' C_GREEN='' C_YELLOW='' C_MAGENTA='' C_RED='' C_RESET='' C_BOLD=''
+  C_CYAN='' C_GREEN='' C_YELLOW='' C_MAGENTA='' C_RED='' C_RESET='' C_BOLD='' C_UNDERLINE=''
 else
-  C_CYAN='\e[96m' C_GREEN='\e[92m' C_YELLOW='\e[93m' C_MAGENTA='\e[95m' C_RED='\e[91m' C_RESET='\e[0m' C_BOLD='\e[1m'
+  C_CYAN='\e[96m' C_GREEN='\e[92m' C_YELLOW='\e[93m' C_MAGENTA='\e[95m' C_RED='\e[91m' C_RESET='\e[0m' C_BOLD='\e[1m' C_UNDERLINE='\e[4m'
 fi
 
 # ─── Agentic & Automation Parameter States ────────────────────────────────────
