@@ -4,6 +4,19 @@ This document provides visual walkthroughs and terminal animations demonstrating
 
 ---
 
+## ⚡ 0. One-Liner Installer Quickstart (`curl -fsSL ... | bash`)
+
+![Demo 0: One-Liner Quickstart](https://raw.githubusercontent.com/fkc1e100/kube-agents/feat/zero-friction-installer/docs/images/demos/one_liner_install_demo.webp)
+
+- **Command**:
+  ```bash
+  curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash
+  ```
+- **Purpose**: Zero-friction setup directly from any Linux terminal or Cloud Shell without cloning the repository manually!
+- **Highlights Shown**: Cloud Shell environment auto-detection (`CLOUD_SHELL=true`), GCP project auto-discovery (`gca-gke-2025`), cluster auto-discovery (`kcc-dash-dont-delete`), interactive Web UI configuration, automated GKE deployment, and pod health checkpoint validation.
+
+---
+
 ## 🟢 1. Interactive Setup Wizard with Step-Back (`b`) Navigation (`./install.sh`)
 
 ![Demo 1: Interactive Setup Wizard](https://raw.githubusercontent.com/fkc1e100/kube-agents/feat/zero-friction-installer/docs/images/demos/interactive_wizard_demo.webp)
