@@ -82,14 +82,16 @@ flowchart TD
    - Google OSV Vulnerability Scanner (`google/osv-scanner-action`) checking dependencies against the Open Source Vulnerability database.
    - `shellcheck` for all shell scripts (`install.sh`, `uninstall.sh`, `upgrade.sh`).
    - Repository structure validation (`make validate`) and link checks (`make docs-check`).
-2. **Gate 2: Container & Helm Packaging Verification (`gate-2-packaging-verification`)**:
+2. **Gate 2: Container, Helm & Archive Packaging (`gate-2-packaging-verification`)**:
    - `helm lint charts/kube-agents` and `helm template` rendering validation.
    - Helm chart packaging (`kube-agents-0.22.0.tgz`).
+   - Packages self-contained release bundles (`kube-agents-v0.22.0.tar.gz`, `.tgz`, `.zip`) for enterprise/offline customers who cannot use `git clone` from the command line.
+   - Generates SHA256 checksums (`checksums.txt`) for file integrity verification.
 3. **Gate 3: Ephemeral E2E Smoke Test Suite (`gate-3-e2e-smoke-tests`)**:
    - Provisions an ephemeral `Kind` Kubernetes cluster inside the runner.
    - Validates installer, upgrade, and teardown execution against a live API server.
 4. **Publish Official GA Release (`create-github-release`)**:
-   - Auto-generates release notes grouped by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles.
+   - Auto-generates release notes grouped by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles, `.tar.gz`, `.tgz`, `.zip` web download archives, and `checksums.txt`.
 
 ---
 
