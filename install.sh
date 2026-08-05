@@ -65,6 +65,8 @@ Flags for AI Agents & Automation:
   --gitops-repo=REPO            GitOps IaC Repository Name (default: gke-fleet-iac)
   --permission-set=SET          Agent permission boundary: sre | read-only (default: sre)
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
+  --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
+  --reset, --factory-reset      Uninstall resources and reset repository to clean factory default state
   -h, --help                    Show this help message
 EOF
 }
@@ -74,6 +76,8 @@ parse_args() {
     case "$1" in
       -y|--yes|--non-interactive) PARAM_NON_INTERACTIVE="true"; shift ;;
       --dry-run) PARAM_DRY_RUN="true"; shift ;;
+      --uninstall|--delete) PARAM_UNINSTALL="true"; shift ;;
+      --reset|--factory-reset) PARAM_RESET="true"; shift ;;
       --project-id=*) PARAM_PROJECT_ID="${1#*=}"; shift ;;
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --cluster-name=*) PARAM_CLUSTER_NAME="${1#*=}"; shift ;;
@@ -287,6 +291,23 @@ EOF
 main() {
   parse_args "$@"
   print_banner
+
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  if [ "${PARAM_UNINSTALL:-false}" = "true" ]; then
+    bash "${script_dir}/uninstall.sh" "$@"
+    exit 0
+  fi
+
+  if [ "${PARAM_RESET:-false}" = "true" ]; then
+    print_step "🔄 Executing Complete Reset to Factory Release State"
+    bash "${script_dir}/uninstall.sh" --non-interactive "$@" || true
+    print_info "Syncing repository to latest release from origin/main..."
+    git fetch origin main 2>/dev/null || true
+    git reset --hard origin/main 2>/dev/null || true
+    print_success "Repository reset to factory default state! Re-launching clean installation..."
+  fi
 
   # 1. Environment Detection (Google Cloud Shell vs Linux/macOS Terminal)
   local is_cloud_shell="false"
