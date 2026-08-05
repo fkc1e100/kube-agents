@@ -86,6 +86,7 @@ Flags for AI Agents & Automation:
   --permission-set=SET          Agent permission boundary: sre | read-only (default: sre)
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
   --enable-web-ui=true|false    Enable Hermes Web UI port 9119 dashboard (default: false)
+  --menu, --config              Launch interactive Day-2 Control Panel Menu (raspi-config style)
   --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
   --reset, --factory-reset      Uninstall resources and reset repository to clean factory default state
   -h, --help, -?                Show this help message
@@ -97,6 +98,7 @@ parse_args() {
     case "$1" in
       -y|--yes|--non-interactive) PARAM_NON_INTERACTIVE="true"; shift ;;
       --dry-run) PARAM_DRY_RUN="true"; shift ;;
+      --menu|--config|--configure|menu|config) PARAM_MENU_MODE="true"; shift ;;
       --uninstall|--delete) PARAM_UNINSTALL="true"; shift ;;
       --reset|--factory-reset) PARAM_RESET="true"; shift ;;
       --project-id=*) PARAM_PROJECT_ID="${1#*=}"; shift ;;
@@ -320,6 +322,167 @@ EOF
   print_success "Machine-readable report written to: ${C_BOLD}${report_file}${C_RESET}"
 }
 
+# ─── Day-2 Control Panel Menu System (raspi-config style) ──────────────────────
+run_menu_system() {
+  local repo_dir
+  repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local vars_file="${repo_dir}/k8s-operator/scripts/vars.sh"
+
+  if [ -f "$vars_file" ]; then
+    # shellcheck disable=SC1090
+    source "$vars_file" 2>/dev/null || true
+  fi
+
+  local project_id="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}"
+  local project_number="${PROJECT_NUMBER:-}"
+  local cluster_name="${CLUSTER_NAME:-platform-agent-host}"
+  local region="${REGION:-us-central1}"
+  local model_provider="${MODEL_PROVIDER:-gemini}"
+  local model_default_name="${MODEL_DEFAULT_NAME:-gemini-3.5-flash}"
+  local gemini_api_key="${GEMINI_API_KEY:-}"
+  local openai_api_key="${OPENAI_API_KEY:-}"
+  local anthropic_api_key="${ANTHROPIC_API_KEY:-}"
+  local google_chat_enabled="${GOOGLE_CHAT_ENABLED:-false}"
+  local slack_enabled="${SLACK_ENABLED:-false}"
+  local allowed_users="${ALLOWED_USERS:-$(gcloud config get-value account 2>/dev/null || echo "")}"
+  local chat_topic_name="${CHAT_TOPIC_NAME:-platform-agent-chat-events}"
+  local chat_sub_name="${CHAT_SUB_NAME:-platform-agent-chat-events-sub}"
+  local permission_set="${PLATFORM_AGENT_PERMISSION_SET:-sre}"
+  local enable_gvisor="${ENABLE_GVISOR:-false}"
+  local enable_webui="${HERMES_DASHBOARD_ENABLED:-false}"
+  local github_org="${GITHUB_ORG:-fkc1e100}"
+  local github_repo="${GITHUB_REPO:-gke-fleet-iac}"
+  local github_app_id="${GITHUB_APP_ID:-}"
+  local kms_keyring="${KMS_KEYRING:-}"
+  local kms_key="${KMS_KEY:-}"
+  local github_pem_path="${GITHUB_PEM_PATH:-}"
+  local github_token="${GITHUB_TOKEN:-}"
+
+  while true; do
+    echo -e "\n${C_CYAN}${C_BOLD}"
+    draw_separator
+    echo "🛠️  Kubernetes Agentic Harness (kube-agents) Day-2 Control Panel"
+    draw_separator
+    echo -e "${C_RESET}"
+    echo -e "${C_BOLD}Active Configuration State:${C_RESET}"
+    echo -e "  • ${C_CYAN}GCP Project ID:${C_RESET} ${project_id:-Not Set}"
+    echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${cluster_name:-Not Set} (${region:-us-central1})"
+    echo -e "  • ${C_CYAN}Hermes Web UI (Port 9119):${C_RESET} $([ "$enable_webui" = "true" ] && echo -e "${C_GREEN}ENABLED${C_RESET}" || echo -e "${C_YELLOW}DISABLED${C_RESET}")"
+    echo -e "  • ${C_CYAN}Chat Integrations:${C_RESET} Google Chat: $([ "$google_chat_enabled" = "true" ] && echo -e "${C_GREEN}ON${C_RESET}" || echo "OFF"), Slack: $([ "$slack_enabled" = "true" ] && echo -e "${C_GREEN}ON${C_RESET}" || echo "OFF")"
+    echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
+    echo -e "  • ${C_CYAN}Permission Boundary:${C_RESET} ${permission_set}"
+    echo -e "  • ${C_CYAN}Runtime Isolation:${C_RESET} $([ "$enable_gvisor" = "true" ] && echo -e "${C_GREEN}gVisor Sandbox${C_RESET}" || echo "Standard")"
+
+    local menu_choice=""
+    prompt_menu "Select configuration task:" \
+      "🌐 Toggle Hermes Web UI (Port 9119 Dashboard)" \
+      "💬 Manage Chat & Messaging Integrations (Google Chat / Slack)" \
+      "🔑 Manage AI Model Provider & Credentials (Gemini / Vertex / OpenAI)" \
+      "🛡️ Modify Security & Permission Boundaries (gVisor / SRE vs Read-Only)" \
+      "🗄️ Manage GitOps Repository & GitHub Auth (gke-fleet-iac)" \
+      "🚀 Save & Apply Configuration Changes (~15s update)" \
+      "🚪 Exit Control Panel" \
+      menu_choice
+
+    case "$menu_choice" in
+      1)
+        if [ "$enable_webui" = "true" ]; then
+          enable_webui="false"
+          print_success "Hermes Web UI disabled."
+        else
+          enable_webui="true"
+          print_success "Hermes Web UI enabled!"
+        fi
+        ;;
+      2)
+        local c_opt=""
+        prompt_menu "Select Chat Integration:" \
+          "Google Chat (Pub/Sub Event Streaming)" \
+          "Slack (Socket Mode App)" \
+          "Disable All Chat Integrations" \
+          c_opt
+        case "$c_opt" in
+          1) google_chat_enabled="true"; prompt_read "Allowed Google Chat User Emails" allowed_users "$allowed_users" ;;
+          2) slack_enabled="true" ;;
+          3) google_chat_enabled="false"; slack_enabled="false" ;;
+        esac
+        ;;
+      3)
+        local m_opt=""
+        prompt_menu "Select AI Model Provider:" \
+          "Google Gemini (gemini-3.5-flash)" \
+          "OpenAI (gpt-4o)" \
+          "Anthropic (claude-3-5-sonnet)" \
+          m_opt
+        case "$m_opt" in
+          1) model_provider="gemini"; model_default_name="gemini-3.5-flash" ;;
+          2) model_provider="openai"; model_default_name="gpt-4o" ;;
+          3) model_provider="anthropic"; model_default_name="claude-3-5-sonnet" ;;
+        esac
+        ;;
+      4)
+        local p_opt=""
+        prompt_menu "Select Permission Boundary:" \
+          "SRE GitOps & Remediations (Full Read/Write)" \
+          "Read-Only Audit & Observability" \
+          p_opt
+        if [ "$p_opt" = "1" ]; then permission_set="gke-admin"; else permission_set="read-only"; fi
+        ;;
+      5)
+        prompt_read "GitHub Org / Username" github_org "$github_org"
+        prompt_read "GitOps Repository Name" github_repo "$github_repo"
+        ;;
+      6)
+        print_step "Saving & Re-applying Configuration State"
+        export PARAM_PROJECT_ID="$project_id" PARAM_CLUSTER_NAME="$cluster_name" PARAM_REGION="$region"
+        export PARAM_ENABLE_WEBUI="$enable_webui" PARAM_MODEL_PROVIDER="$model_provider"
+        export PARAM_PERMISSION_SET="$permission_set" PARAM_ENABLE_GVISOR="$enable_gvisor"
+        export GOOGLE_CHAT_ENABLED="$google_chat_enabled" SLACK_ENABLED="$slack_enabled"
+
+        cat << EOF > "$vars_file"
+# Auto-generated by kube-agents control panel
+export PROJECT_ID="${project_id}"
+export PROJECT_NUMBER="${project_number}"
+export CLUSTER_NAME="${cluster_name}"
+export REGION="${region}"
+export MODEL_PROVIDER="${model_provider}"
+export MODEL_DEFAULT_NAME="${model_default_name}"
+export GEMINI_API_KEY="${gemini_api_key}"
+export ALLOWED_USERS="${allowed_users}"
+export CHAT_TOPIC_NAME="${chat_topic_name}"
+export CHAT_SUB_NAME="${chat_sub_name}"
+export GOOGLE_CHAT_ENABLED="${google_chat_enabled}"
+export SLACK_ENABLED="${slack_enabled}"
+export PLATFORM_AGENT_PERMISSION_SET="${permission_set}"
+export ENABLE_GVISOR="${enable_gvisor}"
+export HERMES_DASHBOARD_ENABLED="${enable_webui}"
+export GITHUB_ORG="${github_org}"
+export GITHUB_REPO="${github_repo}"
+export GITHUB_APP_ID="${github_app_id}"
+export KMS_KEYRING="${kms_keyring}"
+export KMS_KEY="${kms_key}"
+export GITHUB_PEM_PATH="${github_pem_path}"
+export GITHUB_TOKEN="${github_token}"
+export IMAGE_TAG="latest"
+export NO_CONFIRM="1"
+EOF
+        chmod 700 "$vars_file"
+        print_success "Updated configuration saved to: $vars_file"
+
+        print_info "Re-applying Platform Agent Custom Resource to GKE cluster '$cluster_name'..."
+        cd "${repo_dir}/k8s-operator"
+        bash scripts/provision_08_deploy_platform_agent.sh --no-confirm || true
+        cd "${repo_dir}"
+        print_success "Platform Agent re-deployed with new configuration!"
+        ;;
+      7|BACK)
+        print_info "Exiting Control Panel."
+        break
+        ;;
+    esac
+  done
+}
+
 # ─── Main Installer Procedure ──────────────────────────────────────────────────
 main() {
   parse_args "$@"
@@ -327,6 +490,11 @@ main() {
 
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  if [ "${PARAM_MENU_MODE:-false}" = "true" ]; then
+    run_menu_system
+    exit 0
+  fi
 
   if [ "${PARAM_UNINSTALL:-false}" = "true" ]; then
     bash "${script_dir}/uninstall.sh" "$@"
