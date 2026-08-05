@@ -793,6 +793,22 @@ EOF
   echo -e "  • ${C_CYAN}Runtime Isolation:${C_RESET} ${enable_gvisor:-false} (gVisor Sandbox)"
   echo -e "  • ${C_CYAN}Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
   echo -e "  • ${C_CYAN}Permission Mode:${C_RESET} ${permission_set}"
+  if [ "${google_chat_enabled:-false}" = "true" ]; then
+    echo -e "  • ${C_CYAN}Google Chat Link:${C_RESET} ${C_UNDERLINE}https://chat.google.com${C_RESET} / ${C_UNDERLINE}https://mail.google.com/mail/u/0/#chat/dm${C_RESET}"
+    echo -e "  • ${C_CYAN}Google Chat App Console:${C_RESET} ${C_UNDERLINE}https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat?project=${project_id}${C_RESET}"
+  fi
+  if [ "${slack_enabled:-false}" = "true" ]; then
+    echo -e "  • ${C_CYAN}Slack App Link:${C_RESET} ${C_UNDERLINE}https://app.slack.com/client${C_RESET}"
+  fi
+
+  if [ "${google_chat_enabled:-false}" = "true" ]; then
+    echo ""
+    bash "${repo_dir}/k8s-operator/scripts/print_instructions_gchat.sh" || true
+  fi
+  if [ "${slack_enabled:-false}" = "true" ]; then
+    echo ""
+    bash "${repo_dir}/k8s-operator/scripts/print_instructions_slack.sh" || true
+  fi
 }
 
 main "$@"
