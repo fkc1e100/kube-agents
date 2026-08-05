@@ -723,7 +723,7 @@ export SLACK_APP_TOKEN="${slack_app_token}"
 export SLACK_ALLOWED_USERS="${slack_allowed_users}"
 export SLACK_HOME_CHANNEL="${slack_home_channel}"
 export SLACK_HOME_CHANNEL_NAME="${slack_home_channel_name}"
-export API_SERVER_KEY="$(openssl rand -hex 16 2>/dev/null || echo "a1b2c3d4e5f67890a1b2c3d4e5f67890")"
+export API_SERVER_KEY="$(openssl rand -hex 16 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 export PLATFORM_AGENT_PERMISSION_SET="${permission_set}"
 export GITHUB_ORG="${github_org}"
 export GITHUB_REPO="${github_repo}"
@@ -744,7 +744,7 @@ export REPLAY_PROXY_IMAGE="${registry_prefix}/replay-proxy"
 export INFERENCE_REPLAY_ENABLED="false"
 export NO_CONFIRM="1"
 EOF
-  chmod +x "$vars_file"
+  chmod 700 "$vars_file"
   print_success "Configuration saved to: $vars_file"
 
   # Pre-Flight Summary & Final Confirmation Checkpoint
