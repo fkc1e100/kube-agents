@@ -3,13 +3,13 @@ title: Release Engineering Program & Strategy
 description: Architecture, release train cadence, 3-gate verification pipelines, and versioning for kube-agents.
 ---
 
-# 🚀 Release Engineering Program & Strategy
+# Release Engineering Program & Strategy
 
 This document describes the release engineering architecture, versioning guarantees, release train cadence, and automated CI/CD verification pipelines for **`kube-agents`**.
 
 ---
 
-## 📐 1. Versioning Model & Semantic Guarantees (`vX.Y.Z`)
+## 1. Versioning Model & Semantic Guarantees (`vX.Y.Z`)
 
 `kube-agents` strictly follows **Semantic Versioning 2.0.0**:
 
@@ -21,7 +21,7 @@ This document describes the release engineering architecture, versioning guarant
 
 ---
 
-## 🕒 2. Release Train Cadence & Rationale
+## 2. Release Train Cadence & Rationale
 
 ### Transition Schedule
 
@@ -34,13 +34,13 @@ This document describes the release engineering architecture, versioning guarant
 
 ---
 
-### 💡 Why Tuesday at 14:00 UTC?
+### Why Tuesday at 14:00 UTC?
 
 #### A. The 3-Day Engineering Buffer Rule (Why Tuesday?)
 
-- **❌ Avoid Friday Releases**: Releasing right before the weekend leaves on-call engineers exposed to unexpected production regressions without full engineering team support.
-- **❌ Avoid Monday Releases**: Mondays are filled with weekend triage, team syncs, and clearing PR backlogs.
-- **✅ Tuesday Peak Engineering Health**: Releasing on Tuesday provides **3 full business days (Tuesday, Wednesday, Thursday)** for the team to monitor customer adoption, triage early feedback, and issue patch releases (`v0.22.1`) before the weekend.
+- **Avoid Friday Releases**: Releasing right before the weekend leaves on-call engineers exposed to unexpected production regressions without full engineering team support.
+- **Avoid Monday Releases**: Mondays are filled with weekend triage, team syncs, and clearing PR backlogs.
+- **Tuesday Peak Engineering Health**: Releasing on Tuesday provides **3 full business days (Tuesday, Wednesday, Thursday)** for the team to monitor customer adoption, triage early feedback, and issue patch releases (`v0.22.1`) before the weekend.
 
 #### B. Global Working Hours Overlap (Why 14:00 UTC?)
 
@@ -54,7 +54,7 @@ This document describes the release engineering architecture, versioning guarant
 
 ---
 
-## 🏷️ 3. GitHub Milestones & Automated Milestone Assignment
+## 3. GitHub Milestones & Automated Milestone Assignment
 
 Every issue, pull request, and Buganizer item is assigned a **GitHub Milestone** (e.g. `v0.22.0`):
 
@@ -67,7 +67,7 @@ Every issue, pull request, and Buganizer item is assigned a **GitHub Milestone**
 
 ---
 
-## 🛡️ 4. 3-Gate Release Verification Pipeline
+## 4. 3-Gate Release Verification Pipeline
 
 Official GA Releases (`v0.22.0`) are guarded by `.github/workflows/release-build-publish.yml` which enforces 3 sequential verification gates before publishing assets:
 
@@ -98,7 +98,7 @@ flowchart TD
 
 ---
 
-## 🚑 5. Hotfix & Patch Release Procedure (`vX.Y.Z+1`)
+## 5. Hotfix & Patch Release Procedure (`vX.Y.Z+1`)
 
 When a bug or regression is discovered in a release (e.g. `v0.22.0`) that requires an immediate fix without introducing new functionality:
 
