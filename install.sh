@@ -91,6 +91,7 @@ parse_args() {
       --gitops-repo=*) PARAM_GITOPS_REPO="${1#*=}"; shift ;;
       --permission-set=*) PARAM_PERMISSION_SET="${1#*=}"; shift ;;
       --gvisor=*) PARAM_ENABLE_GVISOR="${1#*=}"; shift ;;
+      --enable-google-chat|--google-chat) PARAM_ENABLE_GOOGLE_CHAT="true"; shift ;;
       -h|--help) show_help; exit 0 ;;
       *) shift ;;
     esac
@@ -490,7 +491,11 @@ main() {
   print_step "5. Chat & Messaging Integrations Setup"
   local chat_choice=""
   if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-    chat_choice="4"
+    if [ "${PARAM_ENABLE_GOOGLE_CHAT:-false}" = "true" ]; then
+      chat_choice="1"
+    else
+      chat_choice="4"
+    fi
   else
     prompt_menu "Select Chat Channel Integration(s):" \
       "Google Chat (Pub/Sub Event Streaming)" \
