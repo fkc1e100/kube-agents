@@ -85,16 +85,39 @@ flowchart TD
    - Google OSV Vulnerability Scanner (`google/osv-scanner-action`) checking dependencies against the Open Source Vulnerability database.
    - `shellcheck` for all shell scripts (`install.sh`, `uninstall.sh`, `upgrade.sh`).
    - Repository structure validation (`make validate`) and link checks (`make docs-check`).
-2. **Gate 2: Container, Helm & Archive Packaging (`gate-2-packaging-verification`)**:
+2. **Gate 2: Container, Helm, Archive & SBOM Packaging (`gate-2-packaging-verification`)**:
    - `helm lint charts/kube-agents` and `helm template` rendering validation.
    - Helm chart packaging (`kube-agents-0.22.0.tgz`).
+   - Generates an official **SPDX Software Bill of Materials (SBOM)** (`kube-agents-v0.22.0.spdx.json`) via Anchore Syft for compliance auditing.
    - Packages self-contained release bundles (`kube-agents-v0.22.0.tar.gz`, `.tgz`, `.zip`) for enterprise/offline customers who cannot use `git clone` from the command line.
    - Generates SHA256 checksums (`checksums.txt`) for file integrity verification.
 3. **Gate 3: Ephemeral E2E Smoke Test Suite (`gate-3-e2e-smoke-tests`)**:
    - Provisions an ephemeral `Kind` Kubernetes cluster inside the runner.
    - Validates installer, upgrade, and teardown execution against a live API server.
 4. **Publish Official GA Release (`create-github-release`)**:
-   - Auto-generates release notes grouped by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles, `.tar.gz`, `.tgz`, `.zip` web download archives, and `checksums.txt`.
+   - Auto-generates release notes grouped by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles, `.tar.gz`, `.tgz`, `.zip` web download archives, `.spdx.json` SBOM, and `checksums.txt`.
+
+---
+
+## 6. Enterprise & Regulated Industry Compliance
+
+For enterprise customers in highly regulated industries (Financial Services, Healthcare, FedRAMP, Defense) with strict InfoSec and air-gapped network policies:
+
+### A. Air-Gapped Private Registry Support
+
+Regulated clusters blocking outbound internet traffic (`ghcr.io`) can mirror all container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-override` flag during installation and upgrade:
+
+```bash
+./install.sh --registry-override="us-docker.pkg.dev/my-bank-registry/kube-agents"
+```
+
+### B. Software Bill of Materials (SBOM) & Executive Order 14028
+
+Every official release publishes a machine-readable **SPDX SBOM** (`kube-agents-v0.22.0.spdx.json`) detailing all Go modules, system packages, and open-source licenses for security vulnerability and license compliance auditing.
+
+### C. GitOps Pipeline Compatibility (No `curl | bash`)
+
+Regulated InfoSec policies banning raw `curl | bash` shell script execution in production can deploy via declarative **Helm Charts** (`charts/kube-agents`) or **Terraform Modules** (`terraform/`) wired directly into ArgoCD or Flux GitOps pipelines.
 
 ---
 
