@@ -247,8 +247,8 @@ is_non_interactive() {
 init_var_image_tag() {
   if [ -z "${IMAGE_TAG:-}" ]; then
     if is_non_interactive; then
-      echo -e "  ${C_RED}❌ ERROR: IMAGE_TAG is required in non-interactive / CI mode. Please export IMAGE_TAG.${C_RESET}" >&2
-      exit 1
+      export IMAGE_TAG="latest"
+      print_info "Auto-selected IMAGE_TAG: latest"
     else
       local default_tag="latest"
       echo -e "  ${C_CYAN}The base image tag is used for all images built from the kube-agents repo.${C_RESET}"
