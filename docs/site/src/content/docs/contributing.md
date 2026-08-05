@@ -71,7 +71,7 @@ Before pushing, run the checks CI enforces:
 
 ## Release Program & Versioning Strategy
 
-`kube-agents` follows Semantic Versioning (`vX.Y.Z`) and an automated release train pipeline modeled after Kubernetes ecosystem projects (KCC, Knative, Cert-Manager):
+`kube-agents` follows Semantic Versioning (`vX.Y.Z`) and an automated release train pipeline modeled after Kubernetes ecosystem projects (KCC, Knative, Cert-Manager). For full details, see the dedicated [Release Engineering Strategy](/kube-agents/overview/release-engineering/) guide.
 
 ### Release Train Cadence
 
