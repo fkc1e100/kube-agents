@@ -46,8 +46,8 @@ jobs:
         run: npm ci
         working-directory: docs/site
 
-      - name: Copy root installer scripts to site public directory
-        run: cp ../../install.sh ../../uninstall.sh public/
+      - name: Copy root installer & upgrade scripts to site public directory
+        run: cp ../../install.sh ../../uninstall.sh ../../upgrade.sh public/
         working-directory: docs/site
 
       - name: Build site
