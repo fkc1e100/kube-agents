@@ -21,6 +21,25 @@ else
   C_CYAN='\e[96m' C_GREEN='\e[92m' C_YELLOW='\e[93m' C_MAGENTA='\e[95m' C_RED='\e[91m' C_RESET='\e[0m' C_BOLD='\e[1m' C_UNDERLINE='\e[4m'
 fi
 
+# ─── Process Lock File & Error Trap Handling ────────────────────────────────
+LOCK_FILE="/tmp/kube-agents-install.lock"
+if exec 200>"$LOCK_FILE" 2>/dev/null; then
+  if ! flock -n 200 2>/dev/null; then
+    echo -e "  \033[93m⚠ Another instance of kube-agents installer is currently running. Exiting.\033[0m" >&2
+    exit 1
+  fi
+fi
+
+on_error() {
+  local exit_code="$1"
+  local line_no="$2"
+  local bash_cmd="$3"
+  echo -e "\n\033[91m\033[1m✗ Error encountered at line ${line_no} (exit code ${exit_code}): ${bash_cmd}\033[0m" >&2
+  write_json_report "FAILED" "${line_no}" "${bash_cmd}" 2>/dev/null || true
+  exit "$exit_code"
+}
+trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
+
 # ─── Agentic & Automation Parameter States ────────────────────────────────────
 PARAM_NON_INTERACTIVE="${NONINTERACTIVE:-false}"
 PARAM_DRY_RUN="${DRY_RUN:-false}"

@@ -19,6 +19,24 @@ C_YELLOW="\033[1;33m"
 C_RED="\033[1;31m"
 C_BOLD="\033[1m"
 C_RESET="\033[0m"
+# Process Lock File & Error Trap Handling
+LOCK_FILE="/tmp/kube-agents-uninstall.lock"
+if exec 200>"$LOCK_FILE" 2>/dev/null; then
+  if ! flock -n 200 2>/dev/null; then
+    echo -e "  \033[93m⚠ Another instance of kube-agents uninstaller is currently running. Exiting.\033[0m" >&2
+    exit 1
+  fi
+fi
+
+on_error() {
+  local exit_code="$1"
+  local line_no="$2"
+  local bash_cmd="$3"
+  echo -e "\n\033[91m\033[1m✗ Teardown error encountered at line ${line_no} (exit code ${exit_code}): ${bash_cmd}\033[0m" >&2
+  write_report "FAILED" "true" "${line_no}" "${bash_cmd}" 2>/dev/null || true
+  exit "$exit_code"
+}
+trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 
 PARAM_NON_INTERACTIVE="false"
 PARAM_DRY_RUN="false"
