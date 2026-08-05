@@ -65,7 +65,7 @@ Options:
   --project-id ID               GCP Target Project ID
   --cluster-name NAME           GKE Target Cluster Name
   --region REGION               GKE GCP Region
-  --help, -h                    Show this help message
+  --help, -h, -?                Show this help message
 
 Examples:
   # Interactively discover and remove kube-agents cluster & GCP resources
@@ -89,7 +89,7 @@ parse_args() {
       --cluster-name) PARAM_CLUSTER_NAME="$2"; shift 2 ;;
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --region) PARAM_REGION="$2"; shift 2 ;;
-      --help|-h) show_help ;;
+      --help|-h|-\?|help) show_help ;;
       *) print_error "Unknown parameter: $1"; show_help ;;
     esac
   done
