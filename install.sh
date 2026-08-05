@@ -788,6 +788,7 @@ EOF
   else
     make gcp-provision ARGS="-y" </dev/tty >/dev/tty
   fi
+  cd "${repo_dir}"
 
   write_json_report "SUCCESS"
 
