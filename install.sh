@@ -699,6 +699,8 @@ export GITHUB_TOKEN="${github_token}"
 export MEMORY_ENABLED="false"
 export MEMORY_PROVIDER="multiuser_memory"
 export USER_PROFILE_ENABLED="false"
+export IMAGE_TAG="latest"
+export NO_CONFIRM="1"
 EOF
   chmod +x "$vars_file"
   print_success "Configuration saved to: $vars_file"
@@ -744,7 +746,11 @@ EOF
   print_info "Starting build..."
 
   cd "${repo_dir}/k8s-operator"
-  make gcp-provision </dev/tty >/dev/tty
+  if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
+    make gcp-provision ARGS="-y" </dev/null >/dev/null 2>&1 || make gcp-provision ARGS="-y"
+  else
+    make gcp-provision ARGS="-y" </dev/tty >/dev/tty
+  fi
 
   write_json_report "SUCCESS"
 
