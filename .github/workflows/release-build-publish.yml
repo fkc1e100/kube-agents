@@ -1,0 +1,78 @@
+name: Release Build & Publish Pipeline
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  validate-tag:
+    name: Validate Release Tag & Version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify Tag Format
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          echo "Building Release for Tag: ${TAG_NAME}"
+          if [[ ! "${TAG_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "Invalid release tag format: ${TAG_NAME}" >&2
+            exit 1
+          fi
+
+  publish-helm-chart:
+    name: Package & Publish Release Helm Chart
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.2.3
+
+      - name: Package Chart
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION_NUM="${TAG_NAME#v}"
+          mkdir -p build/dist
+          helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${VERSION_NUM}" -d build/dist
+
+      - name: Upload Chart Artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.0
+        with:
+          name: helm-chart-package
+          path: build/dist/*.tgz
+
+  create-github-release:
+    name: Create GitHub Release & Changelog
+    needs: [validate-tag, publish-helm-chart]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Download Helm Chart Artifact
+        uses: actions/download-artifact@cc3a90e0912f99e436d720780287e07eb443be47 # v4.1.9
+        with:
+          name: helm-chart-package
+          path: build/dist/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@c95fe0f8961523530c02eb60e1d03da2b8ec8d73 # v2.2.1
+        with:
+          files: |
+            build/dist/*.tgz
+          generate_release_notes: true
+          draft: false
+          prerelease: false

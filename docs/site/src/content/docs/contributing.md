@@ -69,6 +69,29 @@ Before pushing, run the checks CI enforces:
   npm run build
   ```
 
+## Release Program & Versioning Strategy
+
+`kube-agents` follows Semantic Versioning (`vX.Y.Z`) and an automated release train pipeline modeled after Kubernetes ecosystem projects (KCC, Knative, Cert-Manager):
+
+### Release Train Cadence
+
+1. **Weekly Releases (`v0.X.0`)**: Every Tuesday at 14:00 UTC during active pre-1.0 feature development.
+2. **Fortnightly Releases (Bi-Weekly)**: Every second Tuesday as core API surfaces reach 1.0 stability.
+3. **Patch Releases (`v0.X.Y`)**: Published on-demand for critical bug or security fixes.
+
+### GitHub Milestones & Attribution
+
+- Every issue, PR, and bug fix belongs to a **GitHub Milestone** (e.g. `v0.22.0`).
+- Use GitHub Milestones to communicate feature availability to customers (_"Upgrade to `v0.22.0` for feature X"_).
+
+### Automated Release Artifacts
+
+Pushing a release tag (`v0.22.0`) triggers `.github/workflows/release-build-publish.yml` to automatically:
+
+- Build and publish container images (`ghcr.io/gke-labs/kube-agents/*:v0.22.0`).
+- Package and publish Helm charts (`charts/kube-agents`).
+- Generate categorized release notes grouped by Conventional Commits (`feat`, `fix`, `sec`).
+
 ## Code review
 
 All submissions, including from project members, require review through GitHub pull requests. See [GitHub Help — About pull requests](https://help.github.com/articles/about-pull-requests/).
