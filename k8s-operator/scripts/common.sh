@@ -132,6 +132,10 @@ is_ci_pipeline() {
   is_truthy "${CI:-}"
 }
 
+is_non_interactive() {
+  [ "${NO_CONFIRM:-0}" -eq 1 ] || [ "${DRY_RUN:-0}" -eq 1 ] || is_ci_pipeline
+}
+
 init_var() {
   local var_name=$1
   local default_val=$2
