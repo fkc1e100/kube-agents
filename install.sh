@@ -710,6 +710,7 @@ export OPERATOR_IMAGE="${registry_prefix}/k8s-operator"
 export PLATFORM_AGENT_IMAGE="${registry_prefix}/platform-agent"
 export CREDENTIAL_PROXY_IMAGE="${registry_prefix}/credential-proxy"
 export REPLAY_PROXY_IMAGE="${registry_prefix}/replay-proxy"
+export INFERENCE_REPLAY_ENABLED="false"
 export NO_CONFIRM="1"
 EOF
   chmod +x "$vars_file"
