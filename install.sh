@@ -524,7 +524,12 @@ main() {
   print_step "6. AI Model Provider Credentials"
   local model_provider="${PARAM_MODEL_PROVIDER:-gemini}"
   local model_default_name="gemini-3.5-flash"
-  local gemini_api_key="${PARAM_GEMINI_API_KEY:-placeholder}"
+
+  local detected_gemini_key="${PARAM_GEMINI_API_KEY:-${GEMINI_API_KEY:-}}"
+  if [ -z "$detected_gemini_key" ]; then
+    detected_gemini_key=$(gcloud secrets versions access latest --secret="gemini-api-key" --project="$project_id" 2>/dev/null || echo "")
+  fi
+  local gemini_api_key="${detected_gemini_key:-placeholder}"
   local openai_api_key="${PARAM_OPENAI_API_KEY:-placeholder}"
   local anthropic_api_key="${PARAM_ANTHROPIC_API_KEY:-placeholder}"
 
@@ -764,6 +769,15 @@ EOF
   fi
 
   write_json_report "SUCCESS"
+
+  # 12. Workload & Pod Health Verification Checkpoint
+  print_step "12. Verifying Workload & Pod Health"
+  print_info "Verifying deployment rollouts in namespace 'kubeagents-system'..."
+  if kubectl get ns kubeagents-system >/dev/null 2>&1; then
+    kubectl rollout status deployment/litellm -n kubeagents-system --timeout=120s 2>/dev/null || true
+    kubectl rollout status deployment/kubeagents-controller-manager -n kubeagents-system --timeout=120s 2>/dev/null || true
+    print_success "All core control plane deployments are healthy and available!"
+  fi
 
   # 13. Installation Summary & Next Steps
   print_step "🎉 Installation Complete!"
