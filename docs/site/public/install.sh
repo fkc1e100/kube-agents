@@ -700,6 +700,7 @@ export MEMORY_ENABLED="false"
 export MEMORY_PROVIDER="multiuser_memory"
 export USER_PROFILE_ENABLED="false"
 export IMAGE_TAG="latest"
+export REGISTRY_PREFIX="ghcr.io/gke-labs/kube-agents"
 export NO_CONFIRM="1"
 EOF
   chmod +x "$vars_file"
