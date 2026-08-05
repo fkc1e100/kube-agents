@@ -12,7 +12,7 @@ permissions:
 jobs:
   assign-milestone:
     name: Auto Assign Active Release Milestone
-    if: github.event.pull_request.merged == true && github.event.pull_request.milestone == null
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.milestone == null
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -23,7 +23,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "PR #${PR_NUMBER} was merged without an explicit milestone."
+          echo "PR #${PR_NUMBER} was merged into main without an explicit milestone."
 
           # Fetch active open milestones sorted by due date or title
           MILESTONE_TITLE=$(gh api "repos/${{ github.repository }}/milestones?state=open&sort=due_on&direction=asc" --jq '.[0].title // empty')

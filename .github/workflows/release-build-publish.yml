@@ -10,6 +10,10 @@ permissions:
   packages: write
   id-token: write
 
+concurrency:
+  group: release-pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ─── GATE 1: Static, OSV Security & Code Verification ────────────────────────
   gate-1-static-build-verification:
