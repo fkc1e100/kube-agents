@@ -11,9 +11,9 @@ permissions:
   id-token: write
 
 jobs:
-  # ─── GATE 1: Static & Code Verification ──────────────────────────────────────
+  # ─── GATE 1: Static, OSV Security & Code Verification ────────────────────────
   gate-1-static-build-verification:
-    name: "Gate 1: Static & Build Verification"
+    name: "Gate 1: Static, Security & Build Verification"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -29,6 +29,13 @@ jobs:
 
       - name: Run Operator Unit Tests
         run: cd k8s-operator && go test -v ./...
+
+      - name: Run Google OSV Vulnerability Scanner
+        uses: google/osv-scanner-action@55452d3a3d686b2496a79db1237e8913b4c1fb3a # v1.9.2
+        with:
+          scan-args: |-
+            --recursive
+            ./
 
       - name: Run Shellcheck Analysis
         run: |
@@ -98,7 +105,12 @@ jobs:
   # ─── PUBLISH: GitHub Release & Artifact Distribution ─────────────────────────
   create-github-release:
     name: "Publish Official GA Release"
-    needs: [gate-1-static-build-verification, gate-2-packaging-verification, gate-3-e2e-smoke-tests]
+    needs:
+      [
+        gate-1-static-build-verification,
+        gate-2-packaging-verification,
+        gate-3-e2e-smoke-tests,
+      ]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
