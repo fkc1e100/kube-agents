@@ -2,6 +2,7 @@
 # ==============================================================================
 # 🧹 Kubernetes Agentic Harness (kube-agents) Complete Uninstall Engine
 # ==============================================================================
+# Refactored interactive tty confirmation & subshell handling thanks to review by @eLeontev
 # Discovers and safely deletes all provisioned GCP resources, GKE clusters,
 # IAM service accounts, secrets, and Kubernetes control plane components.
 #
