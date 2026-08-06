@@ -125,6 +125,8 @@ python3 "$HERMES_HOME"/skills/submit-suggestion/scripts/submit_suggestion.py sub
   --lease "<lease>" \
   --branch "platform-agent/<change_type>-<target_id>" \
   --title "<pr_title>" \
+  --tokens "<total_tokens_consumed>" \
+  --elapsed "<discovery_to_pr_duration>" \
   --body "This Pull Request was generated automatically by the **Platform Agent** control plane.
 
 ### 🚀 Functional Impact:
