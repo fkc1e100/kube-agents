@@ -125,12 +125,6 @@ python3 "$HERMES_HOME"/skills/submit-suggestion/scripts/submit_suggestion.py sub
   --lease "<lease>" \
   --branch "platform-agent/<change_type>-<target_id>" \
   --title "<pr_title>" \
-  --tokens "<total_tokens_consumed>" \
-  --elapsed "<discovery_to_pr_duration>" \
-  --cost "<estimated_session_cost>" \
-  --model "<ai_model_name>" \
-  --trace-id "<opentelemetry_trace_id>" \
-  --steps "<tool_call_executions>" \
   --body "This Pull Request was generated automatically by the **Platform Agent** control plane.
 
 ### 🚀 Functional Impact:
@@ -138,6 +132,19 @@ python3 "$HERMES_HOME"/skills/submit-suggestion/scripts/submit_suggestion.py sub
 
 Please review the code diffs and merge this PR to trigger the GitOps CI/CD rollout!"
 ```
+
+#### Optional Telemetry & SLA Flags
+When exact runtime metrics are provided by the harness or session environment variables (`HERMES_SESSION_TOKENS`, `HERMES_SESSION_ELAPSED`, `HERMES_MODEL`, `HERMES_SESSION_COST`, `OTEL_TRACE_ID`), `submit_suggestion.py` automatically injects telemetry summaries into the PR. You may also pass explicit flags if exact numbers are known:
+
+```bash
+  --tokens "14,820 prompt / 1,240 completion / 16,060 total" \
+  --elapsed "49s" \
+  --cost "$0.0024" \
+  --model "gemini-3.5-flash" \
+  --trace-id "<otel_trace_id>"
+```
+
+**CRITICAL ACCURACY RULE:** Never guess, estimate, or fabricate token counts or SLA durations. If exact metrics are unmeasured or unknown, omit these flags—`submit_suggestion.py` gracefully omits the telemetry section when data is absent.
 
 `--lease` is not optional bookkeeping. `prepare` and `submit` are separate
 processes, and outside a kanban card there is no session identity for `submit`
