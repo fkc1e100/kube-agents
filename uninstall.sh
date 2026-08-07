@@ -158,7 +158,7 @@ purge_fleet_clusters() {
   print_info "Discovering all GKE clusters in project '${project}'..."
   local clusters_json
   clusters_json="$(gcloud container clusters list --project="${project}" --format="json" 2>/dev/null || echo "[]")"
-  
+
   if [ "$clusters_json" = "[]" ] || [ -z "$clusters_json" ]; then
     print_warning "No GKE clusters found in project '${project}'."
     return 0
@@ -175,14 +175,14 @@ purge_fleet_clusters() {
     if [ -n "$c_name" ] && [ -n "$c_loc" ]; then
       print_info "Cleaning cluster: ${c_name} (${c_loc})..."
       gcloud container clusters get-credentials "$c_name" --location="$c_loc" --project="$project" 2>/dev/null || true
-      
+
       # 1. Delete webhooks first to prevent deletion deadlocks
       kubectl delete validatingwebhookconfigurations kubeagents-validating-webhook-configuration --ignore-not-found 2>/dev/null || true
       kubectl delete mutatingwebhookconfigurations kubeagents-mutating-webhook-configuration --ignore-not-found 2>/dev/null || true
-      
+
       # 2. Delete all resources in kubeagents-system
       kubectl delete deployments,statefulsets,daemonsets,services,configmaps,secrets,serviceaccounts,roles,rolebindings --all -n kubeagents-system --timeout=15s 2>/dev/null || true
-      
+
       # 3. Strip finalizers if namespace is stuck
       if kubectl get ns kubeagents-system >/dev/null 2>&1; then
         local ns_json
@@ -210,7 +210,7 @@ purge_storage_resources() {
   local project="$1"
   print_step "4. Storage & Persistent Disk Purge"
   print_info "Scanning for retained GCP Persistent Disks with kube-agents names..."
-  
+
   # Search and delete orphaned disks matching agent keywords
   local disks
   disks="$(gcloud compute disks list --project="${project}" --format="value(name)" 2>/dev/null | grep -E "kubeagent|platform-agent|cluster-agent" || true)"
@@ -229,7 +229,7 @@ purge_gitops_manifests() {
   local repo_name="$1"
   print_step "5. GitOps Repository & ArgoCD Application Purge"
   print_info "Purging agent manifests from GitOps repo '${repo_name}' to prevent auto-heal re-deployments..."
-  
+
   if [ -d "../${repo_name}" ]; then
     print_info "Found local GitOps repo at ../${repo_name}. Cleaning manifests..."
     find "../${repo_name}" -name "*cluster-agent-event-watcher*" -delete 2>/dev/null || true
