@@ -1034,16 +1034,22 @@ EOF
   fi
   cd "${repo_dir}"
 
-  write_json_report "SUCCESS"
-
   # 12. Workload & Pod Health Verification Checkpoint
   print_step "12. Verifying Workload & Pod Health"
   print_info "Verifying deployment rollouts in namespace 'kubeagents-system'..."
-  if kubectl get ns kubeagents-system >/dev/null 2>&1; then
-    kubectl rollout status deployment/litellm -n kubeagents-system --timeout=120s 2>/dev/null || true
-    kubectl rollout status deployment/kubeagents-controller-manager -n kubeagents-system --timeout=120s 2>/dev/null || true
-    print_success "All core control plane deployments are healthy and available!"
+  if ! kubectl get ns kubeagents-system >/dev/null 2>&1; then
+    print_error "Namespace 'kubeagents-system' was not created. Installation is incomplete."
+    exit 1
   fi
+  for deployment in kubeagents-controller-manager litellm platform-agent-gateway; do
+    if ! kubectl get deployment "$deployment" -n kubeagents-system >/dev/null 2>&1; then
+      print_error "Expected deployment '$deployment' was not created."
+      exit 1
+    fi
+    kubectl rollout status "deployment/$deployment" -n kubeagents-system --timeout=120s
+  done
+  print_success "All core control plane deployments are healthy and available!"
+  write_json_report "SUCCESS"
 
   # 13. Installation Summary & Next Steps
   print_step "🎉 Installation Complete!"
