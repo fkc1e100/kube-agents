@@ -143,11 +143,15 @@ annotate_ksa() {
 verify_cluster_workload_pool() {
   local pool
   pool=$(gcloud container clusters describe "${CLUSTER_NAME}" --location="${REGION}" --project="${PROJECT_ID}" --format="value(workloadIdentityConfig.workloadPool)" 2>/dev/null || echo "")
-  [ -n "$pool" ]
+  [ "$pool" = "${PROJECT_ID}.svc.id.goog" ]
 }
 execute_cluster_workload_pool() {
   print_info "Enabling Workload Identity pool on target GKE cluster ${CLUSTER_NAME}..."
-  gcloud container clusters update "${CLUSTER_NAME}"       --location="${REGION}"       --project="${PROJECT_ID}"       --workload-pool="${PROJECT_ID}.svc.id.goog"       --quiet || true
+  gcloud container clusters update "${CLUSTER_NAME}" \
+    --location="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --workload-pool="${PROJECT_ID}.svc.id.goog" \
+    --quiet
 }
 
 
@@ -256,7 +260,8 @@ execute_github_minter_iam() {
 
 # ─── Execution Pipeline ───────────────────────────────────────────────────────
 run_step "1. Enable APIs" verify_apis execute_apis 10
-run_step "2. Configure Platform Agent Workload Identity & GCP IAM" verify_platform_agent execute_platform_agent 5
-run_step "3. Configure GitHub Token Minter Workload Identity" verify_github_minter_iam execute_github_minter_iam 5
+run_step "2. Ensure GKE Workload Identity Pool" verify_cluster_workload_pool execute_cluster_workload_pool 10
+run_step "3. Configure Platform Agent Workload Identity & GCP IAM" verify_platform_agent execute_platform_agent 5
+run_step "4. Configure GitHub Token Minter Workload Identity" verify_github_minter_iam execute_github_minter_iam 5
 
 echo -e "\n${C_MAGENTA}${C_BOLD}>>>  Controller & Agent GCP Permissions Configured Successfully!  <<<${C_RESET}"
