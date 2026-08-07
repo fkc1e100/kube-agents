@@ -56,6 +56,7 @@ PARAM_PERMISSION_SET="${PLATFORM_AGENT_PERMISSION_SET:-read-only}"
 PARAM_ENABLE_GVISOR="${ENABLE_GVISOR:-false}"
 PARAM_ENABLE_WEBUI="${ENABLE_WEBUI:-false}"
 PARAM_IMAGE_TAG="${IMAGE_TAG:-}"
+PARAM_REGISTRY_PREFIX="${REGISTRY_PREFIX:-ghcr.io/gke-labs/kube-agents}"
 
 show_help() {
   cat << EOF
@@ -80,6 +81,7 @@ Flags for AI Agents & Automation:
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
   --enable-web-ui=true|false    Enable Hermes Web UI port 9119 dashboard (default: false)
   --image-tag=TAG               Validated release tag or commit SHA (required in non-interactive mode)
+  --registry-prefix=PATH        Container registry path without a URL scheme
   --menu, --config              Launch interactive Day-2 Control Panel Menu (raspi-config style)
   --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
   -h, --help, -?                Show this help message
@@ -107,6 +109,7 @@ parse_args() {
       --enable-web-ui=*|--enable-webui=*|--webui=*) PARAM_ENABLE_WEBUI="${1#*=}"; shift ;;
       --enable-web-ui|--enable-webui|--webui) PARAM_ENABLE_WEBUI="true"; shift ;;
       --image-tag=*) PARAM_IMAGE_TAG="${1#*=}"; shift ;;
+      --registry-prefix=*) PARAM_REGISTRY_PREFIX="${1#*=}"; shift ;;
       --enable-google-chat|--google-chat) PARAM_ENABLE_GOOGLE_CHAT="true"; shift ;;
       -h|--help|-\?|help) show_help; exit 0 ;;
       *) print_error "Unknown parameter: $1"; show_help >&2; return 2 ;;
@@ -881,7 +884,11 @@ main() {
 
   print_step "10. Generating Configuration State (k8s-operator/scripts/vars.sh)"
   local vars_file="${repo_dir}/k8s-operator/scripts/vars.sh"
-  local registry_prefix="ghcr.io/gke-labs/kube-agents"
+  local registry_prefix="${PARAM_REGISTRY_PREFIX%/}"
+  if [ -z "$registry_prefix" ] || [[ "$registry_prefix" == *"://"* ]]; then
+    print_error "--registry-prefix must be a non-empty registry path without a URL scheme."
+    exit 1
+  fi
   local image_tag="${PARAM_IMAGE_TAG:-}"
   if [ -z "$image_tag" ]; then
     if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
