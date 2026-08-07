@@ -25,14 +25,16 @@ curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- \
 
 - `--upgrade-mode=harness`: Upgrades Platform Agent deployment and controller container images.
 - `--upgrade-mode=operator`: Upgrades Kubernetes Operator CRDs and controller manager.
-- `--upgrade-mode=full` (Default): Performs full atomic upgrade across operator, harness, and skills.
+- `--upgrade-mode=full` (Default): Upgrades both the operator and Platform Agent harness.
 
 ## Dry-Run Mode
 
 To preview the upgrade plan and output a JSON status report without modifying cloud resources:
 
 ```bash
-./upgrade.sh --dry-run --upgrade-mode=full
+./upgrade.sh --dry-run --upgrade-mode=full \
+  --project-id="<PROJECT_ID>" \
+  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
 ```
 
 Machine-readable JSON status reports are generated at `/tmp/kube-agents-upgrade-report.json`.

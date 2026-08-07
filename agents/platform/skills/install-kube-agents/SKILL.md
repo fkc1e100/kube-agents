@@ -27,18 +27,10 @@ curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.s
 To validate prerequisites and generate configuration state (`vars.sh`) without creating GCP resources, use `--dry-run`:
 
 ```bash
-./install.sh --dry-run --non-interactive --project-id="YOUR_GCP_PROJECT_ID"
+./install.sh --dry-run --non-interactive \
+  --project-id="YOUR_GCP_PROJECT_ID" \
+  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
 ```
-
-## Installation Validation & Success Criteria Tiers
-
-When validating an installation test run, evaluate success using the following three tiers:
-
-| Tier                   | Evaluation Criteria            | Description                                                                                                                                    |
-| :--------------------- | :----------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------- |
-| **🏆 Perfect Success** | **Issue Detected & PR Logged** | The Platform Agent detects an active cluster failure within the first 10 minutes and automatically formulates a remediation PR or action plan. |
-| **🥇 Good Success**    | **Clean Fleet Triage**         | Fleet-wide event triage takes place across all watched clusters, activeinformers stream telemetry, and no actionable errors are found.         |
-| **🥈 OK Success**      | **Control Plane Deployment**   | The control plane installs cleanly, rolls out workloads, and has full visibility/connectivity across all target GCP project clusters.          |
 
 ## Machine-Readable Results
 

@@ -37,8 +37,9 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
   --non-interactive \
   --project-id="my-gcp-project" \
   --cluster-name="platform-agent" \
+  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
   --model-provider="gemini" \
-  --permission-set="sre"
+  --permission-set="read-only"
 ```
 
 Or delegate setup directly to your AI coding agent:

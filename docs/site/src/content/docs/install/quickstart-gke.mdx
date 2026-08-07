@@ -20,7 +20,8 @@ Prefer declarative IaC over the interactive pipeline? A single `terraform apply`
 ## Run the Zero-Friction One-Liner Installer
 
 <Aside type="tip">
-  You can bootstrap `kube-agents` directly from any Linux terminal, Cloud Shell, or AI Agent without cloning the repository manually!
+  You can bootstrap `kube-agents` directly from any Linux terminal, Cloud Shell,
+  or AI Agent without cloning the repository manually!
 </Aside>
 
 ```bash
@@ -34,7 +35,9 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
   --non-interactive \
   --project-id="my-gcp-project" \
   --cluster-name="platform-agent-host" \
-  --region="us-central1"
+  --region="us-central1" \
+  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
+  --permission-set="read-only"
 ```
 
 ## Manual / Interactive Provisioner Workflow
