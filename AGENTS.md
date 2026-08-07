@@ -2,7 +2,7 @@
 
 ## Project Overview & Autonomous PR Intent
 
-This repository contains the Kubernetes Agentic Harness (`kube-agents`). It is an autonomous in-cluster agent platform designed to manage Kubernetes/GKE operations, proactively detect failures, performance bottlenecks, and compliance drift across multi-cluster fleets, and **autonomously publish fix Pull Requests directly to the GitOps/IaC repository (`gke-fleet-iac`)**.
+This repository contains the Kubernetes Agentic Harness (`kube-agents`). It is an autonomous in-cluster agent platform designed to manage Kubernetes/GKE operations, proactively detect failures, performance bottlenecks, and compliance drift across multi-cluster fleets, and **autonomously publish fix Pull Requests directly to the configured GitOps/IaC repository**.
 
 **Autonomous PR Provenance:** All operational and remediation Pull Requests must originate exclusively and autonomously from `kube-agents` (the in-cluster Platform Agent via `submit-suggestion` or `fleet-audit`). External developer assistants and IDE tools (e.g. Jetski, Gemini, Antigravity) act strictly as external monitors and do not author the PRs.
 

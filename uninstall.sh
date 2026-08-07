@@ -252,7 +252,11 @@ main() {
   local target_region="${PARAM_REGION:-${REGION:-us-central1}}"
 
   if [ -z "$target_project" ]; then
-    target_project="$(gcloud config get-value project 2>/dev/null || echo "gca-gke-2025")"
+    target_project="$(gcloud config get-value project 2>/dev/null || true)"
+  fi
+  if [ -z "$target_project" ]; then
+    print_error "A GCP project is required. Pass --project-id or configure one with gcloud."
+    exit 1
   fi
 
   print_info "GCP Target Project: ${C_BOLD}${target_project}${C_RESET}"

@@ -367,7 +367,7 @@ run_menu_system() {
   local permission_set="${PLATFORM_AGENT_PERMISSION_SET:-sre}"
   local enable_gvisor="${ENABLE_GVISOR:-false}"
   local enable_webui="${HERMES_DASHBOARD_ENABLED:-false}"
-  local github_org="${GITHUB_ORG:-fkc1e100}"
+  local github_org="${GITHUB_ORG:-}"
   local github_repo="${GITHUB_REPO:-gke-fleet-iac}"
   local github_app_id="${GITHUB_APP_ID:-}"
   local kms_keyring="${KMS_KEYRING:-}"
