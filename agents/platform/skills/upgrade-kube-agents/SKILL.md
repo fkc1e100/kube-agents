@@ -1,11 +1,11 @@
 ---
 name: upgrade-kube-agents
-description: Perform non-interactive or interactive Day-2 upgrades of the Kubernetes Agentic Harness (kube-agents), operator CRDs, and agent skills on GKE clusters.
+description: Perform non-interactive or interactive Day-2 upgrades of the Kubernetes Agentic Harness and operator on GKE clusters.
 ---
 
 # Upgrade Kubernetes Agentic Harness (kube-agents)
 
-Use this skill when asked to upgrade the `kube-agents` platform agent, operator CRDs, or hot-reload repository skills on an active GKE cluster.
+Use this skill when asked to upgrade the `kube-agents` Platform Agent or operator on an active GKE cluster.
 
 ## One-Liner Execution Mode (Non-Interactive)
 
@@ -23,7 +23,6 @@ curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- \
 
 ## Upgrade Modes
 
-- `--upgrade-mode=skills`: Performs hot-reloading of agent skills without restarting running pods (zero downtime).
 - `--upgrade-mode=harness`: Upgrades Platform Agent deployment and controller container images.
 - `--upgrade-mode=operator`: Upgrades Kubernetes Operator CRDs and controller manager.
 - `--upgrade-mode=full` (Default): Performs full atomic upgrade across operator, harness, and skills.

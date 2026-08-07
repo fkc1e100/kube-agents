@@ -2,8 +2,7 @@
 # ==============================================================================
 # 🔄 Kubernetes Agentic Harness (kube-agents) Lifecycle Upgrade Engine
 # ==============================================================================
-# Modular CLI tool for Day-2 upgrades of Platform Agent harness, operator CRDs,
-# and agent skills with zero downtime and hot-reloading support.
+# Modular CLI tool for Day-2 upgrades of the Platform Agent harness and operator.
 #
 # Usage:
 #   ./upgrade.sh [options]
@@ -28,6 +27,14 @@ PARAM_PROJECT_ID=""
 PARAM_CLUSTER_NAME=""
 PARAM_REGION=""
 PARAM_IMAGE_TAG="${IMAGE_TAG:-}"
+TEMP_REPO_DIR=""
+
+cleanup() {
+  if [ -n "$TEMP_REPO_DIR" ] && [ -d "$TEMP_REPO_DIR" ]; then
+    rm -rf -- "$TEMP_REPO_DIR"
+  fi
+}
+trap cleanup EXIT
 
 print_banner() {
   echo -e "${C_CYAN}${C_BOLD}"
@@ -63,7 +70,7 @@ show_help() {
 Usage: ./upgrade.sh [OPTIONS]
 
 Options:
-  --upgrade-mode, -m MODE  Upgrade mode: full, harness, skills, operator (Default: full)
+  --upgrade-mode, -m MODE  Upgrade mode: full, harness, operator (Default: full)
   --non-interactive, -y    Automated execution mode (no interactive prompts)
   --dry-run                Preview upgrade plan and configuration state without touching cloud resources
   --project-id ID          GCP Target Project ID
@@ -75,9 +82,6 @@ Options:
 Examples:
   # Perform full atomic upgrade of harness, operator, and skills
   ./upgrade.sh --non-interactive --project-id="my-gcp-project" --cluster-name="platform-agent-host"
-
-  # Hot-reload agent skills on active cluster without pod restarts
-  ./upgrade.sh --upgrade-mode=skills --non-interactive
 
   # Dry-run upgrade preview
   ./upgrade.sh --dry-run --upgrade-mode=full
@@ -136,16 +140,36 @@ main() {
     PARAM_IMAGE_TAG="${PARAM_IMAGE_TAG:-latest}"
   fi
 
+  case "$PARAM_UPGRADE_MODE" in
+    full|harness|operator) ;;
+    *) print_error "Unsupported upgrade mode '$PARAM_UPGRADE_MODE'. Use full, harness, or operator."; exit 1 ;;
+  esac
+
+  local script_dir repo_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "${script_dir}/k8s-operator/scripts/provision_03_gcp_gke_operator.sh" ]; then
+    repo_dir="$script_dir"
+  elif [ -f "$(pwd)/k8s-operator/scripts/provision_03_gcp_gke_operator.sh" ]; then
+    repo_dir="$(pwd)"
+  else
+    TEMP_REPO_DIR="$(mktemp -d)"
+    repo_dir="${TEMP_REPO_DIR}/kube-agents"
+    print_info "Fetching provisioning scripts for '${PARAM_IMAGE_TAG}'..."
+    git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$repo_dir"
+    git -C "$repo_dir" fetch --depth=1 origin "$PARAM_IMAGE_TAG"
+    git -C "$repo_dir" checkout --detach FETCH_HEAD
+  fi
+
   print_step "1. Validating Upgrade Target & Environment"
   print_info "Upgrade Mode: ${C_BOLD}${PARAM_UPGRADE_MODE}${C_RESET}"
   print_info "Target Image Tag: ${C_BOLD}${PARAM_IMAGE_TAG}${C_RESET}"
 
-  if [ ! -f "k8s-operator/scripts/vars.sh" ]; then
+  if [ ! -f "${repo_dir}/k8s-operator/scripts/vars.sh" ]; then
     print_warning "No existing vars.sh found. Performing configuration state restoration..."
   else
     # Load state
     # shellcheck disable=SC1091
-    source "k8s-operator/scripts/vars.sh" 2>/dev/null || true
+    source "${repo_dir}/k8s-operator/scripts/vars.sh"
     print_success "Loaded existing configuration state from k8s-operator/scripts/vars.sh"
   fi
 
@@ -173,62 +197,44 @@ main() {
   fi
 
   print_step "2. Connecting kubectl to GKE Cluster"
-  gcloud container clusters get-credentials "$target_cluster" --region="$target_region" --project="$target_project" 2>/dev/null || true
+  gcloud container clusters get-credentials "$target_cluster" --region="$target_region" --project="$target_project"
 
   case "$PARAM_UPGRADE_MODE" in
-    skills)
-      print_step "3. Hot-Reloading Agent Skills (Zero Downtime)"
-      print_info "Syncing repository skills (.agents/skills/) to active cluster..."
-      if [ -d "agents/platform/skills" ]; then
-        kubectl create configmap platform-agent-skills \
-          --from-file=agents/platform/skills \
-          -n kubeagents-system \
-          --dry-run=client -o yaml | kubectl apply -f -
-        print_success "Agent skills hot-reloaded successfully on active cluster!"
-      else
-        print_warning "Directory agents/platform/skills not found. Skipped skills ConfigMap update."
-      fi
-      ;;
-
     operator)
       print_step "3. Upgrading Kubernetes Operator (CRDs & Controller Manager)"
-      cd k8s-operator
+      cd "${repo_dir}/k8s-operator"
       IMAGE_TAG="$PARAM_IMAGE_TAG" NO_CONFIRM=1 ./scripts/provision_03_gcp_gke_operator.sh
-      cd ..
+      cd "$repo_dir"
       print_success "Kubernetes Operator upgraded successfully!"
       ;;
 
     harness)
       print_step "3. Upgrading Platform Agent Deployment & Identity"
-      cd k8s-operator
+      cd "${repo_dir}/k8s-operator"
       IMAGE_TAG="$PARAM_IMAGE_TAG" NO_CONFIRM=1 ./scripts/provision_08_deploy_platform_agent.sh
-      cd ..
+      cd "$repo_dir"
       print_success "Platform Agent deployment upgraded successfully!"
       ;;
 
-    full|*)
+    full)
       print_step "3. Executing Full Atomic Upgrade (Operator, Harness & Skills)"
-      cd k8s-operator
+      cd "${repo_dir}/k8s-operator"
       IMAGE_TAG="$PARAM_IMAGE_TAG" NO_CONFIRM=1 ./scripts/provision_03_gcp_gke_operator.sh
       IMAGE_TAG="$PARAM_IMAGE_TAG" NO_CONFIRM=1 ./scripts/provision_08_deploy_platform_agent.sh
-      cd ..
-
-      if [ -d "agents/platform/skills" ]; then
-        kubectl create configmap platform-agent-skills \
-          --from-file=agents/platform/skills \
-          -n kubeagents-system \
-          --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
-      fi
+      cd "$repo_dir"
       print_success "Full atomic upgrade completed successfully!"
       ;;
   esac
 
   print_step "4. Post-Upgrade Health Verification"
-  if kubectl get ns kubeagents-system >/dev/null 2>&1; then
-    kubectl rollout status deployment/kubeagents-controller-manager -n kubeagents-system --timeout=60s 2>/dev/null || true
-    kubectl rollout status deployment/litellm -n kubeagents-system --timeout=60s 2>/dev/null || true
-    print_success "All core control plane deployments verified healthy after upgrade!"
+  kubectl get ns kubeagents-system >/dev/null
+  if [ "$PARAM_UPGRADE_MODE" = "operator" ] || [ "$PARAM_UPGRADE_MODE" = "full" ]; then
+    kubectl rollout status deployment/kubeagents-controller-manager -n kubeagents-system --timeout=120s
   fi
+  if [ "$PARAM_UPGRADE_MODE" = "harness" ] || [ "$PARAM_UPGRADE_MODE" = "full" ]; then
+    kubectl rollout status deployment/platform-agent-gateway -n kubeagents-system --timeout=120s
+  fi
+  print_success "Upgraded deployments verified healthy."
 
   write_report "SUCCESS"
 
