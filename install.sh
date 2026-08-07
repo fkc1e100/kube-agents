@@ -943,7 +943,7 @@ export REPLAY_PROXY_IMAGE="${registry_prefix}/replay-proxy"
 export INFERENCE_REPLAY_ENABLED="false"
 export NO_CONFIRM="1"
 EOF
-  chmod 700 "$vars_file"
+  chmod 600 "$vars_file"
   print_success "Configuration saved to: $vars_file"
 
   # Pre-Flight Summary & Final Confirmation Checkpoint
