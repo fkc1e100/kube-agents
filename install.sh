@@ -328,7 +328,7 @@ run_menu_system() {
     print_error "Cannot find provisioning helpers at $common_script."
     exit 1
   fi
-  VARS_FILE="$vars_file"
+  export VARS_FILE="$vars_file"
   # shellcheck disable=SC1090
   source "$common_script"
 
