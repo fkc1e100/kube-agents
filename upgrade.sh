@@ -27,7 +27,7 @@ PARAM_DRY_RUN="false"
 PARAM_PROJECT_ID=""
 PARAM_CLUSTER_NAME=""
 PARAM_REGION=""
-PARAM_IMAGE_TAG="latest"
+PARAM_IMAGE_TAG="${IMAGE_TAG:-}"
 
 print_banner() {
   echo -e "${C_CYAN}${C_BOLD}"
@@ -69,7 +69,7 @@ Options:
   --project-id ID          GCP Target Project ID
   --cluster-name NAME      GKE Target Cluster Name
   --region REGION          GKE GCP Region
-  --image-tag TAG          Target container image tag for upgrade (Default: latest)
+  --image-tag TAG          Target release tag or commit SHA (required in non-interactive mode)
   --help, -h               Show this help message
 
 Examples:
@@ -126,6 +126,15 @@ EOF
 main() {
   parse_args "$@"
   print_banner
+
+  if [ -z "$PARAM_IMAGE_TAG" ]; then
+    if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
+      print_error "--image-tag is required in non-interactive mode."
+      exit 1
+    fi
+    read -rp "Target image tag [latest]: " PARAM_IMAGE_TAG
+    PARAM_IMAGE_TAG="${PARAM_IMAGE_TAG:-latest}"
+  fi
 
   print_step "1. Validating Upgrade Target & Environment"
   print_info "Upgrade Mode: ${C_BOLD}${PARAM_UPGRADE_MODE}${C_RESET}"

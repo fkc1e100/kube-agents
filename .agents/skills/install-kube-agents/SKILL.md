@@ -17,6 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.s
   --project-id="YOUR_GCP_PROJECT_ID" \
   --cluster-name="kube-agents-platform" \
   --region="us-central1" \
+  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
   --model-provider="gemini" \
   --permission-set="sre"
 ```
@@ -56,14 +57,15 @@ Upon completion, `install.sh` generates a machine-readable JSON status report at
 
 ## Supported Command-Line Flags
 
-| Flag                    | Description                                              | Default                 |
-| :---------------------- | :------------------------------------------------------- | :---------------------- |
-| `-y, --non-interactive` | Run without blocking on `/dev/tty` prompts               | `false`                 |
-| `--dry-run`             | Output plan and `vars.sh` without creating resources     | `false`                 |
-| `--project-id=ID`       | Target GCP Project ID                                    | Active `gcloud` project |
-| `--region=REGION`       | Target GCP Region                                        | `us-central1`           |
-| `--cluster-name=NAME`   | GKE Cluster Name                                         | `kube-agents-platform`  |
-| `--model-provider=NAME` | LLM Model Provider (`gemini` \| `openai` \| `anthropic`) | `gemini`                |
-| `--permission-set=SET`  | Platform Agent RBAC scope (`sre` \| `read-only`)         | `sre`                   |
-| `--gvisor=true\|false`  | Enable GKE Sandbox runtime isolation                     | `false`                 |
-| `-h, --help, -?`        | Output CLI usage banner and parameter details            | `N/A`                   |
+| Flag                    | Description                                              | Default                    |
+| :---------------------- | :------------------------------------------------------- | :------------------------- |
+| `-y, --non-interactive` | Run without blocking on `/dev/tty` prompts               | `false`                    |
+| `--dry-run`             | Output plan and `vars.sh` without creating resources     | `false`                    |
+| `--project-id=ID`       | Target GCP Project ID                                    | Active `gcloud` project    |
+| `--region=REGION`       | Target GCP Region                                        | `us-central1`              |
+| `--cluster-name=NAME`   | GKE Cluster Name                                         | `kube-agents-platform`     |
+| `--image-tag=TAG`       | Validated release tag or commit SHA                      | Required non-interactively |
+| `--model-provider=NAME` | LLM Model Provider (`gemini` \| `openai` \| `anthropic`) | `gemini`                   |
+| `--permission-set=SET`  | Platform Agent RBAC scope (`sre` \| `read-only`)         | `sre`                      |
+| `--gvisor=true\|false`  | Enable GKE Sandbox runtime isolation                     | `false`                    |
+| `-h, --help, -?`        | Output CLI usage banner and parameter details            | `N/A`                      |

@@ -17,7 +17,8 @@ curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- \
   --non-interactive \
   --project-id="<PROJECT_ID>" \
   --cluster-name="<CLUSTER_NAME>" \
-  --region="<REGION>"
+  --region="<REGION>" \
+  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
 ```
 
 ## Upgrade Modes
