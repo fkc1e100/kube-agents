@@ -43,13 +43,14 @@ Run the interactive one-liner installer directly in **Google Cloud Shell** or an
 curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash
 ```
 
-*(Alternatively via GitHub raw URL: `curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.sh | bash`)*
+_(Alternatively via GitHub raw URL: `curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.sh | bash`)_
 
 ### What `install.sh` Automatically Handles:
+
 - **`gcloud` Authentication**: Checks login state and launches auth flows if needed.
 - **GCP Project & Region Selection**: Auto-detects active project and prompts for confirmation.
 - **GKE Cluster Provisioning Options**:
-  - **New Cluster**: Select from **GKE Autopilot**, or **GKE Standard** (Small, Medium, Large) with node pool autoscaling.
+  - **New Cluster**: Provision the supported **GKE Standard** topology.
 
 ### Non-Interactive & AI Agent Execution Mode
 
@@ -69,25 +70,28 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
 When evaluating installation and teardown validation test runs, measure success against these three tiers:
 
 #### Installation Evaluation Tiers:
-| Tier | Evaluation Criteria | Description |
-| :--- | :--- | :--- |
+
+| Tier                   | Evaluation Criteria            | Description                                                                                                                                    |
+| :--------------------- | :----------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------- |
 | **🏆 Perfect Success** | **Issue Detected & PR Logged** | The Platform Agent detects an active cluster failure within the first 10 minutes and automatically formulates a remediation PR or action plan. |
-| **🥇 Good Success** | **Clean Fleet Triage** | Fleet-wide event triage takes place across all watched clusters, active informers stream telemetry, and no actionable errors are found. |
-| **🥈 OK Success** | **Control Plane Deployment** | The control plane installs cleanly, rolls out workloads, and has full visibility/connectivity across all target GCP project clusters. |
+| **🥇 Good Success**    | **Clean Fleet Triage**         | Fleet-wide event triage takes place across all watched clusters, active informers stream telemetry, and no actionable errors are found.        |
+| **🥈 OK Success**      | **Control Plane Deployment**   | The control plane installs cleanly, rolls out workloads, and has full visibility/connectivity across all target GCP project clusters.          |
 
 #### Teardown Evaluation Tiers:
-| Tier | Evaluation Criteria | Description |
-| :--- | :--- | :--- |
-| **🏆 Perfect Teardown** | **Zero Residual Fleet & Cloud Sweep** | All `kubeagents-system` namespaces, CRDs, RBAC, webhooks, retained GCP Persistent Disks, GCS buckets, Pub/Sub topics, Secrets, and GitOps manifests across all fleet clusters are 100% purged with zero residual artifacts. |
-| **🥇 Good Teardown** | **Clean Fleet Namespace & RBAC Purge** | All namespaces, workloads, CRDs, and RBAC bindings across all fleet clusters are cleanly deleted. |
-| **🥈 OK Teardown** | **Host Cluster Teardown** | Central host cluster objects are cleanly removed. |
+
+| Tier                    | Evaluation Criteria                    | Description                                                                                                                                                                                                                 |
+| :---------------------- | :------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **🏆 Perfect Teardown** | **Zero Residual Fleet & Cloud Sweep**  | All `kubeagents-system` namespaces, CRDs, RBAC, webhooks, retained GCP Persistent Disks, GCS buckets, Pub/Sub topics, Secrets, and GitOps manifests across all fleet clusters are 100% purged with zero residual artifacts. |
+| **🥇 Good Teardown**    | **Clean Fleet Namespace & RBAC Purge** | All namespaces, workloads, CRDs, and RBAC bindings across all fleet clusters are cleanly deleted.                                                                                                                           |
+| **🥈 OK Teardown**      | **Host Cluster Teardown**              | Central host cluster objects are cleanly removed.                                                                                                                                                                           |
 
 To run pre-flight checks and output configuration state (`vars.sh` and `/tmp/kube-agents-install-report.json`) without creating cloud resources:
 
 ```bash
 ./install.sh --dry-run --non-interactive --project-id="my-gcp-project"
 ```
-  - **Existing Cluster**: Select an existing GKE cluster from your GCP project.
+
+- **Existing Cluster**: Select an existing GKE cluster from your GCP project.
 - **Chat Integrations Setup**:
   - Configures **Google Chat** (Pub/Sub endpoint, allowed user permissions) and/or **Slack** (Socket Mode Bot Token / App Token).
 - **AI Model Credentials**:

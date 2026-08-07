@@ -46,12 +46,6 @@ PARAM_DRY_RUN="${DRY_RUN:-false}"
 PARAM_PROJECT_ID="${PROJECT_ID:-}"
 PARAM_REGION="${REGION:-}"
 PARAM_CLUSTER_NAME="${CLUSTER_NAME:-}"
-PARAM_CLUSTER_TYPE="${CLUSTER_TYPE:-standard}"
-PARAM_MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-4}"
-PARAM_NUM_NODES="${NUM_NODES:-1}"
-PARAM_MIN_NODES="${MIN_NODES:-1}"
-PARAM_MAX_NODES="${MAX_NODES:-5}"
-PARAM_ENABLE_AUTOSCALING="${ENABLE_AUTOSCALING:-true}"
 PARAM_MODEL_PROVIDER="${MODEL_PROVIDER:-gemini}"
 PARAM_GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 PARAM_OPENAI_API_KEY="${OPENAI_API_KEY:-}"
@@ -76,8 +70,6 @@ Flags for AI Agents & Automation:
   --project-id=ID               Target GCP Project ID
   --region=REGION               Target GCP Region (default: us-central1)
   --cluster-name=NAME           GKE Cluster Name (default: kube-agents-platform)
-  --cluster-type=TYPE           GKE Cluster Type: standard | autopilot (default: standard)
-  --machine-type=SPEC           Node machine spec: e2-standard-4 | e2-standard-8 | c3-standard-22
   --model-provider=PROVIDER     Model provider: gemini | openai | anthropic (default: gemini)
   --gemini-api-key=KEY          Gemini API Key
   --openai-api-key=KEY          OpenAI API Key
@@ -104,8 +96,6 @@ parse_args() {
       --project-id=*) PARAM_PROJECT_ID="${1#*=}"; shift ;;
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --cluster-name=*) PARAM_CLUSTER_NAME="${1#*=}"; shift ;;
-      --cluster-type=*) PARAM_CLUSTER_TYPE="${1#*=}"; shift ;;
-      --machine-type=*) PARAM_MACHINE_TYPE="${1#*=}"; shift ;;
       --model-provider=*) PARAM_MODEL_PROVIDER="${1#*=}"; shift ;;
       --gemini-api-key=*) PARAM_GEMINI_API_KEY="${1#*=}"; shift ;;
       --openai-api-key=*) PARAM_OPENAI_API_KEY="${1#*=}"; shift ;;
@@ -643,31 +633,7 @@ main() {
   fi
 
   local cluster_name="${PARAM_CLUSTER_NAME:-}"
-  local cluster_type="${PARAM_CLUSTER_TYPE:-standard}"
-  local machine_type="${PARAM_MACHINE_TYPE:-e2-standard-4}"
-  local num_nodes="${PARAM_NUM_NODES:-1}"
-  local min_nodes="${PARAM_MIN_NODES:-1}"
-  local max_nodes="${PARAM_MAX_NODES:-5}"
-  local enable_autoscaling="${PARAM_ENABLE_AUTOSCALING:-true}"
-
   if [ "$cluster_choice" = "1" ]; then
-    if [ "$PARAM_NON_INTERACTIVE" != "true" ] && [ -z "$PARAM_CLUSTER_NAME" ]; then
-      local size_choice=""
-      prompt_menu "Select GKE Cluster Size & Machine Spec:" \
-        "Small Standard (e2-standard-4, 1-3 nodes, Autoscaling enabled)" \
-        "Medium Standard (e2-standard-8, 1-5 nodes, Autoscaling enabled)" \
-        "Large High-Performance (c3-standard-22, 2-10 nodes, Autoscaling enabled)" \
-        "GKE Autopilot (Fully managed serverless GKE)" \
-        size_choice
-
-      case "$size_choice" in
-        1) machine_type="e2-standard-4"; num_nodes=1; min_nodes=1; max_nodes=3 ;;
-        2) machine_type="e2-standard-8"; num_nodes=1; min_nodes=1; max_nodes=5 ;;
-        3) machine_type="c3-standard-22"; num_nodes=2; min_nodes=2; max_nodes=10 ;;
-        4) cluster_type="autopilot" ;;
-      esac
-    fi
-
     if [ -z "$cluster_name" ]; then
       prompt_read "New GKE Cluster Name" cluster_name "kube-agents-platform"
     fi
@@ -948,12 +914,6 @@ export PROJECT_NUMBER="${project_number}"
 export CLUSTER_NAME="${cluster_name}"
 export REGION="${region}"
 export KMS_LOCATION="${kms_location:-${region%-*}}"
-export CLUSTER_TYPE="${cluster_type}"
-export MACHINE_TYPE="${machine_type}"
-export NUM_NODES="${num_nodes}"
-export MIN_NODES="${min_nodes}"
-export MAX_NODES="${max_nodes}"
-export ENABLE_AUTOSCALING="${enable_autoscaling}"
 export ENABLE_GVISOR="${enable_gvisor}"
 export GVISOR_POOL_NAME="gvisor-pool"
 export READ_ONLY_MODE="${read_only_mode}"
@@ -1003,8 +963,7 @@ EOF
   draw_separator
   echo -e "${C_RESET}${C_BOLD}Please review your selections before provisioning begins:${C_RESET}"
   echo -e "  • ${C_CYAN}GCP Target Project:${C_RESET} ${C_BOLD}${project_id}${C_RESET} (Project Number: ${project_number:-unknown})"
-  echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${C_BOLD}${cluster_name}${C_RESET} (${region}, type: ${cluster_type})"
-  echo -e "  • ${C_CYAN}Node Machine Spec:${C_RESET} ${machine_type} (${min_nodes}-${max_nodes} nodes, autoscaling: ${enable_autoscaling})"
+  echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${C_BOLD}${cluster_name}${C_RESET} (${region}, GKE Standard)"
   echo -e "  • ${C_CYAN}gVisor Sandbox Isolation:${C_RESET} ${enable_gvisor}"
   echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
   echo -e "  • ${C_CYAN}Permission Boundary:${C_RESET} ${permission_set}"
