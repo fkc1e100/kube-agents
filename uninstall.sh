@@ -48,6 +48,14 @@ PARAM_FLEET="false"
 PARAM_PURGE_STORAGE="false"
 PARAM_CLEAN_GITOPS="false"
 PARAM_GITOPS_REPO="gke-fleet-iac"
+TEMP_REPO_DIR=""
+
+cleanup() {
+  if [ -n "$TEMP_REPO_DIR" ] && [ -d "$TEMP_REPO_DIR" ]; then
+    rm -rf -- "$TEMP_REPO_DIR"
+  fi
+}
+trap cleanup EXIT
 
 print_banner() {
   echo -e "${C_RED}${C_BOLD}"
@@ -122,7 +130,7 @@ parse_args() {
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --region) PARAM_REGION="$2"; shift 2 ;;
       --help|-h|-\?|help) show_help ;;
-      *) print_error "Unknown parameter: $1"; show_help ;;
+      *) print_error "Unknown parameter: $1"; return 2 ;;
     esac
   done
 }
@@ -241,9 +249,21 @@ main() {
 
   print_step "1. Discovering Installed Infrastructure Elements"
 
-  if [ -f "k8s-operator/scripts/vars.sh" ]; then
+  local script_dir repo_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "${script_dir}/k8s-operator/scripts/teardown.sh" ]; then
+    repo_dir="$script_dir"
+  elif [ -f "$(pwd)/k8s-operator/scripts/teardown.sh" ]; then
+    repo_dir="$(pwd)"
+  else
+    TEMP_REPO_DIR="$(mktemp -d)"
+    repo_dir="${TEMP_REPO_DIR}/kube-agents"
+    print_info "Fetching the teardown scripts from kube-agents main..."
+    git clone --depth=1 https://github.com/gke-labs/kube-agents.git "$repo_dir"
+  fi
+  if [ -f "${repo_dir}/k8s-operator/scripts/vars.sh" ]; then
     # shellcheck disable=SC1091
-    source "k8s-operator/scripts/vars.sh" 2>/dev/null || true
+    source "${repo_dir}/k8s-operator/scripts/vars.sh"
     print_success "Loaded configuration state from k8s-operator/scripts/vars.sh"
   fi
 
@@ -278,10 +298,11 @@ main() {
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
     echo -e "\n${C_RED}${C_BOLD}⚠️  WARNING: This will PERMANENTLY DELETE all kube-agents infrastructure in GCP project '${target_project}'!${C_RESET}"
     local confirm_choice=""
-    if [ -t 0 ] || [ -c /dev/tty ]; then
-      read -rp "Are you sure you want to proceed with complete uninstallation? (y/N): " confirm_choice </dev/tty >/dev/tty || confirm_choice="y"
+    if [ -c /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
+      read -rp "Are you sure you want to proceed with complete uninstallation? (y/N): " confirm_choice </dev/tty >/dev/tty || confirm_choice=""
     else
-      confirm_choice="y"
+      print_error "No interactive terminal is available. Re-run with --non-interactive only after reviewing the target."
+      exit 1
     fi
     if [[ ! "$confirm_choice" =~ ^[Yy]$ ]]; then
       print_warning "Uninstall cancelled by user."
@@ -296,12 +317,10 @@ main() {
   export REGION="$target_region"
   export NO_CONFIRM="1"
 
-  cd k8s-operator
-  if [ -f "scripts/teardown.sh" ]; then
-    bash scripts/teardown.sh -y --no-confirm || true
-  fi
+  cd "${repo_dir}/k8s-operator"
+  bash scripts/teardown.sh -y --no-confirm
   rm -f scripts/vars.sh
-  cd ..
+  cd "$repo_dir"
 
   if [ "$PARAM_FLEET" = "true" ]; then
     purge_fleet_clusters "$target_project"
