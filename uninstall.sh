@@ -97,7 +97,7 @@ Options:
   --cluster-name NAME           GKE Target Cluster Name (default: platform-agent-host)
   --region REGION               GKE GCP Region
   --fleet, --all-clusters       Discover & purge agent components across all fleet clusters in the project
-  --purge-storage               Delete retained PVs, GCP Persistent Disks, GCS buckets, and Filestore instances
+  --purge-storage               Delete matching retained GCP Persistent Disks
   --clean-gitops                Purge agent manifests from GitOps repository & remove ArgoCD Application CRs
   --gitops-repo REPO            GitOps repository name (default: gke-fleet-iac)
   --help, -h, -?                Show this help message
@@ -209,7 +209,7 @@ purge_fleet_clusters() {
 purge_storage_resources() {
   local project="$1"
   print_step "4. Storage & Persistent Disk Purge"
-  print_info "Scanning for retained PVs, GCP Persistent Disks, GCS Buckets, and Filestore instances..."
+  print_info "Scanning for retained GCP Persistent Disks with kube-agents names..."
   
   # Search and delete orphaned disks matching agent keywords
   local disks
