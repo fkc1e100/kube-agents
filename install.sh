@@ -516,6 +516,15 @@ main() {
     print_info "Execution Mode: ${C_BOLD}Non-Interactive / AI Agent Automated Mode${C_RESET} 🤖"
   fi
 
+  local image_tag="${PARAM_IMAGE_TAG:-}"
+  if [ -z "$image_tag" ]; then
+    if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
+      print_error "--image-tag is required in non-interactive mode; use a validated release tag or commit SHA."
+      exit 1
+    fi
+    prompt_read "Container image tag (validated release tag or commit SHA)" image_tag "latest"
+  fi
+
   # 2. Prerequisite CLI Tools Check & Auto-Installation
   print_step "1. Checking Prerequisites & Installing Missing Tools"
   for tool in git make gcloud kubectl gh helm; do
@@ -865,12 +874,17 @@ main() {
   else
     repo_dir="$HOME/kube-agents"
     if [ -d "$repo_dir" ]; then
-      print_info "Updating existing repository at $repo_dir..."
+      print_info "Using existing repository at $repo_dir without modifying local changes."
       cd "$repo_dir"
-      git pull origin main || true
     else
-      print_info "Cloning kube-agents repository into $repo_dir..."
-      git clone https://github.com/gke-labs/kube-agents.git "$repo_dir"
+      local source_ref="$image_tag"
+      if [ "$source_ref" = "latest" ]; then
+        source_ref="main"
+      fi
+      print_info "Cloning kube-agents provisioning scripts at '$source_ref' into $repo_dir..."
+      git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$repo_dir"
+      git -C "$repo_dir" fetch --depth=1 origin "$source_ref"
+      git -C "$repo_dir" checkout --detach FETCH_HEAD
       cd "$repo_dir"
     fi
   fi
@@ -881,14 +895,6 @@ main() {
   if [ -z "$registry_prefix" ] || [[ "$registry_prefix" == *"://"* ]]; then
     print_error "--registry-prefix must be a non-empty registry path without a URL scheme."
     exit 1
-  fi
-  local image_tag="${PARAM_IMAGE_TAG:-}"
-  if [ -z "$image_tag" ]; then
-    if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-      print_error "--image-tag is required in non-interactive mode; use a validated release tag or commit SHA."
-      exit 1
-    fi
-    prompt_read "Container image tag (validated release tag or commit SHA)" image_tag "latest"
   fi
 
   cat << EOF > "$vars_file"
