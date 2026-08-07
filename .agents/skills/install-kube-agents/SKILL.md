@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.s
   --region="us-central1" \
   --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
   --model-provider="gemini" \
-  --permission-set="sre"
+  --permission-set="read-only"
 ```
 
 ## Dry-Run Inspection
@@ -66,6 +66,6 @@ Upon completion, `install.sh` generates a machine-readable JSON status report at
 | `--cluster-name=NAME`   | GKE Cluster Name                                         | `kube-agents-platform`     |
 | `--image-tag=TAG`       | Validated release tag or commit SHA                      | Required non-interactively |
 | `--model-provider=NAME` | LLM Model Provider (`gemini` \| `openai` \| `anthropic`) | `gemini`                   |
-| `--permission-set=SET`  | Platform Agent RBAC scope (`sre` \| `read-only`)         | `sre`                      |
+| `--permission-set=SET`  | Platform Agent RBAC scope (`read-only` \| `gke-admin`)   | `read-only`                |
 | `--gvisor=true\|false`  | Enable GKE Sandbox runtime isolation                     | `false`                    |
 | `-h, --help, -?`        | Output CLI usage banner and parameter details            | `N/A`                      |

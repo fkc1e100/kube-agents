@@ -58,7 +58,7 @@ PARAM_OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 PARAM_ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 PARAM_GITOPS_ORG="${GITHUB_ORG:-}"
 PARAM_GITOPS_REPO="${GITHUB_REPO:-}"
-PARAM_PERMISSION_SET="${PLATFORM_AGENT_PERMISSION_SET:-sre}"
+PARAM_PERMISSION_SET="${PLATFORM_AGENT_PERMISSION_SET:-read-only}"
 PARAM_ENABLE_GVISOR="${ENABLE_GVISOR:-false}"
 PARAM_ENABLE_WEBUI="${ENABLE_WEBUI:-false}"
 PARAM_IMAGE_TAG="${IMAGE_TAG:-}"
@@ -84,7 +84,7 @@ Flags for AI Agents & Automation:
   --anthropic-api-key=KEY       Anthropic API Key
   --gitops-org=ORG              GitHub Org/Username for GitOps repo
   --gitops-repo=REPO            GitOps IaC Repository Name (default: gke-fleet-iac)
-  --permission-set=SET          Agent permission boundary: sre | read-only (default: sre)
+  --permission-set=SET          Agent permission boundary: read-only | gke-admin (default: read-only)
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
   --enable-web-ui=true|false    Enable Hermes Web UI port 9119 dashboard (default: false)
   --image-tag=TAG               Validated release tag or commit SHA (required in non-interactive mode)
@@ -365,7 +365,7 @@ run_menu_system() {
   local allowed_users="${ALLOWED_USERS:-$(gcloud config get-value account 2>/dev/null || echo "")}"
   local chat_topic_name="${CHAT_TOPIC_NAME:-platform-agent-chat-events}"
   local chat_sub_name="${CHAT_SUB_NAME:-platform-agent-chat-events-sub}"
-  local permission_set="${PLATFORM_AGENT_PERMISSION_SET:-sre}"
+  local permission_set="${PLATFORM_AGENT_PERMISSION_SET:-read-only}"
   local enable_gvisor="${ENABLE_GVISOR:-false}"
   local enable_webui="${HERMES_DASHBOARD_ENABLED:-false}"
   local github_org="${GITHUB_ORG:-}"
@@ -768,7 +768,17 @@ main() {
   # 7. LLM Model Provider Selection & API Key Auto-Discovery
   print_step "6. AI Model Provider Credentials"
   local model_provider="${PARAM_MODEL_PROVIDER:-gemini}"
-  local model_default_name="gemini-3.5-flash"
+  local model_default_name=""
+
+  case "$model_provider" in
+    gemini) model_default_name="gemini-3.5-flash" ;;
+    openai) model_default_name="gpt-5.4" ;;
+    anthropic) model_default_name="claude-sonnet-4-5-20250929" ;;
+    *)
+      print_error "Unsupported model provider '$model_provider'. Use gemini, openai, or anthropic."
+      exit 1
+      ;;
+  esac
 
   local detected_gemini_key="${PARAM_GEMINI_API_KEY:-${GEMINI_API_KEY:-}}"
   if [ -z "$detected_gemini_key" ]; then
@@ -854,9 +864,10 @@ main() {
 
   # 9. Agent Permissions & Sandbox Isolation Boundary
   print_step "8. Agent Security & Runtime Isolation Boundary"
-  local permission_set="${PARAM_PERMISSION_SET:-gke-admin}"
-  if [ "$permission_set" = "sre" ]; then
-    permission_set="gke-admin"
+  local permission_set="${PARAM_PERMISSION_SET:-read-only}"
+  if [[ ! "$permission_set" =~ ^(read-only|gke-admin)$ ]]; then
+    print_error "Unsupported permission set '$permission_set'. Use read-only or gke-admin."
+    exit 1
   fi
   local read_only_mode="false"
   if [ "$permission_set" = "read-only" ]; then
