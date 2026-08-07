@@ -66,26 +66,6 @@ retry() {
   return 1
 }
 
-retry() {
-  local max_retries=$1
-  local delay=$2
-  shift 2
-  local count=0
-
-  while [ $count -lt $max_retries ]; do
-    count=$((count + 1))
-    if "$@"; then
-      return 0
-    fi
-    if [ $count -lt $max_retries ]; then
-      echo -e "  ${C_YELLOW}⚠ [Retry $count/$max_retries] Waiting ${delay}s before next attempt...${C_RESET}" >&2
-      sleep "$delay"
-    fi
-  done
-
-  return 1
-}
-
 cleanup() { tput cnorm 2>/dev/null || true; }
 trap cleanup EXIT
 
