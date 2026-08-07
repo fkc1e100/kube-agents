@@ -90,7 +90,6 @@ Flags for AI Agents & Automation:
   --image-tag=TAG               Validated release tag or commit SHA (required in non-interactive mode)
   --menu, --config              Launch interactive Day-2 Control Panel Menu (raspi-config style)
   --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
-  --reset, --factory-reset      Uninstall resources and reset repository to clean factory default state
   -h, --help, -?                Show this help message
 EOF
 }
@@ -102,7 +101,6 @@ parse_args() {
       --dry-run) PARAM_DRY_RUN="true"; shift ;;
       --menu|--config|--configure|menu|config) PARAM_MENU_MODE="true"; shift ;;
       --uninstall|--delete) PARAM_UNINSTALL="true"; shift ;;
-      --reset|--factory-reset) PARAM_RESET="true"; shift ;;
       --project-id=*) PARAM_PROJECT_ID="${1#*=}"; shift ;;
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --cluster-name=*) PARAM_CLUSTER_NAME="${1#*=}"; shift ;;
@@ -521,15 +519,6 @@ main() {
   if [ "${PARAM_UNINSTALL:-false}" = "true" ]; then
     bash "${script_dir}/uninstall.sh" "$@"
     exit 0
-  fi
-
-  if [ "${PARAM_RESET:-false}" = "true" ]; then
-    print_step "🔄 Executing Complete Reset to Factory Release State"
-    bash "${script_dir}/uninstall.sh" --non-interactive "$@" || true
-    print_info "Syncing repository to latest release from origin/main..."
-    git fetch origin main 2>/dev/null || true
-    git reset --hard origin/main 2>/dev/null || true
-    print_success "Repository reset to factory default state! Re-launching clean installation..."
   fi
 
   # 1. Environment Detection (Google Cloud Shell vs Linux/macOS Terminal)
