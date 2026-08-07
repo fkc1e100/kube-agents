@@ -360,7 +360,6 @@ run_menu_system() {
   local kms_keyring="${KMS_KEYRING:-}"
   local kms_key="${KMS_KEY:-}"
   local github_pem_path="${GITHUB_PEM_PATH:-}"
-  local github_token="${GITHUB_TOKEN:-}"
   local image_tag="${IMAGE_TAG:-latest}"
 
   while true; do
@@ -468,7 +467,6 @@ run_menu_system() {
         save_var KMS_KEYRING "$kms_keyring"
         save_var KMS_KEY "$kms_key"
         save_var GITHUB_PEM_PATH "$github_pem_path"
-        save_secret_var GITHUB_TOKEN "$github_token"
         save_var IMAGE_TAG "$image_tag"
         save_var NO_CONFIRM "1"
         print_success "Updated configuration saved to: $vars_file"
@@ -787,7 +785,6 @@ main() {
   local kms_keyring="github-token-minter-keyring"
   local kms_key="github-token-minter-key"
   local github_pem_path=""
-  local github_token=""
 
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
     local gitops_choice=""
@@ -803,22 +800,11 @@ main() {
       prompt_read "GitHub Org / Username" github_org "${detected_gh_user:-github-user}"
       prompt_read "GitOps Repository Name" github_repo "gke-fleet-iac"
 
-      local auth_strat_choice=""
-      prompt_menu "Select GitHub Auth Strategy for the Agent:" \
-        "Personal Access / CLI Token (Simple / Zero-Friction Setup)" \
-        "GitHub App & Token Minter (Enterprise / Short-Lived Tokens via GCP KMS)" \
-        auth_strat_choice
-
-      if [ "$auth_strat_choice" = "2" ]; then
-        prompt_read "GitHub App ID" github_app_id ""
-        prompt_read "Cloud KMS Keyring Name" kms_keyring "github-token-minter-keyring"
-        prompt_read "Cloud KMS Key Name" kms_key "github-token-minter-key"
-        prompt_read "Path to downloaded GitHub App Private Key (.pem)" github_pem_path ""
-      else
-        local detected_token=""
-        detected_token=$(gh auth token 2>/dev/null || echo "")
-        prompt_read "GitHub Personal Access / OAuth Token (ghp_... / gho_...)" github_token "$detected_token" true
-      fi
+      print_info "GitHub access uses the short-lived GitHub App token minter."
+      prompt_read "GitHub App ID" github_app_id ""
+      prompt_read "Cloud KMS Keyring Name" kms_keyring "github-token-minter-keyring"
+      prompt_read "Cloud KMS Key Name" kms_key "github-token-minter-key"
+      prompt_read "Path to downloaded GitHub App Private Key (.pem)" github_pem_path ""
     fi
   fi
 
@@ -938,7 +924,6 @@ export GITHUB_APP_ID="${github_app_id}"
 export KMS_KEYRING="${kms_keyring}"
 export KMS_KEY="${kms_key}"
 export GITHUB_PEM_PATH="${github_pem_path}"
-export GITHUB_TOKEN="${github_token}"
 export MEMORY_ENABLED="false"
 export MEMORY_PROVIDER="multiuser_memory"
 export USER_PROFILE_ENABLED="false"
