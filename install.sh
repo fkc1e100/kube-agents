@@ -23,7 +23,7 @@ fi
 
 # ─── Process Lock File & Error Trap Handling ────────────────────────────────
 LOCK_FILE="/tmp/kube-agents-install.lock"
-if exec 200>"$LOCK_FILE" 2>/dev/null; then
+if command -v flock >/dev/null 2>&1 && exec 200>"$LOCK_FILE" 2>/dev/null; then
   if ! flock -n 200 2>/dev/null; then
     echo -e "  \033[93m⚠ Another instance of kube-agents installer is currently running. Exiting.\033[0m" >&2
     exit 1
@@ -109,7 +109,7 @@ parse_args() {
       --image-tag=*) PARAM_IMAGE_TAG="${1#*=}"; shift ;;
       --enable-google-chat|--google-chat) PARAM_ENABLE_GOOGLE_CHAT="true"; shift ;;
       -h|--help|-\?|help) show_help; exit 0 ;;
-      *) shift ;;
+      *) print_error "Unknown parameter: $1"; show_help >&2; return 2 ;;
     esac
   done
 }
@@ -162,6 +162,10 @@ print_info() { echo -e "  ${C_CYAN}ℹ $1${C_RESET}"; }
 print_warning() { echo -e "  ${C_YELLOW}⚠ $1${C_RESET}"; }
 print_error() { echo -e "  ${C_RED}✗ $1${C_RESET}"; }
 
+has_controlling_tty() {
+  [ -c /dev/tty ] && ( : </dev/tty ) 2>/dev/null
+}
+
 # Safe prompt helper: supports non-interactive mode and /dev/tty fallback
 prompt_read() {
   local prompt_text="$1"
@@ -170,7 +174,7 @@ prompt_read() {
   local secret_mode="${4:-false}"
 
   # Non-interactive mode override
-  if [ "$PARAM_NON_INTERACTIVE" = "true" ] || [ ! -c /dev/tty ]; then
+  if [ "$PARAM_NON_INTERACTIVE" = "true" ] || ! has_controlling_tty; then
     local current_val="${!var_name:-}"
     if [ -n "$current_val" ]; then
       eval "$var_name=\"$current_val\""
@@ -182,34 +186,21 @@ prompt_read() {
   fi
 
   if [ -n "$default_val" ]; then
-    prompt_text="$prompt_text [default: ${C_BOLD}$default_val${C_RESET}, 'b' for back]: "
+    prompt_text="$prompt_text [default: ${C_BOLD}$default_val${C_RESET}]: "
   else
-    prompt_text="$prompt_text ['b' for back]: "
+    prompt_text="$prompt_text: "
   fi
 
   local input_val=""
-  if [ -t 0 ]; then
-    echo -ne "${C_CYAN}${prompt_text}${C_RESET}" >/dev/tty
-    if [ "$secret_mode" = "true" ]; then
-      read -r -s input_val </dev/tty
-      echo "" >/dev/tty
-    else
-      read -r input_val </dev/tty
-    fi
+  echo -ne "${C_CYAN}${prompt_text}${C_RESET}" >/dev/tty
+  if [ "$secret_mode" = "true" ]; then
+    read -r -s input_val </dev/tty
+    echo "" >/dev/tty
   else
-    echo -ne "${C_CYAN}${prompt_text}${C_RESET}"
-    if [ "$secret_mode" = "true" ]; then
-      read -r -s input_val
-      echo ""
-    else
-      read -r input_val
-    fi
+    read -r input_val </dev/tty
   fi
 
-  if [ "$input_val" = "b" ] || [ "$input_val" = "back" ] || [ "$input_val" = "0" ]; then
-    eval "$var_name=\"BACK\""
-    return 10
-  elif [ -z "$input_val" ] && [ -n "$default_val" ]; then
+  if [ -z "$input_val" ] && [ -n "$default_val" ]; then
     eval "$var_name=\"$default_val\""
   else
     eval "$var_name=\"$input_val\""
@@ -230,33 +221,26 @@ prompt_menu() {
     return 0
   fi
 
-  if [ -t 0 ]; then
+  if has_controlling_tty; then
     echo -e "\n${C_BOLD}$prompt_text${C_RESET}" >/dev/tty
     for i in "${!options[@]}"; do
       echo -e "  ${C_YELLOW}$((i+1)))${C_RESET} ${options[$i]}" >/dev/tty
     done
-    echo -e "  ${C_YELLOW}b)${C_RESET} Go back to previous step" >/dev/tty
   else
     echo -e "\n${C_BOLD}$prompt_text${C_RESET}"
     for i in "${!options[@]}"; do
       echo -e "  ${C_YELLOW}$((i+1)))${C_RESET} ${options[$i]}"
     done
-    echo -e "  ${C_YELLOW}b)${C_RESET} Go back to previous step"
   fi
 
   local choice=""
   while true; do
     prompt_read "Select an option (1-${#options[@]})" choice "1"
-    local ret_code=$?
-    if [ $ret_code -eq 10 ] || [ "$choice" = "BACK" ]; then
-      eval "$var_name=\"BACK\""
-      return 10
-    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
       eval "$var_name=\"$choice\""
       break
     else
-      print_error "Invalid selection. Please enter a number between 1 and ${#options[@]} or 'b' to go back." >/dev/tty
+      print_error "Invalid selection. Please enter a number between 1 and ${#options[@]}." >/dev/tty
     fi
   done
 }
@@ -485,7 +469,7 @@ EOF
         cd "${repo_dir}"
         print_success "Platform Agent re-deployed with new configuration!"
         ;;
-      7|BACK)
+      7)
         print_info "Exiting Control Panel."
         break
         ;;

@@ -22,7 +22,7 @@ C_BOLD="\033[1m"
 C_RESET="\033[0m"
 # Process Lock File & Error Trap Handling
 LOCK_FILE="/tmp/kube-agents-uninstall.lock"
-if exec 200>"$LOCK_FILE" 2>/dev/null; then
+if command -v flock >/dev/null 2>&1 && exec 200>"$LOCK_FILE" 2>/dev/null; then
   if ! flock -n 200 2>/dev/null; then
     echo -e "  \033[93m⚠ Another instance of kube-agents uninstaller is currently running. Exiting.\033[0m" >&2
     exit 1
