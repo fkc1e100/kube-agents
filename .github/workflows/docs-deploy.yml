@@ -17,6 +17,7 @@ on:
       - "docs/site/**"
       - "install.sh"
       - "uninstall.sh"
+      - "upgrade.sh"
       - ".github/workflows/docs-deploy.yml"
   workflow_dispatch:
 
