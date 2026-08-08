@@ -209,6 +209,17 @@ AUDITS: dict[str, AuditSpec] = {
             "dangling-compute-class",
         ),
     ),
+    "finops-cloud-waste-audit": AuditSpec(
+        "FinOps & Cloud Waste Audit",
+        "finops_cloud_waste_sop.md",
+        (
+            "massive-overrequest",
+            "orphan-retained-pvs",
+            "unattached-static-ips",
+            "cloud-logging-cost-runaway",
+            "idle-backend-services",
+        ),
+    ),
 }
 
 SEVERITIES = ("critical", "major", "minor")
