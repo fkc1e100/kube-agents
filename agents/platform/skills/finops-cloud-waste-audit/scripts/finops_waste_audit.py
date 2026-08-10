@@ -112,7 +112,7 @@ def audit_project_waste(project_id: str) -> list[dict]:
         for svc in services:
             s_name = svc.get("name", "")
             backends = svc.get("backends", [])
-            if not backends and not s_name.startswith("k8s-"):
+            if not backends and not (s_name.startswith("k8s-") or s_name.startswith("k8s2-")):
                 findings.append({
                     "check": "idle-backend-services",
                     "severity": "minor",
