@@ -1535,10 +1535,6 @@ func buildDefaultVolumeMounts(homeDir string) []corev1.VolumeMount {
 			MountPath: path.Dir(sessionKVDBPath),
 			SubPath:   "session",
 		},
-		{
-			Name:      "credential-proxy-runtime",
-			MountPath: "/var/run/credential-proxy",
-		},
 	}
 }
 
@@ -1668,7 +1664,7 @@ func buildCredentialProxyEnv(agent *agentv1alpha1.PlatformAgent) []corev1.EnvVar
 		envVars = append(envVars,
 			corev1.EnvVar{Name: "GKE_PROJECT_ID", Value: harness.ProjectID}, corev1.EnvVar{Name: "GKE_CLUSTER_NAME", Value: harness.ClusterName}, corev1.EnvVar{Name: "GKE_LOCATION", Value: harness.Location},
 			corev1.EnvVar{Name: "KUBE_CONTEXT_NAME", Value: fmt.Sprintf("gke_%s_%s_%s", harness.ProjectID, harness.Location, harness.ClusterName)}, corev1.EnvVar{Name: "KUBE_DEFAULT_NAMESPACE", Value: agent.Namespace},
-			corev1.EnvVar{Name: "CREDENTIAL_PROXY_BOOTSTRAP_COMMAND", Value: `kubectl config set-cluster default --server="https://kubernetes.default.svc" --insecure-skip-tls-verify=true >/dev/null && kubectl config set-context default --cluster=default --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null && kubectl config use-context default >/dev/null`},
+			corev1.EnvVar{Name: "CREDENTIAL_PROXY_BOOTSTRAP_COMMAND", Value: `if [ -f /var/run/secrets/kubernetes.io/serviceaccount/ca.crt ]; then kubectl config set-cluster default --server="https://kubernetes.default.svc" --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt >/dev/null; else kubectl config set-cluster default --server="https://kubernetes.default.svc" --insecure-skip-tls-verify=true >/dev/null; fi && if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then kubectl config set-credentials in-cluster --token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)" >/dev/null && kubectl config set-context default --cluster=default --user=in-cluster --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; else kubectl config set-context default --cluster=default --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; fi && kubectl config use-context default >/dev/null`},
 		)
 	}
 	if integration := agent.Spec.Integration; integration != nil {
