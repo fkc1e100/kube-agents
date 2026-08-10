@@ -35,7 +35,7 @@ if [ -n "$CLUSTER_EXISTS" ]; then
     retry_count=0
     max_retries=3
     while [ $retry_count -lt $max_retries ]; do
-      if gcloud container clusters delete "$CLUSTER_NAME" --region="$REGION" --project="${PROJECT_ID}" --quiet; then
+      if gcloud container clusters delete "$CLUSTER_NAME" --location="$REGION" --project="${PROJECT_ID}" --quiet; then
         echo -e "  ${C_GREEN}✓ GKE Cluster '$CLUSTER_NAME' successfully deleted.${C_RESET}"
         break
       else
