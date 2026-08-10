@@ -18,7 +18,7 @@ Inspect all nodes for active Node Problem Detector (NPD) conditions such as `Ker
 ```bash
 kubectl get nodes -o custom-columns=\
 NAME:.metadata.name,\
-STATUS:.status.conditions[-1].type,\
+READY:.status.conditions[?(@.type=="Ready")].status,\
 KERNEL_DEADLOCK:.status.conditions[?(@.type=="KernelDeadlock")].status,\
 READONLY_FS:.status.conditions[?(@.type=="ReadonlyFilesystem")].status,\
 OOM_KILLS:.status.conditions[?(@.type=="OOMKilling")].status
@@ -59,9 +59,10 @@ When a node reports a critical condition (`ReadonlyFilesystem` or `KernelDeadloc
    ```
 2. **Safely Drain Workloads**: Evict pods to healthy nodes:
    ```bash
-   kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data --grace-period=30
+   kubectl drain <node-name> --ignore-daemonsets --delete-emptydir-data --force --grace-period=30
    ```
-3. **Trigger GKE Node Repair**: If GKE Auto-repair is enabled, deleting the underlying GKE instance recreates the node cleanly:
+3. **Trigger GKE Node Repair**: If GKE Auto-repair is enabled, deleting the underlying GKE instance recreates the node cleanly (extracting the zone dynamically):
    ```bash
-   gcloud compute instances delete <node-name> --zone <zone> --quiet
+   ZONE=$(kubectl get node <node-name> -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}')
+   gcloud compute instances delete <node-name> --zone "$ZONE" --quiet
    ```
