@@ -14,7 +14,7 @@
 # k8s-operator/scripts/vars.sh state from the installation.
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ANSI Color Tokens
 C_CYAN="\033[1;36m"
@@ -40,6 +40,16 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+on_error() {
+  local exit_code="$1"
+  local line_no="$2"
+  local bash_cmd="$3"
+  echo -e "\n${C_RED}${C_BOLD}✗ Upgrade error encountered at line ${line_no} (exit code ${exit_code}): ${bash_cmd}${C_RESET}" >&2
+  write_report "FAILED" 2>/dev/null || true
+  exit "$exit_code"
+}
+trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
 
 print_banner() {
   echo -e "${C_CYAN}${C_BOLD}"

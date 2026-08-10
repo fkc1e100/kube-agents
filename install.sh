@@ -12,7 +12,7 @@
 # Designed for Google Cloud Shell, Linux, macOS, and AI Agent harnesses.
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ─── ANSI Colors & Terminal Responsive Helpers ─────────────────────────────────
 if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then

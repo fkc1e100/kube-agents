@@ -11,7 +11,7 @@
 #   curl -fsSL https://gke-labs.github.io/kube-agents/uninstall.sh | bash
 # ==============================================================================
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ANSI Color Tokens
 C_CYAN="\033[1;36m"
