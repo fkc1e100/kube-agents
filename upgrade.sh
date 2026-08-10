@@ -76,7 +76,7 @@ Options:
   --project-id ID          GCP Target Project ID
   --cluster-name NAME      GKE Target Cluster Name
   --region REGION          GKE GCP Region
-  --image-tag TAG          Target release tag or commit SHA (required in non-interactive mode)
+  --image-tag TAG          Validated immutable release tag or full commit SHA (required)
   --help, -h               Show this help message
 
 Examples:
@@ -86,7 +86,68 @@ Examples:
   # Dry-run upgrade preview
   ./upgrade.sh --dry-run --upgrade-mode=full
 EOF
-  exit 0
+}
+
+validate_immutable_ref() {
+  local ref="${1:-}"
+  if [ -z "$ref" ]; then
+    print_error "--image-tag is required; use a validated release tag or full commit SHA."
+    return 1
+  fi
+  case "$ref" in
+    latest|main|master|HEAD)
+      print_error "Mutable image/source ref '$ref' is not supported. Use a validated release tag or full commit SHA."
+      return 1
+      ;;
+  esac
+  if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]] \
+    && [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    print_error "Image/source ref must be a full 40-character commit SHA or a SemVer release tag (vX.Y.Z)."
+    return 1
+  fi
+}
+
+json_escape() {
+  local value="${1:-}"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+verify_local_source_ref() {
+  local repo_dir="$1"
+  local expected_ref="$2"
+  if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ "$PARAM_DRY_RUN" = "true" ]; then
+      print_warning "Dry-run cannot verify source/image alignment because '$repo_dir' is not a Git worktree."
+      return 0
+    fi
+    print_error "Refusing to upgrade from an unversioned source directory: $repo_dir"
+    return 1
+  fi
+
+  local expected_commit current_commit
+  if ! expected_commit="$(git -C "$repo_dir" rev-parse --verify "${expected_ref}^{commit}" 2>/dev/null)"; then
+    print_error "The requested image/source ref '$expected_ref' is not present in the current checkout. Check out that exact revision first."
+    return 1
+  fi
+  current_commit="$(git -C "$repo_dir" rev-parse HEAD)"
+  if [ "$current_commit" != "$expected_commit" ]; then
+    print_error "Source/image version mismatch: checkout is ${current_commit}, requested ref resolves to ${expected_commit}."
+    return 1
+  fi
+  if [ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=no)" ]; then
+    if [ "$PARAM_DRY_RUN" = "true" ]; then
+      print_warning "Dry-run is using uncommitted source changes; a real upgrade would require a clean checkout."
+    else
+      print_error "Refusing to upgrade from a dirty checkout because its scripts do not exactly match '$expected_ref'."
+      return 1
+    fi
+  fi
+  print_success "Verified upgrade scripts and image ref resolve to commit ${expected_commit}."
 }
 
 # Parameter Parsing
@@ -105,8 +166,8 @@ parse_args() {
       --region) PARAM_REGION="$2"; shift 2 ;;
       --image-tag=*) PARAM_IMAGE_TAG="${1#*=}"; shift ;;
       --image-tag) PARAM_IMAGE_TAG="$2"; shift 2 ;;
-      --help|-h) show_help ;;
-      *) print_error "Unknown parameter: $1"; show_help ;;
+      --help|-h) show_help; exit 0 ;;
+      *) print_error "Unknown parameter: $1"; show_help >&2; return 2 ;;
     esac
   done
 }
@@ -116,11 +177,11 @@ write_report() {
   local report_file="/tmp/kube-agents-upgrade-report.json"
   cat << EOF > "$report_file"
 {
-  "status": "${status}",
-  "upgrade_mode": "${PARAM_UPGRADE_MODE}",
+  "status": "$(json_escape "$status")",
+  "upgrade_mode": "$(json_escape "$PARAM_UPGRADE_MODE")",
   "dry_run": ${PARAM_DRY_RUN},
   "non_interactive": ${PARAM_NON_INTERACTIVE},
-  "target_image_tag": "${PARAM_IMAGE_TAG}",
+  "target_image_tag": "$(json_escape "$PARAM_IMAGE_TAG")",
   "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "2026-08-05T00:00:00Z")"
 }
 EOF
@@ -133,12 +194,12 @@ main() {
 
   if [ -z "$PARAM_IMAGE_TAG" ]; then
     if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-      print_error "--image-tag is required in non-interactive mode."
+      print_error "--image-tag is required; use a validated release tag or full commit SHA."
       exit 1
     fi
-    read -rp "Target image tag [latest]: " PARAM_IMAGE_TAG
-    PARAM_IMAGE_TAG="${PARAM_IMAGE_TAG:-latest}"
+    read -rp "Target image tag (validated release tag or full commit SHA): " PARAM_IMAGE_TAG
   fi
+  validate_immutable_ref "$PARAM_IMAGE_TAG"
 
   case "$PARAM_UPGRADE_MODE" in
     full|harness|operator) ;;
@@ -149,8 +210,10 @@ main() {
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if [ -f "${script_dir}/k8s-operator/scripts/provision_03_gcp_gke_operator.sh" ]; then
     repo_dir="$script_dir"
+    verify_local_source_ref "$repo_dir" "$PARAM_IMAGE_TAG"
   elif [ -f "$(pwd)/k8s-operator/scripts/provision_03_gcp_gke_operator.sh" ]; then
     repo_dir="$(pwd)"
+    verify_local_source_ref "$repo_dir" "$PARAM_IMAGE_TAG"
   else
     TEMP_REPO_DIR="$(mktemp -d)"
     repo_dir="${TEMP_REPO_DIR}/kube-agents"
@@ -158,6 +221,7 @@ main() {
     git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$repo_dir"
     git -C "$repo_dir" fetch --depth=1 origin "$PARAM_IMAGE_TAG"
     git -C "$repo_dir" checkout --detach FETCH_HEAD
+    verify_local_source_ref "$repo_dir" "$PARAM_IMAGE_TAG"
   fi
 
   print_step "1. Validating Upgrade Target & Environment"
@@ -169,7 +233,10 @@ main() {
   else
     # Load state
     # shellcheck disable=SC1091
-    source "${repo_dir}/k8s-operator/scripts/vars.sh"
+    if ! source "${repo_dir}/k8s-operator/scripts/vars.sh"; then
+      print_error "Configuration state is invalid and could not be loaded."
+      exit 1
+    fi
     print_success "Loaded existing configuration state from k8s-operator/scripts/vars.sh"
   fi
 
@@ -191,13 +258,13 @@ main() {
   if [ "$PARAM_DRY_RUN" = "true" ]; then
     print_step "2. Dry-Run Upgrade Plan Preview"
     echo -e "  • ${C_CYAN}Action:${C_RESET} Perform ${PARAM_UPGRADE_MODE} upgrade on cluster '${target_cluster}'"
-    echo -e "  • ${C_CYAN}Image Overrides:${C_RESET} ghcr.io/gke-labs/kube-agents/*:${PARAM_IMAGE_TAG}"
+    echo -e "  • ${C_CYAN}Image Overrides:${C_RESET} ${REGISTRY_PREFIX:-ghcr.io/gke-labs/kube-agents}/*:${PARAM_IMAGE_TAG}"
     write_report "DRY_RUN_COMPLETE"
     exit 0
   fi
 
   print_step "2. Connecting kubectl to GKE Cluster"
-  gcloud container clusters get-credentials "$target_cluster" --region="$target_region" --project="$target_project"
+  gcloud container clusters get-credentials "$target_cluster" --location="$target_region" --project="$target_project"
 
   case "$PARAM_UPGRADE_MODE" in
     operator)

@@ -36,6 +36,9 @@ on_error() {
   local bash_cmd="$3"
   echo -e "\n\033[91m\033[1m✗ Error encountered at line ${line_no} (exit code ${exit_code}): ${bash_cmd}\033[0m" >&2
   write_json_report "FAILED" "${line_no}" "${bash_cmd}" 2>/dev/null || true
+  if [[ "${vars_file:-}" == *.tmp ]]; then
+    rm -f -- "$vars_file"
+  fi
   exit "$exit_code"
 }
 trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
@@ -80,10 +83,9 @@ Flags for AI Agents & Automation:
   --permission-set=SET          Agent permission boundary: read-only | gke-admin (default: read-only)
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
   --enable-web-ui=true|false    Enable Hermes Web UI port 9119 dashboard (default: false)
-  --image-tag=TAG               Validated release tag or commit SHA (required in non-interactive mode)
+  --image-tag=TAG               Validated immutable release tag or full commit SHA (required)
   --registry-prefix=PATH        Container registry path without a URL scheme
   --menu, --config              Launch interactive Day-2 Control Panel Menu (raspi-config style)
-  --uninstall, --delete         Discover and delete all provisioned GCP/GKE infrastructure elements
   -h, --help, -?                Show this help message
 EOF
 }
@@ -94,7 +96,6 @@ parse_args() {
       -y|--yes|--non-interactive) PARAM_NON_INTERACTIVE="true"; shift ;;
       --dry-run) PARAM_DRY_RUN="true"; shift ;;
       --menu|--config|--configure|menu|config) PARAM_MENU_MODE="true"; shift ;;
-      --uninstall|--delete) PARAM_UNINSTALL="true"; shift ;;
       --project-id=*) PARAM_PROJECT_ID="${1#*=}"; shift ;;
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --cluster-name=*) PARAM_CLUSTER_NAME="${1#*=}"; shift ;;
@@ -165,6 +166,84 @@ print_info() { echo -e "  ${C_CYAN}ℹ $1${C_RESET}"; }
 print_warning() { echo -e "  ${C_YELLOW}⚠ $1${C_RESET}"; }
 print_error() { echo -e "  ${C_RED}✗ $1${C_RESET}"; }
 
+validate_immutable_ref() {
+  local ref="${1:-}"
+  if [ -z "$ref" ]; then
+    print_error "An immutable image/source ref is required. Pass --image-tag with a validated release tag or full commit SHA."
+    return 1
+  fi
+  case "$ref" in
+    latest|main|master|HEAD)
+      print_error "Mutable image/source ref '$ref' is not supported. Use a validated release tag or full commit SHA."
+      return 1
+      ;;
+  esac
+  if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]] \
+    && [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    print_error "Image/source ref must be a full 40-character commit SHA or a SemVer release tag (vX.Y.Z)."
+    return 1
+  fi
+}
+
+derive_kms_location() {
+  local location="${1:-}"
+  if [[ "$location" =~ ^(.+)-[a-z]$ ]]; then
+    location="${BASH_REMATCH[1]}"
+  fi
+  printf '%s\n' "$location"
+}
+
+json_escape() {
+  local value="${1:-}"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+write_state_var() {
+  local destination="$1"
+  local var_name="$2"
+  local var_value="$3"
+  printf 'export %s=%q\n' "$var_name" "$var_value" >> "$destination"
+}
+
+verify_local_source_ref() {
+  local repo_dir="$1"
+  local expected_ref="$2"
+  if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ "$PARAM_DRY_RUN" = "true" ]; then
+      print_warning "Dry-run cannot verify source/image alignment because '$repo_dir' is not a Git worktree."
+      return 0
+    fi
+    print_error "Refusing to provision from an unversioned source directory: $repo_dir"
+    return 1
+  fi
+
+  local expected_commit current_commit
+  if ! expected_commit="$(git -C "$repo_dir" rev-parse --verify "${expected_ref}^{commit}" 2>/dev/null)"; then
+    print_error "The requested image/source ref '$expected_ref' is not present in the current checkout. Check out that exact revision first."
+    return 1
+  fi
+  current_commit="$(git -C "$repo_dir" rev-parse HEAD)"
+  if [ "$current_commit" != "$expected_commit" ]; then
+    print_error "Source/image version mismatch: checkout is ${current_commit}, requested ref resolves to ${expected_commit}."
+    return 1
+  fi
+
+  if [ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=no)" ]; then
+    if [ "$PARAM_DRY_RUN" = "true" ]; then
+      print_warning "Dry-run is using uncommitted source changes; a real deployment would require a clean checkout."
+    else
+      print_error "Refusing to provision from a dirty checkout because its scripts do not exactly match '$expected_ref'."
+      return 1
+    fi
+  fi
+  print_success "Verified provisioning scripts and image ref resolve to commit ${expected_commit}."
+}
+
 has_controlling_tty() {
   [ -c /dev/tty ] && ( : </dev/tty ) 2>/dev/null
 }
@@ -180,11 +259,15 @@ prompt_read() {
   if [ "$PARAM_NON_INTERACTIVE" = "true" ] || ! has_controlling_tty; then
     local current_val="${!var_name:-}"
     if [ -n "$current_val" ]; then
-      eval "$var_name=\"$current_val\""
+      printf -v "$var_name" '%s' "$current_val"
     else
-      eval "$var_name=\"$default_val\""
+      printf -v "$var_name" '%s' "$default_val"
     fi
-    print_info "Auto-selected ($var_name): ${!var_name}"
+    if [ "$secret_mode" = "true" ]; then
+      print_info "Auto-selected ($var_name): [REDACTED]"
+    else
+      print_info "Auto-selected ($var_name): ${!var_name}"
+    fi
     return 0
   fi
 
@@ -204,9 +287,9 @@ prompt_read() {
   fi
 
   if [ -z "$input_val" ] && [ -n "$default_val" ]; then
-    eval "$var_name=\"$default_val\""
+    printf -v "$var_name" '%s' "$default_val"
   else
-    eval "$var_name=\"$input_val\""
+    printf -v "$var_name" '%s' "$input_val"
   fi
 }
 
@@ -219,7 +302,7 @@ prompt_menu() {
 
   if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
     local current_choice="${!var_name:-1}"
-    eval "$var_name=\"$current_choice\""
+    printf -v "$var_name" '%s' "$current_choice"
     print_info "Auto-selected option ($var_name): $current_choice"
     return 0
   fi
@@ -240,7 +323,7 @@ prompt_menu() {
   while true; do
     prompt_read "Select an option (1-${#options[@]})" choice "1"
     if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
-      eval "$var_name=\"$choice\""
+      printf -v "$var_name" '%s' "$choice"
       break
     else
       print_error "Invalid selection. Please enter a number between 1 and ${#options[@]}." >/dev/tty
@@ -253,6 +336,11 @@ auto_install_tool() {
   local tool="$1"
   print_warning "Missing required CLI tool: $tool"
 
+  if [ "$PARAM_DRY_RUN" = "true" ]; then
+    print_error "Dry-run validation will not install missing tools. Install '$tool' and retry."
+    exit 1
+  fi
+
   if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
     print_info "Non-interactive mode: Auto-installing $tool..."
     local install_choice="y"
@@ -264,7 +352,7 @@ auto_install_tool() {
   if [[ "$install_choice" =~ ^[Yy]$ ]]; then
     if command -v brew >/dev/null 2>&1; then
       print_info "Installing $tool via Homebrew..."
-      brew install "$tool" </dev/tty >/dev/tty || true
+      brew install "$tool" || true
     elif command -v apt-get >/dev/null 2>&1; then
       print_info "Installing $tool via apt..."
       if [ "$tool" = "gh" ]; then
@@ -297,21 +385,26 @@ write_json_report() {
   local timestamp
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "2026-08-05T00:00:00Z")
 
+  local report_gitops_repo=""
+  if [ -n "${github_org:-}" ] && [ -n "${github_repo:-}" ]; then
+    report_gitops_repo="https://github.com/${github_org}/${github_repo}"
+  fi
+
   cat << EOF > "$report_file"
 {
-  "status": "${status}",
+  "status": "$(json_escape "$status")",
   "dry_run": ${PARAM_DRY_RUN},
   "non_interactive": ${PARAM_NON_INTERACTIVE},
-  "project_id": "${project_id}",
-  "project_number": "${project_number}",
-  "cluster_name": "${cluster_name}",
-  "region": "${region}",
-  "model_provider": "${model_provider}",
-  "permission_set": "${permission_set}",
-  "gvisor_enabled": ${enable_gvisor},
-  "gitops_repo": "https://github.com/${github_org}/${github_repo}",
-  "vars_file": "${vars_file:-}",
-  "timestamp": "${timestamp}"
+  "project_id": "$(json_escape "${project_id:-}")",
+  "project_number": "$(json_escape "${project_number:-}")",
+  "cluster_name": "$(json_escape "${cluster_name:-}")",
+  "region": "$(json_escape "${region:-}")",
+  "model_provider": "$(json_escape "${model_provider:-}")",
+  "permission_set": "$(json_escape "${permission_set:-}")",
+  "gvisor_enabled": ${enable_gvisor:-false},
+  "gitops_repo": "$(json_escape "$report_gitops_repo")",
+  "vars_file": "$(json_escape "${vars_file:-}")",
+  "timestamp": "$(json_escape "$timestamp")"
 }
 EOF
   print_success "Machine-readable report written to: ${C_BOLD}${report_file}${C_RESET}"
@@ -334,7 +427,10 @@ run_menu_system() {
 
   if [ -f "$vars_file" ]; then
     # shellcheck disable=SC1090
-    source "$vars_file" 2>/dev/null || true
+    if ! source "$vars_file"; then
+      print_error "Configuration state is invalid and could not be loaded: $vars_file"
+      exit 1
+    fi
   fi
 
   local project_id="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}"
@@ -360,7 +456,7 @@ run_menu_system() {
   local kms_keyring="${KMS_KEYRING:-}"
   local kms_key="${KMS_KEY:-}"
   local github_pem_path="${GITHUB_PEM_PATH:-}"
-  local image_tag="${IMAGE_TAG:-latest}"
+  local image_tag="${IMAGE_TAG:-}"
 
   while true; do
     echo -e "\n${C_CYAN}${C_BOLD}"
@@ -415,13 +511,25 @@ run_menu_system() {
         local m_opt=""
         prompt_menu "Select AI Model Provider:" \
           "Google Gemini (gemini-3.5-flash)" \
-          "OpenAI (gpt-4o)" \
-          "Anthropic (claude-3-5-sonnet)" \
+          "OpenAI (gpt-5.4)" \
+          "Anthropic (claude-sonnet-4-5-20250929)" \
           m_opt
         case "$m_opt" in
-          1) model_provider="gemini"; model_default_name="gemini-3.5-flash" ;;
-          2) model_provider="openai"; model_default_name="gpt-4o" ;;
-          3) model_provider="anthropic"; model_default_name="claude-3-5-sonnet" ;;
+          1)
+            model_provider="gemini"
+            model_default_name="gemini-3.5-flash"
+            prompt_read "Gemini API Key" gemini_api_key "$gemini_api_key" true
+            ;;
+          2)
+            model_provider="openai"
+            model_default_name="gpt-5.4"
+            prompt_read "OpenAI API Key" openai_api_key "$openai_api_key" true
+            ;;
+          3)
+            model_provider="anthropic"
+            model_default_name="claude-sonnet-4-5-20250929"
+            prompt_read "Anthropic API Key" anthropic_api_key "$anthropic_api_key" true
+            ;;
         esac
         ;;
       4)
@@ -438,6 +546,11 @@ run_menu_system() {
         ;;
       6)
         print_step "Saving & Re-applying Configuration State"
+        if [ -z "$image_tag" ]; then
+          prompt_read "Container image tag (validated release tag or full commit SHA)" image_tag ""
+        fi
+        validate_immutable_ref "$image_tag"
+        verify_local_source_ref "$repo_dir" "$image_tag"
         export PARAM_PROJECT_ID="$project_id" PARAM_CLUSTER_NAME="$cluster_name" PARAM_REGION="$region"
         export PARAM_ENABLE_WEBUI="$enable_webui" PARAM_MODEL_PROVIDER="$model_provider"
         export PARAM_PERMISSION_SET="$permission_set" PARAM_ENABLE_GVISOR="$enable_gvisor"
@@ -447,7 +560,7 @@ run_menu_system() {
         save_var PROJECT_NUMBER "$project_number"
         save_var CLUSTER_NAME "$cluster_name"
         save_var REGION "$region"
-        save_var KMS_LOCATION "${kms_location:-${region%-*}}"
+        save_var KMS_LOCATION "$(derive_kms_location "$region")"
         save_var MODEL_PROVIDER "$model_provider"
         save_var MODEL_DEFAULT_NAME "$model_default_name"
         save_secret_var GEMINI_API_KEY "$gemini_api_key"
@@ -467,13 +580,12 @@ run_menu_system() {
         save_var KMS_KEYRING "$kms_keyring"
         save_var KMS_KEY "$kms_key"
         save_var GITHUB_PEM_PATH "$github_pem_path"
-        save_var IMAGE_TAG "$image_tag"
         save_var NO_CONFIRM "1"
         print_success "Updated configuration saved to: $vars_file"
 
         print_info "Re-applying Platform Agent Custom Resource to GKE cluster '$cluster_name'..."
         cd "${repo_dir}/k8s-operator"
-        bash scripts/provision_08_deploy_platform_agent.sh --no-confirm
+        IMAGE_TAG="$image_tag" bash scripts/provision_08_deploy_platform_agent.sh --no-confirm
         cd "${repo_dir}"
         print_success "Platform Agent re-deployed with new configuration!"
         ;;
@@ -490,16 +602,8 @@ main() {
   parse_args "$@"
   print_banner
 
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
   if [ "${PARAM_MENU_MODE:-false}" = "true" ]; then
     run_menu_system
-    exit 0
-  fi
-
-  if [ "${PARAM_UNINSTALL:-false}" = "true" ]; then
-    bash "${script_dir}/uninstall.sh" "$@"
     exit 0
   fi
 
@@ -519,11 +623,12 @@ main() {
   local image_tag="${PARAM_IMAGE_TAG:-}"
   if [ -z "$image_tag" ]; then
     if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-      print_error "--image-tag is required in non-interactive mode; use a validated release tag or commit SHA."
+      print_error "--image-tag is required; use a validated release tag or full commit SHA."
       exit 1
     fi
-    prompt_read "Container image tag (validated release tag or commit SHA)" image_tag "latest"
+    prompt_read "Container image tag (validated release tag or full commit SHA)" image_tag ""
   fi
+  validate_immutable_ref "$image_tag"
 
   # 2. Prerequisite CLI Tools Check & Auto-Installation
   print_step "1. Checking Prerequisites & Installing Missing Tools"
@@ -599,15 +704,20 @@ main() {
     fi
   fi
 
-  gcloud config set project "$project_id" >/dev/null 2>&1 || true
+  if ! gcloud config set project "$project_id" >/dev/null; then
+    print_error "Unable to select GCP project '$project_id'. Verify the project ID and your access."
+    exit 1
+  fi
   print_success "Selected Project ID: ${C_BOLD}${project_id}${C_RESET}"
 
   # Auto-resolve Project Number
   local project_number=""
   project_number=$(gcloud projects describe "$project_id" --format="value(projectNumber)" 2>/dev/null || echo "")
-  if [ -n "$project_number" ]; then
-    print_success "Resolved Project Number: ${C_BOLD}${project_number}${C_RESET}"
+  if [ -z "$project_number" ]; then
+    print_error "Unable to resolve the project number for '$project_id'. Verify the project ID and your access."
+    exit 1
   fi
+  print_success "Resolved Project Number: ${C_BOLD}${project_number}${C_RESET}"
 
   # Region Selection
   local active_region=""
@@ -650,9 +760,11 @@ main() {
       if [ -n "$cluster_lines" ]; then
         local cluster_opts=()
         local cluster_names=()
+        local cluster_locations=()
         while IFS=$'\t' read -r c_name c_loc; do
           if [ -n "$c_name" ]; then
             cluster_names+=("$c_name")
+            cluster_locations+=("$c_loc")
             cluster_opts+=("$c_name (location: $c_loc)")
           fi
         done <<< "$cluster_lines"
@@ -662,6 +774,8 @@ main() {
         prompt_menu "Select existing GKE cluster:" "${cluster_opts[@]}" c_choice
         if [ "$c_choice" -le "${#cluster_names[@]}" ]; then
           cluster_name="${cluster_names[$((c_choice-1))]}"
+          region="${cluster_locations[$((c_choice-1))]}"
+          print_success "Using discovered cluster location: ${C_BOLD}${region}${C_RESET}"
         else
           prompt_read "Existing GKE Cluster Name" cluster_name "platform-agent-host"
         fi
@@ -751,16 +865,16 @@ main() {
   if [ -z "$detected_gemini_key" ]; then
     detected_gemini_key=$(gcloud secrets versions access latest --secret="gemini-api-key" --project="$project_id" 2>/dev/null || echo "")
   fi
-  local gemini_api_key="${detected_gemini_key:-placeholder}"
-  local openai_api_key="${PARAM_OPENAI_API_KEY:-placeholder}"
-  local anthropic_api_key="${PARAM_ANTHROPIC_API_KEY:-placeholder}"
+  local gemini_api_key="${detected_gemini_key:-}"
+  local openai_api_key="${PARAM_OPENAI_API_KEY:-}"
+  local anthropic_api_key="${PARAM_ANTHROPIC_API_KEY:-}"
 
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
     local model_choice=""
     prompt_menu "Select Model Provider for the Platform Agent:" \
       "Google Gemini (Recommended: gemini-3.5-flash / Gemini API)" \
-      "OpenAI (gpt-4o / OpenAI API)" \
-      "Anthropic (claude-3-5-sonnet / Anthropic API)" \
+      "OpenAI (gpt-5.4 / OpenAI API)" \
+      "Anthropic (claude-sonnet-4-5-20250929 / Anthropic API)" \
       model_choice
 
     case "$model_choice" in
@@ -775,16 +889,28 @@ main() {
         ;;
       2)
         model_provider="openai"
-        model_default_name="gpt-4o"
+        model_default_name="gpt-5.4"
         prompt_read "OpenAI API Key" openai_api_key "${OPENAI_API_KEY:-}" true
         ;;
       3)
         model_provider="anthropic"
-        model_default_name="claude-3-5-sonnet-20241022"
+        model_default_name="claude-sonnet-4-5-20250929"
         prompt_read "Anthropic API Key" anthropic_api_key "${ANTHROPIC_API_KEY:-}" true
         ;;
     esac
   fi
+
+  case "$model_provider" in
+    gemini)
+      [ -n "$gemini_api_key" ] || print_warning "No Gemini API key was provided; the agent will require a credential update before model calls can succeed."
+      ;;
+    openai)
+      [ -n "$openai_api_key" ] || print_warning "No OpenAI API key was provided; the agent will require a credential update before model calls can succeed."
+      ;;
+    anthropic)
+      [ -n "$anthropic_api_key" ] || print_warning "No Anthropic API key was provided; the agent will require a credential update before model calls can succeed."
+      ;;
+  esac
 
   # 8. GitOps Infrastructure Repository Connection
   print_step "7. GitOps Infrastructure Repository Setup"
@@ -824,12 +950,15 @@ main() {
     print_error "Unsupported permission set '$permission_set'. Use read-only or gke-admin."
     exit 1
   fi
-  local read_only_mode="false"
-  if [ "$permission_set" = "read-only" ]; then
-    read_only_mode="true"
-  fi
-
   local enable_gvisor="${PARAM_ENABLE_GVISOR:-false}"
+  if [[ ! "$enable_gvisor" =~ ^(true|false)$ ]]; then
+    print_error "--gvisor must be either true or false."
+    exit 1
+  fi
+  if [[ ! "${PARAM_ENABLE_WEBUI:-false}" =~ ^(true|false)$ ]]; then
+    print_error "--enable-web-ui must be either true or false."
+    exit 1
+  fi
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
     local perm_choice=""
     prompt_menu "Select Platform Agent Permission Boundary:" \
@@ -841,7 +970,6 @@ main() {
       permission_set="gke-admin"
     elif [ "$perm_choice" = "2" ]; then
       permission_set="read-only"
-      read_only_mode="true"
     fi
 
     local gvisor_choice=""
@@ -871,21 +999,21 @@ main() {
   if [ -f "k8s-operator/scripts/provision.sh" ]; then
     repo_dir="$(pwd)"
     print_success "Using current repository directory: $repo_dir"
+    verify_local_source_ref "$repo_dir" "$image_tag"
   else
     repo_dir="$HOME/kube-agents"
     if [ -d "$repo_dir" ]; then
       print_info "Using existing repository at $repo_dir without modifying local changes."
       cd "$repo_dir"
+      verify_local_source_ref "$repo_dir" "$image_tag"
     else
       local source_ref="$image_tag"
-      if [ "$source_ref" = "latest" ]; then
-        source_ref="main"
-      fi
       print_info "Cloning kube-agents provisioning scripts at '$source_ref' into $repo_dir..."
       git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$repo_dir"
       git -C "$repo_dir" fetch --depth=1 origin "$source_ref"
       git -C "$repo_dir" checkout --detach FETCH_HEAD
       cd "$repo_dir"
+      verify_local_source_ref "$repo_dir" "$image_tag"
     fi
   fi
 
@@ -897,53 +1025,64 @@ main() {
     exit 1
   fi
 
-  cat << EOF > "$vars_file"
-# Auto-generated by kube-agents zero-friction installer
-export PROJECT_ID="${project_id}"
-export PROJECT_NUMBER="${project_number}"
-export CLUSTER_NAME="${cluster_name}"
-export REGION="${region}"
-export KMS_LOCATION="${kms_location:-${region%-*}}"
-export ENABLE_GVISOR="${enable_gvisor}"
-export GVISOR_POOL_NAME="gvisor-pool"
-export READ_ONLY_MODE="${read_only_mode}"
-export MODEL_PROVIDER="${model_provider}"
-export MODEL_DEFAULT_NAME="${model_default_name}"
-export GEMINI_API_KEY="${gemini_api_key}"
-export OPENAI_API_KEY="${openai_api_key}"
-export ANTHROPIC_API_KEY="${anthropic_api_key}"
-export ALLOWED_USERS="${allowed_users}"
-export CHAT_TOPIC_NAME="${chat_topic_name}"
-export CHAT_SUB_NAME="${chat_sub_name}"
-export GOOGLE_CHAT_ENABLED="${google_chat_enabled}"
-export SLACK_ENABLED="${slack_enabled}"
-export SLACK_BOT_TOKEN="${slack_bot_token}"
-export SLACK_APP_TOKEN="${slack_app_token}"
-export SLACK_ALLOWED_USERS="${slack_allowed_users}"
-export SLACK_HOME_CHANNEL="${slack_home_channel}"
-export SLACK_HOME_CHANNEL_NAME="${slack_home_channel_name}"
-export API_SERVER_KEY="$(openssl rand -hex 16 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-export PLATFORM_AGENT_PERMISSION_SET="${permission_set}"
-export GITHUB_ORG="${github_org}"
-export GITHUB_REPO="${github_repo}"
-export GITHUB_APP_ID="${github_app_id}"
-export KMS_KEYRING="${kms_keyring}"
-export KMS_KEY="${kms_key}"
-export GITHUB_PEM_PATH="${github_pem_path}"
-export MEMORY_ENABLED="false"
-export MEMORY_PROVIDER="multiuser_memory"
-export USER_PROFILE_ENABLED="false"
-export HERMES_DASHBOARD_ENABLED="${PARAM_ENABLE_WEBUI:-false}"
-export IMAGE_TAG="${image_tag}"
-export REGISTRY_PREFIX="${registry_prefix}"
-export OPERATOR_IMAGE="${registry_prefix}/k8s-operator"
-export PLATFORM_AGENT_IMAGE="${registry_prefix}/platform-agent"
-export CREDENTIAL_PROXY_IMAGE="${registry_prefix}/credential-proxy"
-export REPLAY_PROXY_IMAGE="${registry_prefix}/replay-proxy"
-export INFERENCE_REPLAY_ENABLED="false"
-export NO_CONFIRM="1"
-EOF
+  local api_server_key
+  api_server_key="$(openssl rand -hex 16 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(16))" 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  if [ -z "$api_server_key" ]; then
+    print_error "Unable to generate API_SERVER_KEY from a secure random source."
+    exit 1
+  fi
+
+  local old_umask
+  old_umask="$(umask)"
+  umask 077
+  local final_vars_file="$vars_file"
+  vars_file="${vars_file}.tmp"
+  printf '%s\n' '# Auto-generated by kube-agents zero-friction installer' > "$vars_file"
+  write_state_var "$vars_file" PROJECT_ID "$project_id"
+  write_state_var "$vars_file" PROJECT_NUMBER "$project_number"
+  write_state_var "$vars_file" CLUSTER_NAME "$cluster_name"
+  write_state_var "$vars_file" REGION "$region"
+  write_state_var "$vars_file" KMS_LOCATION "$(derive_kms_location "$region")"
+  write_state_var "$vars_file" ENABLE_GVISOR "$enable_gvisor"
+  write_state_var "$vars_file" GVISOR_POOL_NAME "gvisor-pool"
+  write_state_var "$vars_file" MODEL_PROVIDER "$model_provider"
+  write_state_var "$vars_file" MODEL_DEFAULT_NAME "$model_default_name"
+  write_state_var "$vars_file" GEMINI_API_KEY "$gemini_api_key"
+  write_state_var "$vars_file" OPENAI_API_KEY "$openai_api_key"
+  write_state_var "$vars_file" ANTHROPIC_API_KEY "$anthropic_api_key"
+  write_state_var "$vars_file" ALLOWED_USERS "$allowed_users"
+  write_state_var "$vars_file" CHAT_TOPIC_NAME "$chat_topic_name"
+  write_state_var "$vars_file" CHAT_SUB_NAME "$chat_sub_name"
+  write_state_var "$vars_file" GOOGLE_CHAT_ENABLED "$google_chat_enabled"
+  write_state_var "$vars_file" SLACK_ENABLED "$slack_enabled"
+  write_state_var "$vars_file" SLACK_BOT_TOKEN "$slack_bot_token"
+  write_state_var "$vars_file" SLACK_APP_TOKEN "$slack_app_token"
+  write_state_var "$vars_file" SLACK_ALLOWED_USERS "$slack_allowed_users"
+  write_state_var "$vars_file" SLACK_HOME_CHANNEL "$slack_home_channel"
+  write_state_var "$vars_file" SLACK_HOME_CHANNEL_NAME "$slack_home_channel_name"
+  write_state_var "$vars_file" API_SERVER_KEY "$api_server_key"
+  write_state_var "$vars_file" PLATFORM_AGENT_PERMISSION_SET "$permission_set"
+  write_state_var "$vars_file" GITHUB_ORG "$github_org"
+  write_state_var "$vars_file" GITHUB_REPO "$github_repo"
+  write_state_var "$vars_file" GITHUB_APP_ID "$github_app_id"
+  write_state_var "$vars_file" KMS_KEYRING "$kms_keyring"
+  write_state_var "$vars_file" KMS_KEY "$kms_key"
+  write_state_var "$vars_file" GITHUB_PEM_PATH "$github_pem_path"
+  write_state_var "$vars_file" MEMORY_ENABLED "false"
+  write_state_var "$vars_file" MEMORY_PROVIDER "multiuser_memory"
+  write_state_var "$vars_file" USER_PROFILE_ENABLED "false"
+  write_state_var "$vars_file" HERMES_DASHBOARD_ENABLED "${PARAM_ENABLE_WEBUI:-false}"
+  write_state_var "$vars_file" REGISTRY_PREFIX "$registry_prefix"
+  write_state_var "$vars_file" OPERATOR_IMAGE "${registry_prefix}/k8s-operator"
+  write_state_var "$vars_file" PLATFORM_AGENT_IMAGE "${registry_prefix}/platform-agent"
+  write_state_var "$vars_file" CREDENTIAL_PROXY_IMAGE "${registry_prefix}/credential-proxy"
+  write_state_var "$vars_file" REPLAY_PROXY_IMAGE "${registry_prefix}/replay-proxy"
+  write_state_var "$vars_file" INFERENCE_REPLAY_ENABLED "false"
+  write_state_var "$vars_file" NO_CONFIRM "1"
   chmod 600 "$vars_file"
+  mv -f -- "$vars_file" "$final_vars_file"
+  vars_file="$final_vars_file"
+  umask "$old_umask"
   print_success "Configuration saved to: $vars_file"
 
   # Pre-Flight Summary & Final Confirmation Checkpoint
@@ -956,7 +1095,7 @@ EOF
   echo -e "  • ${C_CYAN}gVisor Sandbox Isolation:${C_RESET} ${enable_gvisor}"
   echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
   echo -e "  • ${C_CYAN}Permission Boundary:${C_RESET} ${permission_set}"
-  if [ -n "$github_repo" ]; then
+  if [ -n "$github_org" ] && [ -n "$github_repo" ]; then
     echo -e "  • ${C_CYAN}GitOps Infrastructure Repo:${C_RESET} https://github.com/${github_org}/${github_repo}"
   fi
   echo -e "${C_CYAN}${C_BOLD}"
@@ -986,10 +1125,13 @@ EOF
   print_info "Starting build..."
 
   cd "${repo_dir}/k8s-operator"
+  local provisioning_log
+  provisioning_log="/tmp/kube-agents-provision-$(date -u +%Y%m%dT%H%M%SZ).log"
+  print_info "Provisioning output is also being saved to: ${C_BOLD}${provisioning_log}${C_RESET}"
   if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-    make gcp-provision ARGS="-y" </dev/null >/dev/null 2>&1 || make gcp-provision ARGS="-y"
+    IMAGE_TAG="$image_tag" make gcp-provision ARGS="-y" </dev/null 2>&1 | tee "$provisioning_log"
   else
-    make gcp-provision ARGS="-y" </dev/tty >/dev/tty
+    IMAGE_TAG="$image_tag" make gcp-provision ARGS="-y" </dev/tty 2>&1 | tee "$provisioning_log"
   fi
   cd "${repo_dir}"
 
