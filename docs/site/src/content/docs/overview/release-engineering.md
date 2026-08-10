@@ -11,7 +11,7 @@ This document describes the release engineering architecture, versioning guarant
 
 ## 1. Versioning Model & Semantic Guarantees (`vX.Y.Z`)
 
-`kube-agents` strictly follows **Semantic Versioning 2.0.0**:
+`kube-agents` strictly follows **Semantic Versioning 2.0.0** (canonical contract in [Deploy → Release Versioning](/kube-agents/deploy/release-versioning/)):
 
 - **Pre-1.0 Era (`v0.X.Y`)**: Weekly minor releases (`v0.1.0`, `v0.2.0`) starting from initial version `v0.1.0` during active feature development. Patch releases (`v0.1.1`) for critical hotfixes.
 - **1.0+ GA Era (`v1.X.Y`)**:

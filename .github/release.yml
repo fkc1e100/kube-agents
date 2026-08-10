@@ -24,6 +24,9 @@ changelog:
         - "ci"
         - "chore"
         - "refactor"
+    - title: "Other Changes"
+      labels:
+        - "*"
 
   exclude:
     labels:
