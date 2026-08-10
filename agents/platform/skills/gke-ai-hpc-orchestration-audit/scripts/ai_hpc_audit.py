@@ -80,7 +80,7 @@ def inspect_cluster_accelerators(project_id: str, cluster_name: str, location: s
             return findings
 
         # Check ClusterQueues for cohort borrowing limits
-        rc, stdout, _ = run_cmd(["kubectl", "get", "clusterqueues", "-A", "-o", "json"], env=env)
+        rc, stdout, _ = run_cmd(["kubectl", "get", "clusterqueues", "-o", "json"], env=env)
         if rc == 0 and stdout.strip():
             try:
                 cqs = json.loads(stdout).get("items", [])
@@ -105,7 +105,7 @@ def inspect_cluster_accelerators(project_id: str, cluster_name: str, location: s
                             "severity": "major",
                             "title": f"ClusterQueue {name} in cohort {cohort} lacks explicit borrowing limit",
                             "cluster": cluster_name,
-                            "namespace": "default",
+                            "namespace": "",
                             "object": f"ClusterQueue/{name}",
                             "impact": "Workloads in shared cohort can starve high-priority queues during peak batch bursts.",
                             "evidence": {
@@ -125,8 +125,7 @@ def inspect_cluster_accelerators(project_id: str, cluster_name: str, location: s
             except Exception as e:
                 sys.stderr.write(f"Error checking ClusterQueues on {cluster_name}: {e}\n")
     finally:
-        if os.path.exists(kc_path):
-            os.remove(kc_path)
+        pass
 
     return findings
 

@@ -16,7 +16,7 @@
 ./skills/fleet-audit/scripts/audit_report.py start --audit gke-ai-hpc-orchestration-audit
 ```
 
-Returns `{"issue": <int|null>, "repo":"org/repo", "workspace":"/opt/data/gitops/gke-ai-hpc-orchestration-audit/org__repo", "findings_path":"/opt/data/scratch/findings_gke-ai-hpc-orchestration-audit.json"}`.
+Returns `{"issue": <int|null>, "repo":"org/repo", "workspace":"/opt/data/gitops/gke-ai-hpc-orchestration-audit/org__repo", "findings_path":"/opt/data/scratch/findings_gke-ai-hpc-orchestration-audit.json", "pending_remediation_requests": [...]}`. If `pending_remediation_requests` is non-empty, write a `kind: manifest` file for every requested finding during §2 and §3, whether or not this SOP would have promoted it on its own.
 
 ### 1. Enumerate the target fleet
 
@@ -39,11 +39,12 @@ gcloud container clusters list --format=json
 - **S2 — managed addon:** Exclude resources annotated with `addonmanager.kubernetes.io/mode`.
 - **S3 — controller-managed:** Exclude child Pods carrying `ownerReferences`. Target parent Deployments, StatefulSets, JobSets, or RayClusters.
 - **S4 — scaled-to-zero:** Exclude workloads where `spec.replicas == 0`.
+- **Cluster-scoped objects:** `namespace` is `""` for cluster-scoped findings (`ComputeClass`, `ClusterQueue`, `ResourceFlavor`).
 
 #### 2.1 Dynamic Workload Scheduler (DWS) flex-start queue timeouts (`dws-queue-timeout`)
 
 - **Severity**: `critical`
-- **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -A -o json`
+- **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -o json`
 - **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (86400s / 24h) or pending workloads encounter admission deadline timeouts.
 - **Do NOT flag**: Non-DWS batch jobs or workloads with standard provisioning models.
 - **Remediation**: Adjust `provisioningModel` or configure multi-zone fallback capacity in ComputeClass manifest.
@@ -51,7 +52,7 @@ gcloud container clusters list --format=json
 #### 2.2 Kueue cluster queue borrowing and cohort starvation (`kueue-cohort-starvation`)
 
 - **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get clusterqueues,resourceflavors -A -o json`
+- **Command**: `kubectl --context=$CLUSTER get clusterqueues,resourceflavors -o json`
 - **Condition**: High-priority training queue is starved of quota due to unbounded cohort borrowing limits in shared Kueue cohorts.
 - **Do NOT flag**: Standalone ClusterQueues without shared cohorts or development queues with explicit borrowing caps.
 - **Remediation**: Configure explicit `cohort` borrowing limits and nominal quota ceilings in ClusterQueue manifests.
@@ -120,7 +121,7 @@ Every finding must conform to the full findings schema:
       "severity": "critical",
       "title": "ComputeClass dws-gpu-flex queue timeout exceeds SLA",
       "cluster": "ai-cluster-1",
-      "namespace": "default",
+      "namespace": "",
       "object": "ComputeClass/dws-gpu-flex",
       "impact": "Queued training workloads time out waiting for DWS dynamic reservation windows.",
       "evidence": {

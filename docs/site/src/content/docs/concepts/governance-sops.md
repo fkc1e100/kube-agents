@@ -51,7 +51,7 @@ Invoked by the `stockout-prevention` watchdog.
 
 ### `gke_ai_hpc_orchestration_sop.md`
 
-AI/ML and HPC workload orchestration, daily. Nine checks across GPU/TPU accelerator sharing (MPS, GPU slicing, time-sharing), Kueue LocalQueue/ClusterQueue topology and quota reservation, JobSet/LeaderWorkerSet pod placement and restart policies, NCCL/GPUDirect Fast Socket network configurations, and RayCluster head/worker node pool alignment.
+AI/ML and HPC workload orchestration, daily. Five checks across Dynamic Workload Scheduler DWS queue timeouts, Kueue cohort starvation, NCCL GPU interconnect packet drops, CUDA memory fragmentation, and TPU slice resilience.
 
 Invoked by the `gke-ai-hpc-orchestration-audit` watchdog.
 

@@ -42,7 +42,7 @@ Each audit reads its SOP, executes read-only checks against the fleet, writes a 
 | `fleet-wide-cost-analysis`    | `fleet_wide_cost_analysis_sop.md`    | Observable waste, in resource units — no billing export required           |
 | `fleet-consistency-drift`     | `fleet_consistency_drift_sop.md`     | Clusters diverging from a baseline derived from the fleet itself           |
 | `stockout-prevention`         | `stockout_prevention_sop.md`         | Capacity obtainability, ComputeClass resilience, and single-zone stockouts |
-| `gke-ai-hpc-orchestration-audit` | `gke_ai_hpc_orchestration_sop.md` | AI/ML & HPC workload orchestration, accelerator sharing, Kueue/JobSet/LWS topology hygiene |
+| `gke-ai-hpc-orchestration-audit` | `gke_ai_hpc_orchestration_sop.md` | DWS queue timeouts, Kueue cohort starvation, NCCL interconnect drops, CUDA memory fragmentation, and TPU slice resilience |
 
 Two properties matter more than the check lists:
 
