@@ -69,19 +69,21 @@ jobs:
             printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNNER_TEMP/kube-agents-test-bin/$tool"
             chmod +x "$RUNNER_TEMP/kube-agents-test-bin/$tool"
           done
-          echo "$RUNNER_TEMP/kube-agents-test-bin" >> "$GITHUB_PATH"
 
+      # The stub PATH is scoped to the dry-run steps only: exporting it via
+      # $GITHUB_PATH would shadow the real kubectl in the Kind validation
+      # steps below and turn them into no-ops.
       - name: Validate Dry-Run Installer (Non-Interactive)
         run: |
-          ./install.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1" --image-tag="$GITHUB_SHA"
+          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./install.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1" --image-tag="$GITHUB_SHA"
 
       - name: Validate Dry-Run Teardown (Non-Interactive)
         run: |
-          ./uninstall.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1"
+          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./uninstall.sh --dry-run -y --project-id="ci-test-project" --cluster-name="ci-test-cluster" --region="us-central1"
 
       - name: Validate Dry-Run Upgrade (Non-Interactive)
         run: |
-          ./upgrade.sh --dry-run -y --upgrade-mode=full --project-id="ci-test-project" --image-tag="$GITHUB_SHA"
+          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./upgrade.sh --dry-run -y --upgrade-mode=full --project-id="ci-test-project" --image-tag="$GITHUB_SHA"
 
       - name: Create Ephemeral Kind Kubernetes Cluster (Linux)
         if: runner.os == 'Linux'
