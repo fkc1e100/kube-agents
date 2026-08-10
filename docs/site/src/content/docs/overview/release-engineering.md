@@ -93,7 +93,7 @@ flowchart TD
    - Generates SHA256 checksums (`checksums.txt`) for file integrity verification.
 3. **Gate 3: Ephemeral E2E Smoke Test Suite (`gate-3-e2e-smoke-tests`)**:
    - Provisions an ephemeral `Kind` Kubernetes cluster inside the runner.
-   - Validates installer, upgrade, and teardown execution against a live API server.
+   - Validates installer, upgrade, and teardown non-interactive dry-run execution against ephemeral cluster context.
 4. **Publish Official GA Release (`create-github-release`)**:
    - Auto-generates release notes grouped by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles, `.tar.gz`, `.tgz`, `.zip` web download archives, `.spdx.json` SBOM, and `checksums.txt`.
 
@@ -105,10 +105,10 @@ For enterprise deployments with strict InfoSec policies or air-gapped network en
 
 ### A. Air-Gapped Private Registry Support
 
-Clusters blocking outbound internet traffic (`ghcr.io`) can mirror container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-override` flag during installation and upgrade:
+Clusters blocking outbound internet traffic (`ghcr.io`) can mirror container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-prefix` flag during installation and upgrade:
 
 ```bash
-./install.sh --registry-override="us-docker.pkg.dev/my-company-registry/kube-agents"
+./install.sh --registry-prefix="us-docker.pkg.dev/my-company-registry/kube-agents" --image-tag="v0.22.0"
 ```
 
 ### B. Software Bill of Materials (SBOM)
@@ -132,13 +132,8 @@ For environments without CLI `git` access or where streaming remote scripts via 
    ```bash
    sha256sum -c checksums.txt --ignore-missing
    ```
-3. **Execute Local Unpacked Scripts**:
-   ```bash
-   tar -xzf kube-agents-v0.1.0.tar.gz
-   cd kube-agents-v0.1.0/
-   ./install.sh --project-id="my-gcp-project" --cluster-name="platform-agent"
-   ./upgrade.sh --upgrade-mode=skills
-   ```
+3. **Execute Local Unpacked Charts or Git-Cloned Scripts**:
+   Follow the detailed step-by-step instructions in [INSTALL.md](https://github.com/gke-labs/kube-agents/blob/main/INSTALL.md#installing--upgrading-via-downloadable-web-release-archives) to deploy via the bundled Helm chart or execute the automated script installer.
 
 ---
 
@@ -164,6 +159,6 @@ When a bug or regression is discovered in a release (e.g. `v0.22.0`) that requir
    - Publishes tagged container images `ghcr.io/gke-labs/kube-agents/*:v0.22.1` and Helm charts (`kube-agents-0.22.1.tgz`).
 4. **Zero-Downtime Customer Upgrade**:
    - Customers upgrade instantly to the patch release via `upgrade.sh`:
-     ```bash
-     curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- --version=v0.22.1
-     ```
+   ```bash
+   curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- --image-tag=v0.22.1
+   ```

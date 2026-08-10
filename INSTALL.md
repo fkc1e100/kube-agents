@@ -143,28 +143,48 @@ sha256sum -c checksums.txt --ignore-missing
 # Expected Output: kube-agents-v0.1.0.tar.gz: OK
 ```
 
-### Step 3: Extract and Run Unpacked Install/Upgrade Scripts
+### Step 3: Extract and Deploy Bundled Helm Charts or Terraform Modules
 
-Unpack the archive and run the self-contained lifecycle scripts locally:
+Unpack the archive to access bundled Helm charts (`charts/kube-agents`), Terraform modules (`terraform/`), and self-contained manifests.
+
+> [!NOTE]
+> The automated bash installer (`./install.sh`) and lifecycle upgrader (`./upgrade.sh`) verify repository commit provenance and require a Git checkout. For deployments from extracted standalone release archives, deploy via the bundled Helm chart (`./charts/kube-agents`) or Terraform infrastructure modules (`./terraform/`).
+
+For GitOps and Helm-based environments, deploy directly from the extracted chart directory:
 
 ```bash
 # Extract the archive
 tar -xzf kube-agents-v0.1.0.tar.gz
 cd kube-agents-v0.1.0/
 
+# Deploy via bundled Helm chart
+helm install kube-agents ./charts/kube-agents \
+  --namespace kubeagents-system \
+  --create-namespace \
+  --set platformAgent.harness.projectId="my-gcp-project" \
+  --set platformAgent.harness.clusterName="platform-agent" \
+  --set platformAgent.harness.location="us-central1-c"
+```
+
+To run the automated script installer from source, clone the versioned release tag:
+
+```bash
+git clone --depth 1 --branch v0.1.0 https://github.com/gke-labs/kube-agents.git
+cd kube-agents
+
 # Run interactive or non-interactive local installation
-./install.sh --project-id="my-gcp-project" --cluster-name="platform-agent"
+./install.sh --project-id="my-gcp-project" --cluster-name="platform-agent" --image-tag="v0.1.0"
 
 # Run local upgrade
-./upgrade.sh --upgrade-mode=skills
+./upgrade.sh --upgrade-mode=full --image-tag="v0.1.0"
 ```
 
 ### Step 4: Private Container Registry Mirroring (Optional)
 
-If your cluster blocks outbound access to `ghcr.io`, mirror container images to your internal registry and pass `--registry-override`:
+If your cluster blocks outbound access to `ghcr.io`, mirror container images to your internal registry and pass `--registry-prefix`:
 
 ```bash
-./install.sh --registry-override="us-docker.pkg.dev/my-company-registry/kube-agents"
+./install.sh --registry-prefix="us-docker.pkg.dev/my-company-registry/kube-agents" --image-tag="v0.1.0"
 ```
 
 ---
