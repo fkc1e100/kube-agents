@@ -9,7 +9,10 @@ Use this skill when asked to upgrade the `kube-agents` Platform Agent or operato
 
 ## One-Liner Execution Mode (Non-Interactive)
 
-To non-interactively upgrade `kube-agents` on a GKE cluster:
+To non-interactively upgrade `kube-agents` on a GKE cluster, run the one-liner **from the
+directory holding the original install checkout** — the upgrade refuses to proceed without the
+saved `k8s-operator/scripts/vars.sh` configuration state, because the provisioning scripts
+re-render the PlatformAgent Custom Resource from it:
 
 ```bash
 curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- \

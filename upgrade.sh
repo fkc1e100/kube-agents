@@ -6,7 +6,12 @@
 #
 # Usage:
 #   ./upgrade.sh [options]
-#   curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- --upgrade-mode=skills
+#   curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- \
+#     --upgrade-mode=full --image-tag=<SEMVER_TAG_OR_FULL_COMMIT_SHA>
+#
+# Run this from the directory holding your original install checkout: the
+# upgrade refuses to re-render cluster configuration without the saved
+# k8s-operator/scripts/vars.sh state from the installation.
 # ==============================================================================
 
 set -euo pipefail
@@ -117,6 +122,21 @@ json_escape() {
   printf '%s' "$value"
 }
 
+# Persist one variable into the saved installer state. The provisioning
+# scripts re-source vars.sh via load_state, so exporting alone is not enough:
+# a value must be written here for the delegated scripts to honor it.
+persist_state_var() {
+  local state_file="$1"
+  local var_name="$2"
+  local var_value="$3"
+  if [ -f "$state_file" ]; then
+    grep -E -v "^[[:space:]]*export[[:space:]]+${var_name}=" "$state_file" > "${state_file}.tmp" || true
+    mv "${state_file}.tmp" "$state_file"
+  fi
+  printf 'export %s=%q\n' "$var_name" "$var_value" >> "$state_file"
+  chmod 600 "$state_file" 2>/dev/null || true
+}
+
 verify_local_source_ref() {
   local repo_dir="$1"
   local expected_ref="$2"
@@ -197,7 +217,13 @@ main() {
       print_error "--image-tag is required; use a validated release tag or full commit SHA."
       exit 1
     fi
-    read -rp "Target image tag (validated release tag or full commit SHA): " PARAM_IMAGE_TAG
+    if [ -c /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
+      printf '%b' "  ${C_CYAN}Target image tag (validated release tag or full commit SHA): ${C_RESET}" >/dev/tty
+      read -r PARAM_IMAGE_TAG </dev/tty
+    else
+      print_error "--image-tag is required when no interactive terminal is available (e.g. curl | bash)."
+      exit 1
+    fi
   fi
   validate_immutable_ref "$PARAM_IMAGE_TAG"
 
@@ -228,16 +254,19 @@ main() {
   print_info "Upgrade Mode: ${C_BOLD}${PARAM_UPGRADE_MODE}${C_RESET}"
   print_info "Target Image Tag: ${C_BOLD}${PARAM_IMAGE_TAG}${C_RESET}"
 
-  if [ ! -f "${repo_dir}/k8s-operator/scripts/vars.sh" ]; then
-    print_warning "No existing vars.sh found. Performing configuration state restoration..."
-  else
+  local state_file="${repo_dir}/k8s-operator/scripts/vars.sh"
+  local state_loaded="false"
+  if [ -f "$state_file" ]; then
     # Load state
     # shellcheck disable=SC1091
-    if ! source "${repo_dir}/k8s-operator/scripts/vars.sh"; then
+    if ! source "$state_file"; then
       print_error "Configuration state is invalid and could not be loaded."
       exit 1
     fi
+    state_loaded="true"
     print_success "Loaded existing configuration state from k8s-operator/scripts/vars.sh"
+  else
+    print_warning "No saved configuration state (k8s-operator/scripts/vars.sh) was found in ${repo_dir}."
   fi
 
   local target_project="${PARAM_PROJECT_ID:-${PROJECT_ID:-}}"
@@ -262,6 +291,31 @@ main() {
     write_report "DRY_RUN_COMPLETE"
     exit 0
   fi
+
+  # Fail closed without saved installer state: the delegated provisioning
+  # scripts re-render the PlatformAgent Custom Resource (and operator images)
+  # from vars.sh, so upgrading without it would silently reset chat, allowed
+  # users, dashboard, and model-provider configuration to blank defaults.
+  if [ "$state_loaded" != "true" ]; then
+    print_error "Refusing to upgrade without the installation's saved configuration state."
+    print_info "Run upgrade.sh from the directory where kube-agents was installed (it contains k8s-operator/scripts/vars.sh), or restore that file first."
+    exit 1
+  fi
+
+  # Persist explicit target overrides so the delegated provisioning scripts,
+  # which re-source vars.sh, act on the same cluster we fetch credentials for.
+  if [ -n "$PARAM_PROJECT_ID" ]; then
+    persist_state_var "$state_file" PROJECT_ID "$target_project"
+  fi
+  if [ -n "$PARAM_CLUSTER_NAME" ]; then
+    persist_state_var "$state_file" CLUSTER_NAME "$target_cluster"
+  fi
+  if [ -n "$PARAM_REGION" ]; then
+    persist_state_var "$state_file" REGION "$target_region"
+  fi
+  export PROJECT_ID="$target_project"
+  export CLUSTER_NAME="$target_cluster"
+  export REGION="$target_region"
 
   print_step "2. Connecting kubectl to GKE Cluster"
   gcloud container clusters get-credentials "$target_cluster" --location="$target_region" --project="$target_project"
