@@ -412,6 +412,14 @@ EOF
 
 # ─── Day-2 Control Panel Menu System (raspi-config style) ──────────────────────
 run_menu_system() {
+  # The control panel is inherently interactive: without a terminal its menu
+  # loop would auto-select the first option forever instead of ever exiting.
+  if [ "$PARAM_NON_INTERACTIVE" = "true" ] || ! has_controlling_tty; then
+    print_error "The Day-2 control panel requires an interactive terminal."
+    print_info "Re-run './install.sh --menu' from a TTY, without -y/--non-interactive."
+    exit 1
+  fi
+
   local repo_dir
   repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   local vars_file="${repo_dir}/k8s-operator/scripts/vars.sh"
@@ -704,7 +712,9 @@ main() {
     fi
   fi
 
-  if ! gcloud config set project "$project_id" >/dev/null; then
+  if [ "$PARAM_DRY_RUN" = "true" ]; then
+    print_info "Dry-run: leaving the active gcloud project unchanged (target: ${project_id})."
+  elif ! gcloud config set project "$project_id" >/dev/null; then
     print_error "Unable to select GCP project '$project_id'. Verify the project ID and your access."
     exit 1
   fi
