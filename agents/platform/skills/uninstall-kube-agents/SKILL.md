@@ -9,14 +9,11 @@ Use this skill when asked to remove or uninstall `kube-agents` infrastructure fr
 
 ## One-Liner Uninstall Command (Non-Interactive)
 
-To run the project teardown and optionally clean fleet namespaces, matching persistent disks, and GitOps manifests:
+To run the project teardown non-interactively:
 
 ```bash
 curl -fsSL https://gke-labs.github.io/kube-agents/uninstall.sh | bash -s -- \
   --non-interactive \
-  --fleet \
-  --purge-storage \
-  --clean-gitops \
   --project-id="<PROJECT_ID>" \
   --cluster-name="<CLUSTER_NAME>" \
   --region="<REGION>"

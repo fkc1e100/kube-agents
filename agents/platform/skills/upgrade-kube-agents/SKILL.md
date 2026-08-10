@@ -18,7 +18,7 @@ curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- \
   --project-id="<PROJECT_ID>" \
   --cluster-name="<CLUSTER_NAME>" \
   --region="<REGION>" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>"
 ```
 
 ## Upgrade Modes
@@ -34,7 +34,11 @@ To preview the upgrade plan and output a JSON status report without modifying cl
 ```bash
 ./upgrade.sh --dry-run --upgrade-mode=full \
   --project-id="<PROJECT_ID>" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>"
 ```
 
 Machine-readable JSON status reports are generated at `/tmp/kube-agents-upgrade-report.json`.
+
+`--image-tag` is required in every mode. Use a SemVer release tag or the full 40-character commit
+SHA behind a validated RC tag; mutable refs such as `latest` and `main` are rejected so the upgrade
+scripts and container images stay on the same revision.

@@ -43,6 +43,10 @@ Run the interactive one-liner installer directly in **Google Cloud Shell** or an
 curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash
 ```
 
+When prompted for the image/source revision, enter a SemVer release tag or the full 40-character
+commit SHA behind a validated RC tag. The installer rejects mutable refs such as `latest` and `main`
+so the provisioning scripts and container images stay on the same revision.
+
 _(Alternatively via GitHub raw URL: `curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.sh | bash`)_
 
 ### What `install.sh` Automatically Handles:
@@ -63,7 +67,7 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
   --non-interactive \
   --project-id="my-gcp-project" \
   --cluster-name="platform-agent" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>" \
   --model-provider="gemini" \
   --permission-set="read-only"
 ```
@@ -73,7 +77,7 @@ To run pre-flight checks and output configuration state (`vars.sh` and `/tmp/kub
 ```bash
 ./install.sh --dry-run --non-interactive \
   --project-id="my-gcp-project" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>"
 ```
 
 ---
@@ -401,12 +405,15 @@ the interactive pipeline.
 
 To safely remove provisioned resources:
 
-### Automated Uninstallation & Fleet Purge
+### Automated Uninstallation
 
-To safely remove all `kube-agents` elements across your GCP project and GKE clusters, including fleet components, retained storage, and GitOps manifests:
+To remove the resources created for one configured `kube-agents` installation:
 
 ```bash
-./uninstall.sh --non-interactive --fleet --purge-storage --clean-gitops --project-id="<PROJECT_ID>"
+./uninstall.sh --non-interactive \
+  --project-id="<PROJECT_ID>" \
+  --cluster-name="<CLUSTER_NAME>" \
+  --region="<REGION>"
 ```
 
 ### Automated Cloud Teardown

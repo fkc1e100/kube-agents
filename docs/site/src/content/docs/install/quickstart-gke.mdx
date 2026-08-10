@@ -28,6 +28,10 @@ Prefer declarative IaC over the interactive pipeline? A single `terraform apply`
 curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash
 ```
 
+The installer asks for an immutable image/source revision. Enter a SemVer release tag or the full
+40-character commit SHA behind a validated RC tag; mutable refs such as `latest` and `main` are
+rejected so the provisioning scripts and container images stay on the same revision.
+
 For non-interactive AI Agent or CI/CD automated deployments:
 
 ```bash
@@ -36,7 +40,7 @@ curl -fsSL https://gke-labs.github.io/kube-agents/install.sh | bash -s -- \
   --project-id="my-gcp-project" \
   --cluster-name="platform-agent-host" \
   --region="us-central1" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>" \
   --permission-set="read-only"
 ```
 

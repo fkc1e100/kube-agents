@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/main/install.s
   --project-id="YOUR_GCP_PROJECT_ID" \
   --cluster-name="kube-agents-platform" \
   --region="us-central1" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>" \
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>" \
   --model-provider="gemini" \
   --permission-set="read-only"
 ```
@@ -29,7 +29,7 @@ To validate prerequisites and generate configuration state (`vars.sh`) without c
 ```bash
 ./install.sh --dry-run --non-interactive \
   --project-id="YOUR_GCP_PROJECT_ID" \
-  --image-tag="<VALIDATED_RELEASE_TAG_OR_COMMIT_SHA>"
+  --image-tag="<SEMVER_TAG_OR_FULL_COMMIT_SHA>"
 ```
 
 ## Machine-Readable Results
@@ -56,7 +56,7 @@ Upon completion, `install.sh` generates a machine-readable JSON status report at
 | `--project-id=ID`        | Target GCP Project ID                                    | Active `gcloud` project        |
 | `--region=REGION`        | Target GCP Region                                        | `us-central1`                  |
 | `--cluster-name=NAME`    | GKE Cluster Name                                         | `kube-agents-platform`         |
-| `--image-tag=TAG`        | Validated release tag or commit SHA                      | Required non-interactively     |
+| `--image-tag=TAG`        | SemVer release tag or full 40-character commit SHA       | Required                       |
 | `--registry-prefix=PATH` | Container registry path without a URL scheme             | `ghcr.io/gke-labs/kube-agents` |
 | `--model-provider=NAME`  | LLM Model Provider (`gemini` \| `openai` \| `anthropic`) | `gemini`                       |
 | `--permission-set=SET`   | Platform Agent RBAC scope (`read-only` \| `gke-admin`)   | `read-only`                    |
