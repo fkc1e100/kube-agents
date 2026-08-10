@@ -95,7 +95,7 @@ flowchart TD
    - Provisions an ephemeral `Kind` Kubernetes cluster inside the runner.
    - Validates installer, upgrade, and teardown non-interactive dry-run execution against ephemeral cluster context.
 4. **Publish Official GA Release (`create-github-release`)**:
-   - Auto-generates release notes grouped by Conventional Commits (`feat`, `fix`, `sec`) and attaches Helm chart bundles, `.tar.gz`, `.tgz`, `.zip` web download archives, `.spdx.json` SBOM, and `checksums.txt`.
+   - Auto-generates release notes grouped by pull request labels (`feat`, `fix`, `sec`) configured in `.github/release.yml` and attaches Helm chart bundles, `.tar.gz`, `.tgz`, `.zip` web download archives, `.spdx.json` SBOM, and `checksums.txt`.
 
 ---
 
@@ -105,7 +105,7 @@ For enterprise deployments with strict InfoSec policies or air-gapped network en
 
 ### A. Air-Gapped Private Registry Support
 
-Clusters blocking outbound internet traffic (`ghcr.io`) can mirror container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-prefix` flag during installation and upgrade:
+Clusters blocking outbound internet traffic (`ghcr.io`) can mirror container images to an internal private container registry (Artifact Registry, Harbor, Nexus) using the `--registry-prefix` flag during installation (inherited automatically during upgrades from saved `vars.sh` state):
 
 ```bash
 ./install.sh --registry-prefix="us-docker.pkg.dev/my-company-registry/kube-agents" --image-tag="v0.22.0"
