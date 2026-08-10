@@ -154,6 +154,33 @@ execute_cluster_workload_pool() {
     --quiet
 }
 
+# Enabling the cluster-level pool does not migrate pre-existing node pools off
+# the legacy GCE metadata server; pods on such pools receive the node's GCE
+# service account instead of the federated identity and fail GCP auth.
+get_legacy_metadata_node_pools() {
+  gcloud container node-pools list \
+      --cluster="${CLUSTER_NAME}" \
+      --location="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --format="csv[no-heading](name,config.workloadMetadataConfig.mode)" 2>/dev/null \
+    | awk -F',' '$2 != "GKE_METADATA" {print $1}'
+}
+verify_node_pool_metadata() {
+  [ -z "$(get_legacy_metadata_node_pools)" ]
+}
+execute_node_pool_metadata() {
+  local pool
+  for pool in $(get_legacy_metadata_node_pools); do
+    print_warning "Node pool '${pool}' uses the legacy GCE metadata server; migrating to GKE_METADATA (this recreates the pool's nodes)..."
+    gcloud container node-pools update "${pool}" \
+        --cluster="${CLUSTER_NAME}" \
+        --location="${REGION}" \
+        --project="${PROJECT_ID}" \
+        --workload-metadata=GKE_METADATA \
+        --quiet || return 1
+  done
+}
+
 
 # Step 1: Enable APIs
 verify_apis() {
@@ -263,7 +290,8 @@ execute_github_minter_iam() {
 # ─── Execution Pipeline ───────────────────────────────────────────────────────
 run_step "1. Enable APIs" verify_apis execute_apis 10
 run_step "2. Ensure GKE Workload Identity Pool" verify_cluster_workload_pool execute_cluster_workload_pool 10
-run_step "3. Configure Platform Agent Workload Identity & GCP IAM" verify_platform_agent execute_platform_agent 5
-run_step "4. Configure GitHub Token Minter Workload Identity" verify_github_minter_iam execute_github_minter_iam 5
+run_step "3. Migrate Node Pools to the GKE Metadata Server" verify_node_pool_metadata execute_node_pool_metadata 5
+run_step "4. Configure Platform Agent Workload Identity & GCP IAM" verify_platform_agent execute_platform_agent 5
+run_step "5. Configure GitHub Token Minter Workload Identity" verify_github_minter_iam execute_github_minter_iam 5
 
 echo -e "\n${C_MAGENTA}${C_BOLD}>>>  Controller & Agent GCP Permissions Configured Successfully!  <<<${C_RESET}"
