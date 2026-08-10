@@ -151,6 +151,18 @@ EOF
   print_success "Uninstall report written to: $report_file"
 }
 
+persist_state_var() {
+  local state_file="$1"
+  local var_name="$2"
+  local var_value="$3"
+  if [ -f "$state_file" ]; then
+    grep -E -v "^[[:space:]]*export[[:space:]]+${var_name}=" "$state_file" > "${state_file}.tmp" || true
+    mv "${state_file}.tmp" "$state_file"
+  fi
+  printf 'export %s=%q\n' "$var_name" "$var_value" >> "$state_file"
+  chmod 600 "$state_file" 2>/dev/null || true
+}
+
 main() {
   parse_args "$@"
   print_banner
@@ -222,6 +234,23 @@ main() {
   fi
 
   print_step "2. Executing Automated Teardown Engine"
+
+  # The delegated teardown steps re-source vars.sh via ensure_teardown_state,
+  # so exporting alone is not enough: an explicit CLI target override must be
+  # written into the state file, or teardown would silently act on the saved
+  # project/cluster/region instead of the target confirmed above.
+  local state_file="${repo_dir}/k8s-operator/scripts/vars.sh"
+  if [ -f "$state_file" ]; then
+    if [ -n "$PARAM_PROJECT_ID" ]; then
+      persist_state_var "$state_file" PROJECT_ID "$target_project"
+    fi
+    if [ -n "$PARAM_CLUSTER_NAME" ]; then
+      persist_state_var "$state_file" CLUSTER_NAME "$target_cluster"
+    fi
+    if [ -n "$PARAM_REGION" ]; then
+      persist_state_var "$state_file" REGION "$target_region"
+    fi
+  fi
 
   export PROJECT_ID="$target_project"
   export CLUSTER_NAME="$target_cluster"
