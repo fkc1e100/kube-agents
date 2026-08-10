@@ -258,7 +258,7 @@ main() {
   local state_loaded="false"
   if [ -f "$state_file" ]; then
     # Load state
-    # shellcheck disable=SC1091
+    # shellcheck disable=SC1090,SC1091
     if ! source "$state_file"; then
       print_error "Configuration state is invalid and could not be loaded."
       exit 1
