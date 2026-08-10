@@ -91,26 +91,28 @@ def inspect_cluster_accelerators(project_id: str, cluster_name: str, location: s
                     if not cohort:
                         continue
 
-                    # Check resource groups for missing borrowing limits
-                    has_borrowing_limit = False
+                    # Check resource groups for missing borrowing limits per resource
+                    unbounded_resources = []
                     for rg in spec.get("resourceGroups", []):
                         for fl in rg.get("flavors", []):
                             for r in fl.get("resources", []):
-                                if "borrowingLimit" in r:
-                                    has_borrowing_limit = True
+                                r_name = r.get("name", "unknown")
+                                if "borrowingLimit" not in r:
+                                    unbounded_resources.append(r_name)
 
-                    if not has_borrowing_limit:
+                    if unbounded_resources:
+                        unbounded_str = ", ".join(sorted(set(unbounded_resources)))
                         findings.append({
                             "check": "kueue-cohort-starvation",
                             "severity": "major",
-                            "title": f"ClusterQueue {name} in cohort {cohort} lacks explicit borrowing limit",
+                            "title": f"ClusterQueue {name} in cohort {cohort} lacks explicit borrowing limit for {unbounded_str}",
                             "cluster": cluster_name,
                             "namespace": "",
                             "object": f"ClusterQueue/{name}",
-                            "impact": "Workloads in shared cohort can starve high-priority queues during peak batch bursts.",
+                            "impact": f"Workloads in shared cohort can starve high-priority queues during peak batch bursts on {unbounded_str}.",
                             "evidence": {
                                 "command": f"kubectl get clusterqueue {name} -o json",
-                                "excerpt": f"cohort: {cohort}, borrowingLimit: null"
+                                "excerpt": f"cohort: {cohort}, unboundedResources: {unbounded_str}"
                             },
                             "recommendation": {
                                 "action": f"Set explicit borrowingLimit in ClusterQueue {name} spec.",
