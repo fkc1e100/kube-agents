@@ -44,6 +44,7 @@ PARAM_DRY_RUN="false"
 PARAM_PROJECT_ID=""
 PARAM_CLUSTER_NAME=""
 PARAM_REGION=""
+PARAM_SOURCE_REF=""
 TEMP_REPO_DIR=""
 
 cleanup() {
@@ -102,6 +103,8 @@ Options:
   --project-id ID               GCP Target Project ID
   --cluster-name NAME           GKE Target Cluster Name (default: platform-agent-host)
   --region REGION               GKE GCP Region
+  --source-ref REF              Release tag or commit SHA to fetch the teardown scripts from
+                                when not run from a local checkout (default: main)
   --help, -h, -?                Show this help message
 
 Examples:
@@ -126,6 +129,8 @@ parse_args() {
       --cluster-name) PARAM_CLUSTER_NAME="$2"; shift 2 ;;
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --region) PARAM_REGION="$2"; shift 2 ;;
+      --source-ref=*) PARAM_SOURCE_REF="${1#*=}"; shift ;;
+      --source-ref) PARAM_SOURCE_REF="$2"; shift 2 ;;
       --help|-h|-\?|help) show_help ;;
       *) print_error "Unknown parameter: $1"; return 2 ;;
     esac
@@ -161,8 +166,15 @@ main() {
   else
     TEMP_REPO_DIR="$(mktemp -d)"
     repo_dir="${TEMP_REPO_DIR}/kube-agents"
-    print_info "Fetching the teardown scripts from kube-agents main..."
-    git clone --depth=1 https://github.com/gke-labs/kube-agents.git "$repo_dir"
+    if [ -n "$PARAM_SOURCE_REF" ]; then
+      print_info "Fetching the teardown scripts pinned at '${PARAM_SOURCE_REF}'..."
+      git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$repo_dir"
+      git -C "$repo_dir" fetch --depth=1 origin "$PARAM_SOURCE_REF"
+      git -C "$repo_dir" checkout --detach FETCH_HEAD
+    else
+      print_warning "No --source-ref given; fetching the teardown scripts from main, which may be newer than your installed release."
+      git clone --depth=1 https://github.com/gke-labs/kube-agents.git "$repo_dir"
+    fi
   fi
   if [ -f "${repo_dir}/k8s-operator/scripts/vars.sh" ]; then
     # shellcheck disable=SC1091
