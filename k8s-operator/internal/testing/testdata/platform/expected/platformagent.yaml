@@ -767,6 +767,9 @@ spec:
         - mountPath: /var/run/secrets/kubeagents/serviceaccount
           name: credential-proxy-ksa-token
           readOnly: true
+        - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          name: event-watcher-ksa-token
+          readOnly: true
         - mountPath: /opt/data
           name: platform-agent-data-vol
       initContainers:

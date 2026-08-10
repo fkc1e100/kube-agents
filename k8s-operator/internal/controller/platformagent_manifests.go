@@ -1629,6 +1629,7 @@ func buildCredentialProxySidecar(agent *agentv1alpha1.PlatformAgent, homeDir str
 			{Name: "credential-proxy-runtime", MountPath: "/var/run/credential-proxy"},
 			{Name: "event-watcher-kubeconfig", MountPath: "/var/run/event-watcher"},
 			{Name: "credential-proxy-ksa-token", MountPath: "/var/run/secrets/kubeagents/serviceaccount", ReadOnly: true},
+			{Name: "event-watcher-ksa-token", MountPath: "/var/run/secrets/kubernetes.io/serviceaccount", ReadOnly: true},
 			{Name: "platform-agent-data-vol", MountPath: homeDir},
 		},
 		SecurityContext: &corev1.SecurityContext{
