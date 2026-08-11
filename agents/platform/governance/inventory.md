@@ -17,7 +17,7 @@
 Use fast, aggregated CLI commands to map the project landscape in 2–3 commands:
 
 1. **GCP Project & Clusters:** Run `gcloud container clusters list` to list all GKE clusters, regions, versions, and status.
-2. **Cluster Node & Pod Overview:** Run `kubectl get nodes` and `kubectl get pods -A` (filtering output for pods where STATUS is not `Running` or `Completed`, or where container readiness is incomplete or restart count > 0) to quickly capture node capacity and identify active failing/unhealthy workloads.
+2. **Cluster Node & Pod Overview:** Run `kubectl get nodes` and `kubectl get pods -A` (filtering output for pods where STATUS is not `Running` or `Completed`, or where container readiness is incomplete or restart count > 0) to quickly capture management cluster node capacity and identify active failing/unhealthy workloads.
 
 ---
 
@@ -25,7 +25,7 @@ Use fast, aggregated CLI commands to map the project landscape in 2–3 commands
 
 Synthesize findings into high-level status metrics:
 - Active cluster count, Kubernetes control plane versions, node pool counts.
-- Summary of healthy vs degraded workloads across namespaces.
+- Summary of healthy vs degraded workloads across namespaces in the management cluster.
 - Immediate high-priority SRE observations (e.g. failing pods, missing Workload Identity, unmonitored namespaces).
 
 ---
@@ -44,13 +44,13 @@ Write `/opt/data/INVENTORY.md` directly. Keep it concise, complete, and presenta
 | :--- | :--- | :--- | :--- | :--- |
 | <cluster_name> | <region> | Running | <version> | <nodes> |
 
-### ⚠️ Immediate Workload Status & Issues
+### ⚠️ Immediate Workload Status & Issues (Management Cluster)
 - **Unhealthy / Failing Pods:** <list_failing_pods_or_none>
 - **Active Namespaces:** <namespaces_summary>
 
 ### 🎯 Key Observations
 1. **Cluster Posture:** <summary_of_control_plane_and_node_capacity>
-2. **Workload Health:** <summary_of_running_vs_failing_pods>
+2. **Workload Health (Management Cluster):** <summary_of_running_vs_failing_pods>
 ```
 
 ---
