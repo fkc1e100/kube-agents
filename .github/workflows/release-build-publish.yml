@@ -164,11 +164,12 @@ jobs:
             chmod +x "$RUNNER_TEMP/kube-agents-test-bin/$tool"
           done
 
-      - name: Test Non-Interactive Dry-Run Execution
+      - name: Test Non-Interactive Dry-Run Execution & Kind Server-Side Validation
         run: |
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./install.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1" --image-tag="${{ github.ref_name }}"
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./upgrade.sh --dry-run -y --upgrade-mode=full --project-id="release-project" --image-tag="${{ github.ref_name }}"
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./uninstall.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1"
+          helm template release-gate charts/kube-agents --set platformAgent.harness.clusterName="release-cluster" --set platformAgent.harness.location="us-central1" --set platformAgent.harness.projectId="release-project" | kubectl apply --dry-run=server -f -
 
   # ─── PUBLISH: GitHub Release & Artifact Distribution ─────────────────────────
   create-github-release:
