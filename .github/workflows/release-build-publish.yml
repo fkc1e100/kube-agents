@@ -169,7 +169,7 @@ jobs:
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./install.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1" --image-tag="${{ github.ref_name }}"
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./upgrade.sh --dry-run -y --upgrade-mode=full --project-id="release-project" --image-tag="${{ github.ref_name }}"
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./uninstall.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1"
-          kubectl apply -f charts/kube-agents/crds/
+          kubectl apply --server-side -f charts/kube-agents/crds/
           helm template release-gate charts/kube-agents --set platformAgent.harness.clusterName="release-cluster" --set platformAgent.harness.location="us-central1" --set platformAgent.harness.projectId="release-project" --set litellm.podMonitoring=false | kubectl apply --dry-run=server -f -
 
   # ─── PUBLISH: GitHub Release & Artifact Distribution ─────────────────────────
