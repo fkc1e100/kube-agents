@@ -214,8 +214,8 @@ verify_local_source_ref() {
   local repo_dir="$1"
   local expected_ref="$2"
   if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    if [ "$PARAM_DRY_RUN" = "true" ]; then
-      print_warning "Dry-run cannot verify source/image alignment because '$repo_dir' is not a Git worktree."
+    if [ "$PARAM_DRY_RUN" = "true" ] || [ -f "$repo_dir/charts/kube-agents/Chart.yaml" ]; then
+      print_warning "Source directory '$repo_dir' is not a Git worktree; proceeding using release bundle manifests."
       return 0
     fi
     print_error "Refusing to provision from an unversioned source directory: $repo_dir"
