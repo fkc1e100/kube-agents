@@ -214,8 +214,21 @@ verify_local_source_ref() {
   local repo_dir="$1"
   local expected_ref="$2"
   if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [ -f "$repo_dir/.release-bundle" ]; then
+      local bundled_version
+      if ! bundled_version="$(grep '^appVersion:' "$repo_dir/charts/kube-agents/Chart.yaml" | awk '{print $2}' | tr -d '"' 2>/dev/null)" || [ -z "$bundled_version" ]; then
+        print_error "Could not parse appVersion from release bundle's Chart.yaml"
+        return 1
+      fi
+      if [ "$bundled_version" != "$expected_ref" ]; then
+        print_error "Source/image version mismatch: release bundle is version ${bundled_version}, requested ref resolves to ${expected_ref}."
+        return 1
+      fi
+      print_warning "Source directory '$repo_dir' is an unpacked release bundle; proceeding using bundled manifests."
+      return 0
+    fi
     if [ "$PARAM_DRY_RUN" = "true" ]; then
-      print_warning "Dry-run cannot verify source/image alignment because '$repo_dir' is not a Git worktree."
+      print_warning "Dry-run is proceeding outside a Git worktree without a versioned release bundle."
       return 0
     fi
     print_error "Refusing to provision from an unversioned source directory: $repo_dir"
