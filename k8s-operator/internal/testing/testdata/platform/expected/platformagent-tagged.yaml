@@ -704,12 +704,11 @@ spec:
             --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
             >/dev/null; else kubectl config set-cluster default --server="https://kubernetes.default.svc"
             --insecure-skip-tls-verify=true >/dev/null; fi && TOKEN_FILE=""; if [
-            -f /var/run/secrets/kubeagents/serviceaccount/token ]; then TOKEN_FILE="/var/run/secrets/kubeagents/serviceaccount/token";
-            elif [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
-            TOKEN_FILE="/var/run/secrets/kubernetes.io/serviceaccount/token"; fi &&
-            if [ -n "$TOKEN_FILE" ]; then kubectl config set-credentials in-cluster
-            --token="$(cat "$TOKEN_FILE")" >/dev/null && kubectl config set-context
-            default --cluster=default --user=in-cluster --namespace="$KUBE_DEFAULT_NAMESPACE"
+            -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then TOKEN_FILE="/var/run/secrets/kubernetes.io/serviceaccount/token";
+            elif [ -f /var/run/secrets/kubeagents/serviceaccount/token ]; then TOKEN_FILE="/var/run/secrets/kubeagents/serviceaccount/token";
+            fi && if [ -n "$TOKEN_FILE" ]; then kubectl config set-credentials in-cluster
+            --token-file="$TOKEN_FILE" >/dev/null && kubectl config set-context default
+            --cluster=default --user=in-cluster --namespace="$KUBE_DEFAULT_NAMESPACE"
             >/dev/null; else kubectl config set-context default --cluster=default
             --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; fi && kubectl config
             use-context default >/dev/null
