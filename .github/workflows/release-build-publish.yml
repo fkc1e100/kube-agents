@@ -118,7 +118,7 @@ jobs:
           (cd /tmp && zip -r "${GITHUB_WORKSPACE}/${BUILD_DIR}/${BUNDLE_PREFIX}.zip" "${BUNDLE_PREFIX}")
 
           # 5. Generate SHA256 checksums file
-          (cd "${BUILD_DIR}" && sha256sum * > checksums.txt)
+          (cd "${BUILD_DIR}" && sha256sum -- * > checksums.txt)
 
       - name: Upload Packaging Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.0

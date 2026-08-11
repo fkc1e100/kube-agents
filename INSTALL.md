@@ -148,7 +148,7 @@ sha256sum -c checksums.txt --ignore-missing
 Unpack the archive to access bundled Helm charts (`charts/kube-agents`), Terraform modules (`terraform/`), and self-contained manifests.
 
 > [!NOTE]
-> The automated bash installer (`./install.sh`) and lifecycle upgrader (`./upgrade.sh`) verify repository commit provenance and require a Git checkout. For deployments from extracted standalone release archives, deploy via the bundled Helm chart (`./charts/kube-agents`) or Terraform infrastructure modules (`./terraform/`).
+> The automated bash installer (`./install.sh`) supports deployment from an unpacked release archive when executed directly from the extracted directory. However, the lifecycle upgrader (`./upgrade.sh`) requires a local Git repository with commit history to perform Day-2 drift analysis.
 
 For GitOps and Helm-based environments, deploy directly from the extracted chart directory:
 
