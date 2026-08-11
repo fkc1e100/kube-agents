@@ -1,11 +1,11 @@
 ---
 name: finops-cloud-waste-audit
-description: Audits gross cloud resource overrequest, orphaned retained PersistentVolumes, unattached static IPs, and unindexed Cloud Logging cost runaway.
+description: Audits unfiltered Cloud Logging cost runaway and idle load balancer backend services.
 ---
 
 # Task
 
-Audit Google Cloud and GKE resources for financial waste, massive CPU/RAM overrequests, orphaned retained PersistentVolumes, idle static IP addresses, and unindexed Cloud Logging cost runaway, emitting findings for the `fleet-audit` reporting harness.
+Audit Google Cloud resources for financial waste, unfiltered high-throughput Cloud Logging export sinks, and idle Load Balancing backend services, emitting findings for the `fleet-audit` reporting harness.
 
 # Workflow
 
@@ -13,13 +13,10 @@ Audit Google Cloud and GKE resources for financial waste, massive CPU/RAM overre
 
 Follow the authoritative checklist in `governance/finops_cloud_waste_sop.md` across target GCP projects:
 
-- `massive-overrequest`: Flag workloads requesting excessive CPU/memory without utilization evidence.
-- `orphan-retained-pvs`: Flag released PersistentVolumes with Retain policy incurring storage expense.
-- `unattached-static-ips`: Flag reserved external static IP addresses lacking active bindings.
 - `cloud-logging-cost-runaway`: Flag unfiltered high-throughput Cloud Logging export sinks.
 - `idle-backend-services`: Flag Cloud Load Balancing backend services lacking active backends.
 
-Optional helper runner for static IPs and backend services:
+Optional helper runner for backend services:
 
 ```bash
 ./skills/finops-cloud-waste-audit/scripts/finops_waste_audit.py --output /opt/data/scratch/finops_raw.json

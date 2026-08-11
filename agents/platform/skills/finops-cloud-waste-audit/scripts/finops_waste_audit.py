@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 finops_waste_audit.py — FinOps & Cloud Resource Waste Audit Runner.
-Sweeps GCP projects for unattached external static IPs and idle backend services.
+Sweeps GCP projects for idle Load Balancing backend services.
 """
 
 import argparse
