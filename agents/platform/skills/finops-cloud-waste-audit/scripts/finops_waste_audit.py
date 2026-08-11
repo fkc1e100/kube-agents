@@ -100,8 +100,8 @@ def audit_project_waste(project_id: str) -> list[dict]:
                     "check": "unattached-static-ips",
                     "severity": "minor",
                     "title": f"Unattached reserved external static IP {name} in {region or 'global'}",
-                    "cluster": f"project-{project_id}",
-                    "namespace": "default",
+                    "cluster": f"project/{project_id}",
+                    "namespace": "",
                     "object": f"Address/{name}",
                     "impact": "Unattached reserved external IP address incurs idle reservation billing charges.",
                     "evidence": {
@@ -130,8 +130,8 @@ def audit_project_waste(project_id: str) -> list[dict]:
                     "check": "idle-backend-services",
                     "severity": "minor",
                     "title": f"Backend service {s_name} has no configured backends",
-                    "cluster": f"project-{project_id}",
-                    "namespace": "default",
+                    "cluster": f"project/{project_id}",
+                    "namespace": "",
                     "object": f"BackendService/{s_name}",
                     "impact": "Unused backend service adds configuration clutter and potential routing dead ends.",
                     "evidence": {
