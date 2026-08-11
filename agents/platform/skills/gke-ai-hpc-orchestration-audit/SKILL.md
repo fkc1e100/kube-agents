@@ -12,7 +12,7 @@ Audit GKE AI/ML accelerator node pools, Dynamic Workload Scheduler (DWS) GPU que
 ## 1. Execute AI/HPC Workload Inspection
 
 Follow the authoritative checklist in `governance/gke_ai_hpc_orchestration_sop.md` across target accelerator clusters:
-- `dws-queue-timeout`: Flag ComputeClasses where flex-start maxRunDurationSeconds exceeds 86400s / 24h.
+- `dws-queue-timeout`: Flag workloads where DWS flex-start queue timeout annotation (`cloud.google.com/gke-dws-queue-timeout-seconds`) exceeds 86400s / 24h.
 - `kueue-cohort-starvation`: Flag Kueue ClusterQueues lacking borrowing limits in shared cohorts.
 - `nccl-interconnect-drops`: Flag multi-node GPU workloads lacking `nccl-fastsocket-installer` DaemonSet or GPUDirect tuning.
 - `cuda-memory-fragmentation`: Flag dedicated GPU workloads lacking MPS or time-slicing configuration.
