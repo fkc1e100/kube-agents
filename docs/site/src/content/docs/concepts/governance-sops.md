@@ -51,7 +51,7 @@ Invoked by the `stockout-prevention` watchdog.
 
 ### `finops_cloud_waste_sop.md`
 
-Cloud resource waste, daily. Five checks over project-level cloud resources: massive workload over-requesting, unattached external static IP reservations, orphan retained PersistentVolumes, runaway Cloud Logging pricing/volume, and idle backend services.
+Cloud resource waste, daily. Two checks over project-level cloud resources: runaway Cloud Logging export sinks and idle Load Balancing backend services.
 
 Invoked by the `finops-cloud-waste-audit` watchdog.
 

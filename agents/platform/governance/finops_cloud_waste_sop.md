@@ -1,10 +1,10 @@
 # SOP: FinOps and Cloud Resource Waste Audit (Daily Governance)
 
-**Purpose:** Sweep all managed GCP projects for unattached external IP reservations, orphaned PersistentVolumes with `persistentVolumeReclaimPolicy: Retain`, high-volume un-filtered Cloud Logging sinks, idle Cloud Load Balancing backend services, and multi-node workload resource overrequests. The question this audit answers for a platform admin is: _which cloud assets are generating ongoing waste without serving traffic, and where can resource footprint be safely rightsized?_ Output is this stream's single GitHub ledger issue, rewritten in place on every run, plus narrow remediation Pull Requests carrying Terraform or manifest fixes for the findings that get promoted.
+**Purpose:** Sweep all managed GCP projects for high-volume un-filtered Cloud Logging sinks and idle Cloud Load Balancing backend services. The question this audit answers for a platform admin is: _which cloud assets are generating ongoing waste without serving traffic, and where can resource footprint be safely rightsized?_ Output is this stream's single GitHub ledger issue, rewritten in place on every run, plus narrow remediation Pull Requests carrying Terraform or manifest fixes for the findings that get promoted.
 
 **Cron:** id `finops-cloud-waste-audit`, schedule `30 8 * * *` (daily 08:30 UTC).
 
-**Data sources:** `gcloud compute addresses ...`, `gcloud compute backend-services ...`, `gcloud logging sinks ...`, and `kubectl` read verbs across all managed fleet projects (`GCP_PROJECT_ID` and `MONITORED_PROJECT_IDS`).
+**Data sources:** `gcloud compute backend-services ...` and `gcloud logging sinks ...` across all managed fleet projects (`GCP_PROJECT_ID` and `MONITORED_PROJECT_IDS`).
 
 ---
 
