@@ -699,9 +699,13 @@ spec:
         - name: KUBE_DEFAULT_NAMESPACE
           value: kubeagents-system
         - name: CREDENTIAL_PROXY_BOOTSTRAP_COMMAND
-          value: if [ -f /var/run/secrets/kubernetes.io/serviceaccount/ca.crt ]; then
-            kubectl config set-cluster default --server="https://kubernetes.default.svc"
-            --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          value: if command -v gcloud >/dev/null 2>&1 && [ -n "$GKE_PROJECT_ID" ]
+            && [ -n "$GKE_CLUSTER_NAME" ] && [ -n "$GKE_LOCATION" ] && gcloud container
+            clusters get-credentials "$GKE_CLUSTER_NAME" --location="$GKE_LOCATION"
+            --project="$GKE_PROJECT_ID" >/dev/null 2>&1; then kubectl config set-context
+            --current --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; else if [
+            -f /var/run/secrets/kubernetes.io/serviceaccount/ca.crt ]; then kubectl
+            config set-cluster default --server="https://kubernetes.default.svc" --certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
             >/dev/null; else kubectl config set-cluster default --server="https://kubernetes.default.svc"
             --insecure-skip-tls-verify=true >/dev/null; fi && TOKEN_FILE=""; if [
             -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then TOKEN_FILE="/var/run/secrets/kubernetes.io/serviceaccount/token";
@@ -711,7 +715,7 @@ spec:
             >/dev/null && kubectl config set-context default --cluster=default --user=in-cluster
             --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; else kubectl config
             set-context default --cluster=default --namespace="$KUBE_DEFAULT_NAMESPACE"
-            >/dev/null; fi && kubectl config use-context default >/dev/null
+            >/dev/null; fi && kubectl config use-context default >/dev/null; fi
         - name: GOOGLE_CHAT_PROJECT_ID
           value: kube-agents-gkedemos
         - name: GOOGLE_CHAT_SUBSCRIPTION_NAME
