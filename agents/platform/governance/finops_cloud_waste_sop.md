@@ -30,31 +30,7 @@ gcloud projects list --format=json
 
 ### 2. Diagnostic checks roster
 
-#### 2.1 Multi-node workload request over-allocation (`massive-overrequest`)
-
-- **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get deployments,statefulsets -A -o json`
-- **Condition**: Workload requests > 32 vCPU or > 128GiB memory without historical utilization evidence, risking bin-packing waste.
-- **Do NOT flag**: Workloads in system namespaces, DaemonSets, batch/Job workloads, or single-replica development sandbox workloads.
-- **Remediation**: Rightsize resource requests in workload deployment manifest.
-
-#### 2.2 Orphaned retained PersistentVolumes (`orphan-retained-pvs`)
-
-- **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get pv -o json`
-- **Condition**: PersistentVolume with `reclaimPolicy: Retain` is in `Released` status without an active PVC binding for > 14 days.
-- **Do NOT flag**: PVs with `claimRef` updated within the last 14 days, or PVs with explicit `finops.kube-agents.io/keep="true"` retention labels.
-- **Remediation**: Clean up released persistent storage or archive disk snapshot via `kind: manual` or `kind: gcloud`.
-
-#### 2.3 Unattached external static IP address reservations (`unattached-static-ips`)
-
-- **Severity**: `minor`
-- **Command**: `gcloud compute addresses list --filter="status=RESERVED AND addressType=EXTERNAL" --project=$PROJECT --format=json`
-- **Condition**: External static IP address is reserved but not bound to any running VM or forwarding rule for > 14 days.
-- **Do NOT flag**: Internal IP addresses (`addressType: INTERNAL`), addresses reserved < 14 days ago, or addresses referenced in GitOps Ingress/Gateway manifests.
-- **Remediation**: Release unused static IP reservation via `kind: gcloud`.
-
-#### 2.4 Unfiltered high-throughput Cloud Logging export sinks (`cloud-logging-cost-runaway`)
+#### 2.1 Unfiltered high-throughput Cloud Logging export sinks (`cloud-logging-cost-runaway`)
 
 - **Severity**: `minor`
 - **Command**: `gcloud logging sinks list --project=$PROJECT --format=json`
@@ -62,7 +38,7 @@ gcloud projects list --format=json
 - **Do NOT flag**: Compliance audit log sinks or sinks with existing explicit exclusion filters.
 - **Remediation**: Add exclusion filters for health check and debug log streams in Terraform logging sink definition.
 
-#### 2.5 Idle Cloud Load Balancing backend services (`idle-backend-services`)
+#### 2.2 Idle Cloud Load Balancing backend services (`idle-backend-services`)
 
 - **Severity**: `minor`
 - **Command**: `gcloud compute backend-services list --project=$PROJECT --format=json`
@@ -91,13 +67,13 @@ Every finding must conform to the full findings schema:
   "scope": {
     "clusters": [
       {
-        "name": "finops-fleet-prod",
+        "name": "project/proj-1",
         "location": "global",
         "project": "proj-1",
         "checks_run": [
           {
-            "check": "unattached-static-ips",
-            "command": "gcloud compute addresses list --project=proj-1 --format=json"
+            "check": "idle-backend-services",
+            "command": "gcloud compute backend-services list --project=proj-1 --format=json"
           }
         ]
       }
@@ -106,21 +82,21 @@ Every finding must conform to the full findings schema:
   },
   "findings": [
     {
-      "check": "unattached-static-ips",
+      "check": "idle-backend-services",
       "severity": "minor",
-      "title": "Unattached static IP address ip-prod-unused in us-central1",
-      "cluster": "finops-fleet-prod",
-      "namespace": "default",
-      "object": "Address/ip-prod-unused",
-      "impact": "Unattached reserved IP address incurs ongoing idle reservation cost.",
+      "title": "Backend service svc-unused has no configured backends",
+      "cluster": "project/proj-1",
+      "namespace": "",
+      "object": "BackendService/svc-unused",
+      "impact": "Unused backend service adds configuration clutter.",
       "evidence": {
-        "command": "gcloud compute addresses describe ip-prod-unused --region=us-central1 --project=proj-1 --format=json",
-        "excerpt": "status: RESERVED, users: null"
+        "command": "gcloud compute backend-services list --project=proj-1 --format=json",
+        "excerpt": "name: svc-unused, backends: []"
       },
       "recommendation": {
-        "action": "Release static IP reservation ip-prod-unused.",
-        "rationale": "Reserved static IP has had no active bindings for > 30 days.",
-        "risk": "Ensure DNS records do not reference this IP address."
+        "action": "Delete unused backend service svc-unused via gcloud or Terraform.",
+        "rationale": "Backend service has no instance groups or NEGs attached.",
+        "risk": "Verify no URL maps reference this backend service."
       },
       "remediation": {
         "kind": "gcloud",

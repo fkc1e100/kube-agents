@@ -213,9 +213,6 @@ AUDITS: dict[str, AuditSpec] = {
         "FinOps & Cloud Waste Audit",
         "finops_cloud_waste_sop.md",
         (
-            "massive-overrequest",
-            "orphan-retained-pvs",
-            "unattached-static-ips",
             "cloud-logging-cost-runaway",
             "idle-backend-services",
         ),
