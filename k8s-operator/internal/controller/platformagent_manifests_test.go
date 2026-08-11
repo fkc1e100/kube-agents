@@ -978,9 +978,9 @@ func TestBuildCredentialProxySidecar(t *testing.T) {
 		t.Errorf("expected proxy default namespace, got %#v", env["KUBE_DEFAULT_NAMESPACE"])
 	}
 	bootstrap := env["CREDENTIAL_PROXY_BOOTSTRAP_COMMAND"].Value
-	for _, expected := range []string{"kubectl config set-cluster", "kubectl config set-context", "kubectl config use-context"} {
+	for _, expected := range []string{"gcloud container clusters get-credentials", "kubectl config set-context"} {
 		if !strings.Contains(bootstrap, expected) {
-			t.Errorf("expected generic shell bootstrap to contain %q, got %q", expected, bootstrap)
+			t.Errorf("expected bootstrap to contain %q, got %q", expected, bootstrap)
 		}
 	}
 	stateMounted := false
