@@ -59,7 +59,7 @@ This document describes the release engineering architecture, versioning guarant
 Every issue, pull request, and Buganizer item is assigned a **GitHub Milestone** (e.g. `v0.22.0`):
 
 - **Automated Milestone Assignment on Merge**:
-  - The repository workflow `.github/workflows/auto-assign-milestone.yml` (PR #622 under Epic #619) automatically triggers whenever a PR is merged into `main`.
+  - The repository workflow `.github/workflows/auto-assign-milestone.yml` automatically triggers whenever a PR is merged into `main`.
   - If a merged PR does not have an explicit milestone set, the workflow queries active open release milestones and automatically tags the PR with the current release milestone (e.g., `v0.22.0`).
 - **Customer Communication**:
   > _"To get the gVisor sandbox feature, upgrade to **`v0.22.0`**."_  
@@ -69,7 +69,7 @@ Every issue, pull request, and Buganizer item is assigned a **GitHub Milestone**
 
 ## 4. 3-Gate Release Verification Pipeline
 
-Official GA Releases (`v0.22.0`) are guarded by `.github/workflows/release-build-publish.yml` (PR #620 under Epic #619) which enforces 3 sequential verification gates before publishing assets:
+Official GA Releases (`v0.22.0`) are guarded by `.github/workflows/release-build-publish.yml` which enforces 3 sequential verification gates before publishing assets:
 
 ```mermaid
 flowchart TD
