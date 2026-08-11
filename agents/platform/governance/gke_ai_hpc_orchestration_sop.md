@@ -45,7 +45,7 @@ gcloud container clusters list --format=json
 
 - **Severity**: `critical`
 - **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -A -o json`
-- **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (86400s / 24h) or pending workloads encounter admission deadline timeouts.
+- **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (`maxRunDurationSeconds` > 86400s / 24h) or pending workloads encounter admission deadline timeouts.
 - **Do NOT flag**: Non-DWS batch jobs or workloads with standard provisioning models.
 - **Remediation**: (kind: manifest) Adjust `provisioningModel` or configure multi-zone fallback capacity in ComputeClass manifest.
 
@@ -126,10 +126,10 @@ Every finding must conform to the full findings schema:
       "impact": "Queued training workloads time out waiting for DWS dynamic reservation windows.",
       "evidence": {
         "command": "kubectl --context=ai-cluster-1 get computeclass dws-gpu-flex -o json",
-        "excerpt": "maxWaitingDuration: 172800s"
+        "excerpt": "maxRunDurationSeconds: 172800"
       },
       "recommendation": {
-        "action": "Adjust maxWaitingDuration to 3600s and add multi-zone fallback capacity.",
+        "action": "Adjust maxRunDurationSeconds to 3600s and add multi-zone fallback capacity.",
         "rationale": "Prevents stalled job queueing and releases unfulfillable capacity reservations.",
         "risk": "Shortens flex-start queuing window."
       },
