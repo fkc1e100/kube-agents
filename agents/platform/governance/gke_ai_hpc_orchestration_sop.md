@@ -45,7 +45,7 @@ gcloud container clusters list --format=json
 
 - **Severity**: `critical`
 - **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -A -o json`
-- **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (`maxRunDurationSeconds` > 86400s / 24h) or pending workloads encounter admission deadline timeouts.
+- **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (`maxQueueDurationSeconds` > 86400s / 24h) or pending workloads encounter admission deadline timeouts.
 - **Do NOT flag**: Non-DWS batch jobs or workloads with standard provisioning models.
 - **Remediation**: (kind: manifest) Adjust `provisioningModel` or configure multi-zone fallback capacity in ComputeClass manifest.
 
