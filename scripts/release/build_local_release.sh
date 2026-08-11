@@ -76,7 +76,8 @@ for item in charts k8s-operator agents terraform README.md install.sh uninstall.
     cp -r "${REPO_ROOT}/${item}" "${STAGE_DIR}/"
   fi
 done
-rm -rf "${STAGE_DIR}/k8s-operator/bin" "${STAGE_DIR}/k8s-operator/scripts/vars.sh" 2>/dev/null || true
+rm -rf "${STAGE_DIR}/k8s-operator/bin" 2>/dev/null || true
+find "${STAGE_DIR}" -type f \( -name "vars.sh" -o -name ".env*" -o -name "*.log" -o -name "*.tmp" \) -exec rm -f {} + 2>/dev/null || true
 find "${STAGE_DIR}/terraform" "${STAGE_DIR}/k8s-operator" -type d -name ".terraform" -exec rm -rf {} + 2>/dev/null || true
 find "${STAGE_DIR}/terraform" "${STAGE_DIR}/k8s-operator" -type f \( -name "*.tfstate*" -o -name "*.tfvars" -o -name ".terraform.lock.hcl" \) -exec rm -f {} + 2>/dev/null || true
 sed -i.bak "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
