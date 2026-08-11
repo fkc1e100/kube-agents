@@ -99,6 +99,34 @@ flowchart TD
 
 ---
 
+## 5. Hotfix & Patch Release Procedure (`vX.Y.Z+1`)
+
+When a bug or regression is discovered in a release (e.g. `v0.22.0`) that requires an immediate fix without introducing new functionality:
+
+### Semantic Patch Rules
+
+- **Increment Patch Digit**: Move from `v0.22.0` to **`v0.22.1`**.
+- **Zero New Features**: Patch releases must contain **only the isolated bug fix** (`fix: ...`) to guarantee zero risk of secondary regressions.
+
+### Hotfix Git & Release Workflow
+
+1. **Submit Bugfix PR**: Merge the bug fix into `main` with Conventional Commit prefix `fix:`.
+2. **Tag Patch Release**: Create and push the patch tag:
+   ```bash
+   git tag -a v0.22.1 -m "Hotfix release v0.22.1: fix gVisor sandbox flag resolution"
+   git push origin v0.22.1
+   ```
+3. **Automated Pipeline Execution**:
+   - Pushing `v0.22.1` automatically triggers the **3-Gate Verification Pipeline**.
+   - Publishes tagged container images `ghcr.io/gke-labs/kube-agents/*:v0.22.1` and Helm charts (`kube-agents-0.22.1.tgz`).
+4. **Zero-Downtime Customer Upgrade**:
+   - Customers upgrade instantly to the patch release via `upgrade.sh`:
+   ```bash
+   curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- --image-tag=v0.22.1
+   ```
+
+---
+
 ## 6. Enterprise Air-Gapped & Security Governance
 
 For enterprise deployments with strict InfoSec policies or air-gapped network environments:
@@ -134,31 +162,3 @@ For environments without CLI `git` access or where streaming remote scripts via 
    ```
 3. **Execute Local Unpacked Charts or Git-Cloned Scripts**:
    Follow the detailed step-by-step instructions in [INSTALL.md](https://github.com/gke-labs/kube-agents/blob/main/INSTALL.md#installing--upgrading-via-downloadable-web-release-archives) to deploy via the bundled Helm chart or execute the automated script installer.
-
----
-
-## 5. Hotfix & Patch Release Procedure (`vX.Y.Z+1`)
-
-When a bug or regression is discovered in a release (e.g. `v0.22.0`) that requires an immediate fix without introducing new functionality:
-
-### Semantic Patch Rules
-
-- **Increment Patch Digit**: Move from `v0.22.0` to **`v0.22.1`**.
-- **Zero New Features**: Patch releases must contain **only the isolated bug fix** (`fix: ...`) to guarantee zero risk of secondary regressions.
-
-### Hotfix Git & Release Workflow
-
-1. **Submit Bugfix PR**: Merge the bug fix into `main` with Conventional Commit prefix `fix:`.
-2. **Tag Patch Release**: Create and push the patch tag:
-   ```bash
-   git tag -a v0.22.1 -m "Hotfix release v0.22.1: fix gVisor sandbox flag resolution"
-   git push origin v0.22.1
-   ```
-3. **Automated Pipeline Execution**:
-   - Pushing `v0.22.1` automatically triggers the **3-Gate Verification Pipeline**.
-   - Publishes tagged container images `ghcr.io/gke-labs/kube-agents/*:v0.22.1` and Helm charts (`kube-agents-0.22.1.tgz`).
-4. **Zero-Downtime Customer Upgrade**:
-   - Customers upgrade instantly to the patch release via `upgrade.sh`:
-   ```bash
-   curl -fsSL https://gke-labs.github.io/kube-agents/upgrade.sh | bash -s -- --image-tag=v0.22.1
-   ```

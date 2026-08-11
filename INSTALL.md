@@ -108,7 +108,7 @@ Before beginning installation, ensure your environment meets the following requi
 
 ---
 
-## Installing & Upgrading via Downloadable Web Release Archives (Air-Gapped & Security Restricted Environments)
+## Installing & Upgrading via Downloadable Web Release Archives
 
 For users who cannot execute remote streaming scripts via `curl | bash` or run `git clone` directly on production / bastion nodes due to corporate Security/InfoSec policies, pre-packaged **Web Download Bundles** (`.tar.gz`, `.tgz`, `.zip`) and `checksums.txt` are published on the [GitHub Releases Page](https://github.com/gke-labs/kube-agents/releases) via the release pipeline or can be built locally using `scripts/release/build_local_release.sh`.
 
