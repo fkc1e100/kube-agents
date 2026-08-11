@@ -118,10 +118,6 @@ def inspect_cluster_accelerators(project_id: str, cluster_name: str, location: s
                                 "action": f"Set explicit borrowingLimit in ClusterQueue {name} spec.",
                                 "rationale": "Prevents cohort resource exhaustion across tenant queues.",
                                 "risk": "Limits maximum opportunistic burst capacity."
-                            },
-                            "remediation": {
-                                "kind": "manifest",
-                                "path": f"clusters/{cluster_name}/kueue/{name}.yaml"
                             }
                         })
             except Exception as e:

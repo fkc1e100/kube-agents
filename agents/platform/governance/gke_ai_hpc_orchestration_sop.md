@@ -44,7 +44,7 @@ gcloud container clusters list --format=json
 #### 2.1 Dynamic Workload Scheduler (DWS) flex-start queue timeouts (`dws-queue-timeout`)
 
 - **Severity**: `critical`
-- **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -o json`
+- **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -A -o json`
 - **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (86400s / 24h) or pending workloads encounter admission deadline timeouts.
 - **Do NOT flag**: Non-DWS batch jobs or workloads with standard provisioning models.
 - **Remediation**: Adjust `provisioningModel` or configure multi-zone fallback capacity in ComputeClass manifest.
@@ -60,17 +60,17 @@ gcloud container clusters list --format=json
 #### 2.3 NCCL cross-node interconnect packet drops (`nccl-interconnect-drops`)
 
 - **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get daemonsets -n kube-system -l k8s-app=nccl-fast-socket -o json`
-- **Condition**: Multi-node GPU training workloads lack FastSocket / NCCL GPUDirect optimization DaemonSets or encounter network interface drops.
-- **Do NOT flag**: Single-node GPU inference workloads or CPU clusters.
-- **Remediation**: Deploy `nccl-fast-socket` DaemonSet and configure `NCCL_CROSS_NIC=1` in workload environment.
+- **Command**: `kubectl --context=$CLUSTER get daemonsets -n kube-system -l k8s-app=nccl-fastsocket-installer -o json`
+- **Condition**: Multi-node GPU training workloads lack FastSocket / NCCL GPUDirect optimization DaemonSets on GPU accelerator clusters.
+- **Do NOT flag**: Single-node GPU inference workloads or clusters without GPU nodes.
+- **Remediation**: Enable `--enable-fast-socket` on GPU node pools or deploy `nccl-fastsocket-installer` DaemonSet and configure `NCCL_CROSS_NIC=1` in workload environment.
 
 #### 2.4 GPU container unallocated CUDA memory fragmentation (`cuda-memory-fragmentation`)
 
 - **Severity**: `minor`
 - **Command**: `kubectl --context=$CLUSTER get pods,deployments -A -o json`
-- **Condition**: Workload requests whole GPU resources (`nvidia.com/gpu`) without MPS (Multi-Process Service) or time-slicing while sustaining low GPU duty cycles.
-- **Do NOT flag**: Dedicated multi-node distributed training jobs saturating GPU VRAM.
+- **Condition**: Workload requests whole GPU resources (`nvidia.com/gpu`) without MPS (Multi-Process Service) or time-slicing configuration (`cloud.google.com/gke-gpu-sharing-strategy`).
+- **Do NOT flag**: Dedicated multi-node distributed training jobs saturating GPU VRAM or workloads with explicit GPU sharing/time-slicing configured.
 - **Remediation**: Configure GPU time-slicing or sharing in GKE NodePool GPU driver configuration.
 
 #### 2.5 TPU multi-slice topology and health check resilience (`tpu-slice-resilience`)
@@ -126,7 +126,7 @@ Every finding must conform to the full findings schema:
       "impact": "Queued training workloads time out waiting for DWS dynamic reservation windows.",
       "evidence": {
         "command": "kubectl --context=ai-cluster-1 get computeclass dws-gpu-flex -o json",
-        "excerpt": "maxWaitingDuration: 86400s"
+        "excerpt": "maxWaitingDuration: 172800s"
       },
       "recommendation": {
         "action": "Adjust maxWaitingDuration to 3600s and add multi-zone fallback capacity.",
