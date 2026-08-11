@@ -108,6 +108,87 @@ Before beginning installation, ensure your environment meets the following requi
 
 ---
 
+## Installing & Upgrading via Downloadable Web Release Archives (Air-Gapped & Security Restricted Environments)
+
+For users who cannot execute remote streaming scripts via `curl | bash` or run `git clone` directly on production / bastion nodes due to corporate Security/InfoSec policies, every official release attaches pre-packaged **Web Download Bundles** (`.tar.gz`, `.tgz`, `.zip`) and `checksums.txt` on the [GitHub Releases Page](https://github.com/gke-labs/kube-agents/releases).
+
+### Step 1: Download Release Archive & Checksums
+
+Download the release archive and checksum file directly via your web browser or terminal from the [GitHub Releases Page](https://github.com/gke-labs/kube-agents/releases):
+
+- **Direct Web Browser Downloads**:
+  - `https://github.com/gke-labs/kube-agents/releases/download/v0.1.0/kube-agents-v0.1.0.tar.gz`
+  - `https://github.com/gke-labs/kube-agents/releases/download/v0.1.0/kube-agents-v0.1.0.tgz`
+  - `https://github.com/gke-labs/kube-agents/releases/download/v0.1.0/kube-agents-v0.1.0.zip`
+  - `https://github.com/gke-labs/kube-agents/releases/download/v0.1.0/checksums.txt`
+
+- **Terminal Web Download (`curl` / `wget`)**:
+
+  ```bash
+  curl -LO https://github.com/gke-labs/kube-agents/releases/download/v0.1.0/kube-agents-v0.1.0.tar.gz
+  curl -LO https://github.com/gke-labs/kube-agents/releases/download/v0.1.0/checksums.txt
+  ```
+
+- **GitHub CLI Download (`gh release`)**:
+  ```bash
+  gh release download v0.1.0 --repo gke-labs/kube-agents
+  ```
+
+### Step 2: Verify SHA-256 Checksum Integrity
+
+Before extraction, verify the integrity of the downloaded archive:
+
+```bash
+sha256sum -c checksums.txt --ignore-missing
+# Expected Output: kube-agents-v0.1.0.tar.gz: OK
+```
+
+### Step 3: Extract and Deploy Bundled Helm Charts or Terraform Modules
+
+Unpack the archive to access bundled Helm charts (`charts/kube-agents`), Terraform modules (`terraform/`), and self-contained manifests.
+
+> [!NOTE]
+> The automated bash installer (`./install.sh`) and lifecycle upgrader (`./upgrade.sh`) verify repository commit provenance and require a Git checkout. For deployments from extracted standalone release archives, deploy via the bundled Helm chart (`./charts/kube-agents`) or Terraform infrastructure modules (`./terraform/`).
+
+For GitOps and Helm-based environments, deploy directly from the extracted chart directory:
+
+```bash
+# Extract the archive
+tar -xzf kube-agents-v0.1.0.tar.gz
+cd kube-agents-v0.1.0/
+
+# Deploy via bundled Helm chart
+helm install kube-agents ./charts/kube-agents \
+  --namespace kubeagents-system \
+  --create-namespace \
+  --set platformAgent.harness.projectId="my-gcp-project" \
+  --set platformAgent.harness.clusterName="platform-agent" \
+  --set platformAgent.harness.location="us-central1-c"
+```
+
+To run the automated script installer from source, clone the versioned release tag:
+
+```bash
+git clone --depth 1 --branch v0.1.0 https://github.com/gke-labs/kube-agents.git
+cd kube-agents
+
+# Run interactive or non-interactive local installation
+./install.sh --project-id="my-gcp-project" --cluster-name="platform-agent" --image-tag="v0.1.0"
+
+# Run local upgrade
+./upgrade.sh --upgrade-mode=full --image-tag="v0.1.0"
+```
+
+### Step 4: Private Container Registry Mirroring (Optional)
+
+If your cluster blocks outbound access to `ghcr.io`, mirror container images to your internal registry and pass `--registry-prefix`:
+
+```bash
+./install.sh --registry-prefix="us-docker.pkg.dev/my-company-registry/kube-agents" --image-tag="v0.1.0"
+```
+
+---
+
 ## Method 1: Automated GCP & GKE Provisioning (Recommended)
 
 For full end-to-end setups on Google Cloud Platform (GCP) with GKE Standard, Workload Identity, Pub/Sub, LiteLLM, GitHub Token Minter, and Inference Replay Proxy, use the automated provisioning pipeline in `k8s-operator/`.

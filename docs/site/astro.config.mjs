@@ -71,6 +71,7 @@ export default defineConfig({
             { label: 'What is kube-agents', link: '/overview/what-is-kube-agents/' },
             { label: 'Proactive autonomy', link: '/overview/proactive-autonomy/' },
             { label: 'Architecture', link: '/overview/architecture/' },
+            { label: 'Release engineering', link: '/overview/release-engineering/' },
           ],
         },
         {
