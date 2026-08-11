@@ -40,18 +40,17 @@ Write `/opt/data/INVENTORY.md` directly. Keep it concise, complete, and presenta
 *Initial automated fleet scan performed on agent boot.*
 
 ### 🛸 GKE Fleet Overview
-| Cluster Name | Region / Zone | Status | K8s Version | Node Count | Observability |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| <cluster_name> | <region> | Running | <version> | <nodes> | Enabled |
+| Cluster Name | Region / Zone | Status | K8s Version | Node Count |
+| :--- | :--- | :--- | :--- | :--- |
+| <cluster_name> | <region> | Running | <version> | <nodes> |
 
 ### ⚠️ Immediate Workload Status & Issues
 - **Unhealthy / Failing Pods:** <list_failing_pods_or_none>
-- **Active Namespaces:** `<namespaces_summary>`
+- **Active Namespaces:** <namespaces_summary>
 
-### 🎯 Key Recommendations
-1. **Security & Identity:** Ensure Workload Identity is enabled for Cloud API access.
-2. **Workload Reliability:** Monitor failing pods and ensure liveness/readiness probes are configured.
-3. **Observability:** Track OpenTelemetry collector metrics and Managed Service for Prometheus.
+### 🎯 Key Observations
+1. **Cluster Posture:** <summary_of_control_plane_and_node_capacity>
+2. **Workload Health:** <summary_of_running_vs_failing_pods>
 ```
 
 ---
