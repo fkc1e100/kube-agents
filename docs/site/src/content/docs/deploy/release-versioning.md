@@ -15,6 +15,7 @@ sidebar:
    - **GHCR Images**: `ghcr.io/gke-labs/kube-agents/platform-agent:v1.2.0`
    - **OCI Helm Charts**: `oci://ghcr.io/gke-labs/kube-agents/charts/kube-agents:1.2.0`
    - **Terraform Modules**: Sourced via Git tag reference `?ref=v1.2.0`
+   - **Web Download Bundles & Compliance**: Release archives (`.tar.gz`, `.tgz`, `.zip`), SPDX SBOM (`.spdx.json`), and SHA-256 checksums (`checksums.txt`) attached to the GitHub release.
 
 ## Helm Chart Versioning
 

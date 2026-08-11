@@ -97,8 +97,8 @@ jobs:
           # 1. Package Helm Chart (version = 0.1.0, appVersion = v0.1.0 matching container tag)
           helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${TAG_NAME}" -d "${BUILD_DIR}"
 
-          # 2. Stage Source & Manifest Bundle for offline/no-git customers
-          cp -r install.sh uninstall.sh upgrade.sh charts/ k8s-operator/ agents/ terraform/ README.md "${STAGE_DIR}/"
+          # 2. Stage Helm Charts, Operator Specs, Agents & Terraform Manifest Bundle
+          cp -r charts/ k8s-operator/ agents/ terraform/ README.md "${STAGE_DIR}/"
           if [ -f "INSTALL.md" ]; then cp INSTALL.md "${STAGE_DIR}/"; fi
           if [ -f "LICENSE" ]; then cp LICENSE "${STAGE_DIR}/"; fi
           sed -i "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
