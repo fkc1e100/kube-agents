@@ -707,11 +707,11 @@ spec:
             -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then TOKEN_FILE="/var/run/secrets/kubernetes.io/serviceaccount/token";
             elif [ -f /var/run/secrets/kubeagents/serviceaccount/token ]; then TOKEN_FILE="/var/run/secrets/kubeagents/serviceaccount/token";
             fi && if [ -n "$TOKEN_FILE" ]; then kubectl config set-credentials in-cluster
-            --token="$(cat "$TOKEN_FILE")" >/dev/null && kubectl config set-context
-            default --cluster=default --user=in-cluster --namespace="$KUBE_DEFAULT_NAMESPACE"
-            >/dev/null; else kubectl config set-context default --cluster=default
-            --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; fi && kubectl config
-            use-context default >/dev/null
+            >/dev/null && kubectl config set users.in-cluster.tokenFile "$TOKEN_FILE"
+            >/dev/null && kubectl config set-context default --cluster=default --user=in-cluster
+            --namespace="$KUBE_DEFAULT_NAMESPACE" >/dev/null; else kubectl config
+            set-context default --cluster=default --namespace="$KUBE_DEFAULT_NAMESPACE"
+            >/dev/null; fi && kubectl config use-context default >/dev/null
         - name: GOOGLE_CHAT_PROJECT_ID
           value: kube-agents-gkedemos
         - name: GOOGLE_CHAT_SUBSCRIPTION_NAME
