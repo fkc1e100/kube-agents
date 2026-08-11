@@ -76,6 +76,9 @@ jobs:
           helm lint charts/kube-agents "${SET_FLAGS[@]}"
           helm template test-release charts/kube-agents "${SET_FLAGS[@]}" > /dev/null
 
+      - name: Create Build Directory
+        run: mkdir -p build/dist
+
       - name: Generate SPDX Software Bill of Materials (SBOM)
         uses: anchore/sbom-action@f325610c9f50a54015d37c8d16ca3b0cd261b6de # v0.17.9
         with:
@@ -101,6 +104,7 @@ jobs:
           cp -r charts/ k8s-operator/ agents/ terraform/ README.md "${STAGE_DIR}/"
           if [ -f "INSTALL.md" ]; then cp INSTALL.md "${STAGE_DIR}/"; fi
           if [ -f "LICENSE" ]; then cp LICENSE "${STAGE_DIR}/"; fi
+          touch "${STAGE_DIR}/.release-bundle"
           sed -i "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
           sed -i "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
 
