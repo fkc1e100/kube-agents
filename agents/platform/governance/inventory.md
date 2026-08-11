@@ -17,7 +17,7 @@
 Use fast, aggregated CLI commands to map the project landscape in 2–3 commands:
 
 1. **GCP Project & Clusters:** Run `gcloud container clusters list` to list all GKE clusters, regions, versions, and status.
-2. **Cluster Node & Pod Overview:** Run `kubectl get nodes` and `kubectl get pods -A --field-selector=status.phase!=Running` to quickly capture node capacity and identify any active failing/unhealthy workloads.
+2. **Cluster Node & Pod Overview:** Run `kubectl get nodes` and `kubectl get pods -A --field-selector=status.phase!=Running,status.phase!=Succeeded` (inspecting container statuses for `CrashLoopBackOff` or non-ready states) to quickly capture node capacity and identify active failing/unhealthy workloads.
 
 ---
 
