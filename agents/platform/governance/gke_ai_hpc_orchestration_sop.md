@@ -119,23 +119,23 @@ Every finding must conform to the full findings schema:
     {
       "check": "dws-queue-timeout",
       "severity": "critical",
-      "title": "ComputeClass dws-gpu-flex queue timeout exceeds SLA",
+      "title": "Workload dws-training-run DWS queue timeout exceeds SLA",
       "cluster": "ai-cluster-1",
-      "namespace": "",
-      "object": "ComputeClass/dws-gpu-flex",
+      "namespace": "ml-platform",
+      "object": "JobSet/dws-training-run",
       "impact": "Queued training workloads time out waiting for DWS dynamic reservation windows.",
       "evidence": {
-        "command": "kubectl --context=ai-cluster-1 get computeclass dws-gpu-flex -o json",
-        "excerpt": "maxRunDurationSeconds: 172800"
+        "command": "kubectl --context=ai-cluster-1 get jobset dws-training-run -n ml-platform -o json",
+        "excerpt": "cloud.google.com/gke-dws-queue-timeout-seconds: \"172800\""
       },
       "recommendation": {
-        "action": "Adjust maxRunDurationSeconds to 3600s and add multi-zone fallback capacity.",
-        "rationale": "Prevents stalled job queueing and releases unfulfillable capacity reservations.",
-        "risk": "Shortens flex-start queuing window."
+        "action": "Adjust cloud.google.com/gke-dws-queue-timeout-seconds annotation to 86400s or lower.",
+        "rationale": "Prevents stalled job queueing and aligns with the platform's 24h queue timeout limit.",
+        "risk": "Reduces max queue wait time."
       },
       "remediation": {
         "kind": "manifest",
-        "path": "clusters/ai-cluster-1/kueue/computeclass.yaml"
+        "path": "clusters/ai-cluster-1/ml-platform/jobset.yaml"
       }
     }
   ]
