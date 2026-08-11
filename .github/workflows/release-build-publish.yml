@@ -101,9 +101,11 @@ jobs:
           helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${TAG_NAME}" -d "${BUILD_DIR}"
 
           # 2. Stage Helm Charts, Operator Specs, Agents & Terraform Manifest Bundle
-          cp -r charts/ k8s-operator/ agents/ terraform/ README.md "${STAGE_DIR}/"
-          if [ -f "INSTALL.md" ]; then cp INSTALL.md "${STAGE_DIR}/"; fi
-          if [ -f "LICENSE" ]; then cp LICENSE "${STAGE_DIR}/"; fi
+          for item in charts k8s-operator agents terraform README.md install.sh uninstall.sh upgrade.sh INSTALL.md LICENSE; do
+            if [ -e "${item}" ]; then
+              cp -r "${item}" "${STAGE_DIR}/"
+            fi
+          done
           touch "${STAGE_DIR}/.release-bundle"
           sed -i "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
           sed -i "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"

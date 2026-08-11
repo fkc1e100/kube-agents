@@ -82,6 +82,7 @@ find "${STAGE_DIR}/terraform" "${STAGE_DIR}/k8s-operator" -type d -name ".terraf
 find "${STAGE_DIR}/terraform" "${STAGE_DIR}/k8s-operator" -type f \( -name "*.tfstate*" -o -name "*.tfvars" -o -name ".terraform.lock.hcl" \) -exec rm -f {} + 2>/dev/null || true
 sed -i.bak "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
 sed -i.bak "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
+touch "${STAGE_DIR}/.release-bundle"
 
 echo "2.4 Creating Web Download Archives (.tar.gz, .tgz, .zip)..."
 tar -czf "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" -C "${STAGE_BASE}" "${BUNDLE_PREFIX}"
