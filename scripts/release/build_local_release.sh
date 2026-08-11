@@ -77,7 +77,8 @@ for item in charts k8s-operator agents terraform README.md install.sh uninstall.
   fi
 done
 rm -rf "${STAGE_DIR}/k8s-operator/bin" "${STAGE_DIR}/k8s-operator/scripts/vars.sh" 2>/dev/null || true
-rm -rf "${STAGE_DIR}/terraform/.terraform"* "${STAGE_DIR}/terraform/"*.tfstate* "${STAGE_DIR}/terraform/"*.tfvars 2>/dev/null || true
+find "${STAGE_DIR}/terraform" -type d -name ".terraform" -exec rm -rf {} + 2>/dev/null || true
+find "${STAGE_DIR}/terraform" -type f \( -name "*.tfstate*" -o -name "*.tfvars" -o -name ".terraform.lock.hcl" \) -exec rm -f {} + 2>/dev/null || true
 sed -i "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
 sed -i "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
 
