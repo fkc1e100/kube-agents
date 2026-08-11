@@ -58,7 +58,7 @@ Their SOPs are retained under `agents/platform/governance/`, so reviving one is 
 
 On a cluster provisioned before they were dropped, the five entries remain on the Platform Agent profile's `profiles/platform/cron/jobs.json` in the disabled state that release left them in: `merge_cron_store` adds and overwrites but never prunes, so an id deleted from the shipped roster stays on the volume. They stay off; the image simply no longer has a say.
 
-The seven live watchdogs left the same file when they moved to the Chat Agent's roster, and they left it in one step rather than through a disabled release. On an upgraded cluster their old entries survive there too, still marked enabled. Nothing comes of it — that profile has no gateway and so no ticker, which is the reason the jobs moved — but `cronjob(action='list')` run against the Platform Agent will list them, with whatever prompt the release that shipped them carried. The roster that decides when an audit runs is the Chat Agent's, and only that one.
+The six live watchdogs left the same file when they moved to the Chat Agent's roster, and they left it in one step rather than through a disabled release. On an upgraded cluster their old entries survive there too, still marked enabled. Nothing comes of it — that profile has no gateway and so no ticker, which is the reason the jobs moved — but `cronjob(action='list')` run against the Platform Agent will list them, with whatever prompt the release that shipped them carried. The roster that decides when an audit runs is the Chat Agent's, and only that one.
 
 ## Job shape
 

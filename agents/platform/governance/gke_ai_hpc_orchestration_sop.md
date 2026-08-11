@@ -47,7 +47,7 @@ gcloud container clusters list --format=json
 - **Command**: `kubectl --context=$CLUSTER get computeclasses,clusterqueues,jobsets -A -o json`
 - **Condition**: DWS `ComputeClass` flex-start provisioning window exceeds maximum allowed queue timeout (86400s / 24h) or pending workloads encounter admission deadline timeouts.
 - **Do NOT flag**: Non-DWS batch jobs or workloads with standard provisioning models.
-- **Remediation**: Adjust `provisioningModel` or configure multi-zone fallback capacity in ComputeClass manifest.
+- **Remediation**: (kind: manifest) Adjust `provisioningModel` or configure multi-zone fallback capacity in ComputeClass manifest.
 
 #### 2.2 Kueue cluster queue borrowing and cohort starvation (`kueue-cohort-starvation`)
 
@@ -55,7 +55,7 @@ gcloud container clusters list --format=json
 - **Command**: `kubectl --context=$CLUSTER get clusterqueues,resourceflavors -o json`
 - **Condition**: High-priority training queue is starved of quota due to unbounded cohort borrowing limits in shared Kueue cohorts.
 - **Do NOT flag**: Standalone ClusterQueues without shared cohorts or development queues with explicit borrowing caps.
-- **Remediation**: Configure explicit `cohort` borrowing limits and nominal quota ceilings in ClusterQueue manifests.
+- **Remediation**: (kind: manifest) Configure explicit `cohort` borrowing limits and nominal quota ceilings in ClusterQueue manifests.
 
 #### 2.3 NCCL cross-node interconnect packet drops (`nccl-interconnect-drops`)
 
@@ -63,7 +63,7 @@ gcloud container clusters list --format=json
 - **Command**: `kubectl --context=$CLUSTER get daemonsets -n kube-system -l k8s-app=nccl-fastsocket-installer -o json`
 - **Condition**: Multi-node GPU training workloads lack FastSocket / NCCL GPUDirect optimization DaemonSets on GPU accelerator clusters.
 - **Do NOT flag**: Single-node GPU inference workloads or clusters without GPU nodes.
-- **Remediation**: Enable `--enable-fast-socket` on GPU node pools or deploy `nccl-fastsocket-installer` DaemonSet and configure `NCCL_CROSS_NIC=1` in workload environment.
+- **Remediation**: (kind: manifest) Enable `--enable-fast-socket` on GPU node pools or deploy `nccl-fastsocket-installer` DaemonSet and configure `NCCL_CROSS_NIC=1` in workload environment.
 
 #### 2.4 GPU container unallocated CUDA memory fragmentation (`cuda-memory-fragmentation`)
 
@@ -71,7 +71,7 @@ gcloud container clusters list --format=json
 - **Command**: `kubectl --context=$CLUSTER get pods,deployments -A -o json`
 - **Condition**: Workload requests whole GPU resources (`nvidia.com/gpu`) without MPS (Multi-Process Service) or time-slicing configuration (`cloud.google.com/gke-gpu-sharing-strategy`).
 - **Do NOT flag**: Dedicated multi-node distributed training jobs saturating GPU VRAM or workloads with explicit GPU sharing/time-slicing configured.
-- **Remediation**: Configure GPU time-slicing or sharing in GKE NodePool GPU driver configuration.
+- **Remediation**: (kind: gcloud) Configure GPU time-slicing or sharing in GKE NodePool GPU driver configuration.
 
 #### 2.5 TPU multi-slice topology and health check resilience (`tpu-slice-resilience`)
 
@@ -79,7 +79,7 @@ gcloud container clusters list --format=json
 - **Command**: `gcloud container node-pools list --cluster=$CLUSTER --location=$LOCATION --project=$PROJECT --format=json`
 - **Condition**: Multi-slice TPU v4/v5e node pool lacks automated node repair or resilient sub-topology fault tolerance settings.
 - **Do NOT flag**: Single-host TPU v4-8 / v5e-1x1 development instances.
-- **Remediation**: Enable auto-repair and resilient sub-slice recovery in TPU NodePool configuration.
+- **Remediation**: (kind: gcloud) Enable auto-repair and resilient sub-slice recovery in TPU NodePool configuration.
 
 ### 3. Generate remediation artifacts
 
