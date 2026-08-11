@@ -1,6 +1,7 @@
 name: Auto Assign Milestone on Merge
 
 on:
+  # zizmor: ignore[dangerous-triggers] -- Safe: does not check out untrusted code; runs post-merge milestone API assignment.
   pull_request_target:
     types: [closed]
 
