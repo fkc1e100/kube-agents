@@ -81,8 +81,21 @@ def audit_project_waste(project_id: str) -> list[dict]:
             addr_type = addr.get("addressType", "EXTERNAL")
             purpose = addr.get("purpose", "")
             users = addr.get("users", [])
+            creation_ts = addr.get("creationTimestamp", "")
 
-            if addr_type == "EXTERNAL" and status == "RESERVED" and not users and purpose not in EXCLUDED_PURPOSES:
+            # Filter out IP reservations created within the last 14 days (< 14 days ago)
+            is_older_than_14d = True
+            if creation_ts:
+                try:
+                    from datetime import datetime, timezone
+                    created_dt = datetime.fromisoformat(creation_ts)
+                    now_dt = datetime.now(timezone.utc)
+                    if (now_dt - created_dt).days < 14:
+                        is_older_than_14d = False
+                except Exception:
+                    pass
+
+            if addr_type == "EXTERNAL" and status == "RESERVED" and not users and purpose not in EXCLUDED_PURPOSES and is_older_than_14d:
                 findings.append({
                     "check": "unattached-static-ips",
                     "severity": "minor",
@@ -93,11 +106,11 @@ def audit_project_waste(project_id: str) -> list[dict]:
                     "impact": "Unattached reserved external IP address incurs idle reservation billing charges.",
                     "evidence": {
                         "command": f"gcloud compute addresses list --project={project_id} --format=json",
-                        "excerpt": f'{{"name": "{name}", "addressType": "{addr_type}", "status": "{status}", "users": []}}'
+                        "excerpt": f'{{"name": "{name}", "addressType": "{addr_type}", "status": "{status}", "creationTimestamp": "{creation_ts}", "users": []}}'
                     },
                     "recommendation": {
                         "action": f"Release unused external static IP reservation {name}.",
-                        "rationale": "Reserved external static IP has no active VM or forwarding rule bindings.",
+                        "rationale": "Reserved external static IP has been unbound for > 14 days with no active VM or forwarding rule bindings.",
                         "risk": "Ensure no external DNS records point to this address."
                     },
                     "remediation": {
