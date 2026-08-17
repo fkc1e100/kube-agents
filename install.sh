@@ -15,18 +15,28 @@
 set -Eeuo pipefail
 
 # ─── ANSI Colors & Terminal Responsive Helpers ─────────────────────────────────
-if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
-  C_CYAN='' C_GREEN='' C_YELLOW='' C_MAGENTA='' C_RED='' C_RESET='' C_BOLD='' C_UNDERLINE=''
-else
-  C_CYAN='\e[96m' C_GREEN='\e[92m' C_YELLOW='\e[93m' C_MAGENTA='\e[95m' C_RED='\e[91m' C_RESET='\e[0m' C_BOLD='\e[1m' C_UNDERLINE='\e[4m'
-fi
+# A function because k8s-operator/scripts/common.sh defines the same variables
+# unconditionally: sourcing it would re-enable colour under NO_COLOR or in a pipe,
+# so the installer re-applies its own policy afterwards.
+configure_colors() {
+  if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ]; then
+    C_CYAN='' C_GREEN='' C_YELLOW='' C_MAGENTA='' C_RED='' C_RESET='' C_BOLD='' C_UNDERLINE=''
+  else
+    # Use \033 rather than \e: bash 3.2 (the /bin/bash macOS ships) does not
+    # expand \e in `echo -e`, so the raw escapes leak into the terminal.
+    C_CYAN='\033[96m' C_GREEN='\033[92m' C_YELLOW='\033[93m' C_MAGENTA='\033[95m' C_RED='\033[91m' C_RESET='\033[0m' C_BOLD='\033[1m' C_UNDERLINE='\033[4m'
+  fi
+}
+configure_colors
 
 # ─── Process Lock File & Error Trap Handling ────────────────────────────────
 LOCK_FILE="/tmp/kube-agents-install.lock"
-if command -v flock >/dev/null 2>&1 && exec 200>"$LOCK_FILE" 2>/dev/null; then
-  if ! flock -n 200 2>/dev/null; then
-    echo -e "  \033[93m⚠ Another instance of kube-agents installer is currently running. Exiting.\033[0m" >&2
-    exit 1
+if command -v flock >/dev/null 2>&1; then
+  if ( : >"$LOCK_FILE" ) 2>/dev/null && exec 200>"$LOCK_FILE"; then
+    if ! flock -n 200 2>/dev/null; then
+      echo -e "  \033[93m⚠ Another instance of kube-agents installer is currently running. Exiting.\033[0m" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -49,17 +59,27 @@ PARAM_DRY_RUN="${DRY_RUN:-false}"
 PARAM_PROJECT_ID="${PROJECT_ID:-}"
 PARAM_REGION="${REGION:-}"
 PARAM_CLUSTER_NAME="${CLUSTER_NAME:-}"
-PARAM_MODEL_PROVIDER="${MODEL_PROVIDER:-gemini}"
+# Left empty on purpose: resolved from common.sh's DEFAULT_* once the
+# provisioning helpers are sourced, so no default is spelled twice.
+PARAM_MODEL_PROVIDER="${MODEL_PROVIDER:-}"
+PARAM_VERTEX_PROJECT_ID="${VERTEX_PROJECT_ID:-}"
+PARAM_VERTEX_LOCATION="${VERTEX_LOCATION:-}"
 PARAM_GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 PARAM_OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 PARAM_ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
 PARAM_GITOPS_ORG="${GITHUB_ORG:-}"
 PARAM_GITOPS_REPO="${GITHUB_REPO:-}"
 PARAM_PERMISSION_SET="${PLATFORM_AGENT_PERMISSION_SET:-read-only}"
+PARAM_CUSTOM_ROLES="${PLATFORM_AGENT_CUSTOM_ROLES:-}"
 PARAM_ENABLE_GVISOR="${ENABLE_GVISOR:-false}"
 PARAM_ENABLE_WEBUI="${ENABLE_WEBUI:-false}"
+PARAM_MEMORY="${MEMORY:-file}"
 PARAM_IMAGE_TAG="${IMAGE_TAG:-}"
-PARAM_REGISTRY_PREFIX="${REGISTRY_PREFIX:-ghcr.io/gke-labs/kube-agents}"
+PARAM_ALLOW_UNVERIFIED_SOURCE="${ALLOW_UNVERIFIED_SOURCE:-false}"
+# "<repo_dir>@<ref>" already checked by verify_local_source_ref, so the pre-flight
+# check and the one at the workspace step do not report the same verdict twice.
+SOURCE_REF_VERIFIED=""
+PARAM_REGISTRY_PREFIX="${REGISTRY_PREFIX:-}"
 
 show_help() {
   cat << EOF
@@ -72,19 +92,50 @@ Flags for AI Agents & Automation:
   -y, --yes, --non-interactive  Run in non-interactive mode (use flags/defaults)
   --dry-run                     Validate prerequisites & output config/plan without creating resources
   --project-id=ID               Target GCP Project ID
-  --region=REGION               Target GCP Region (default: us-central1)
-  --cluster-name=NAME           GKE Cluster Name (default: kube-agents-platform)
-  --model-provider=PROVIDER     Model provider: gemini | openai | anthropic (default: gemini)
+  --region=REGION               Target GCP Region (default: k8s-operator/scripts/common.sh
+                                DEFAULT_REGION, currently us-central1)
+  --cluster-name=NAME           GKE Cluster Name (default: DEFAULT_CLUSTER_NAME,
+                                currently platform-agent-host)
+  --model-provider=PROVIDER     Model provider: gemini | vertex_ai | anthropic | chatgpt | openai
+                                (default: gemini)
+  --model-default-name=NAME     Default model name for the provider
+  --vertex-project-id=ID        GCP project serving Vertex AI models (default: --project-id)
+  --vertex-location=REGION      Vertex AI serving location (default: --region)
   --gemini-api-key=KEY          Gemini API Key
   --openai-api-key=KEY          OpenAI API Key
   --anthropic-api-key=KEY       Anthropic API Key
   --gitops-org=ORG              GitHub Org/Username for GitOps repo
   --gitops-repo=REPO            GitOps IaC Repository Name (default: gke-fleet-iac)
-  --permission-set=SET          Agent permission boundary: read-only | gke-admin (default: read-only)
+  --permission-set=SET          Agent GCP IAM permission set: read-only | gke-admin | custom
+                                (default: read-only)
+  --custom-roles=ROLES          Roles for --permission-set=custom (space- or comma-separated)
   --gvisor=true|false           Enable GKE Sandbox (gVisor) runtime isolation (default: false)
   --enable-web-ui=true|false    Enable Hermes Web UI port 9119 dashboard (default: false)
-  --image-tag=TAG               Validated immutable release tag or full commit SHA (required)
+  --user-profile-enabled=BOOL   Enable user profile persona extensions (default: false)
+  --memory=MODE                 Long-term agent memory: file | hindsight | off
+                                (default: file)
+                                  file      SMALL / PERSONAL deployments, and the default —
+                                            it is what every install got before the searchable
+                                            store existed, so an upgrade that says nothing
+                                            keeps the store it already has. Per-user Markdown
+                                            files inside the pod (multiuser_memory). No extra
+                                            services, but the whole store is loaded into the
+                                            model's context every turn, so it stops scaling
+                                            once there is more than a few pages of it.
+                                  hindsight ENTERPRISE deployments. Searchable, ranked recall
+                                            that stays affordable as the store grows
+                                            (kube_agents_memory). Deploys the Hindsight API
+                                            and a Postgres database into the cluster.
+                                  off       nothing is retained between sessions. No memory
+                                            provider, and no database to run.
+  --image-tag=TAG               Validated immutable release tag or full commit SHA
+                                (default: this checkout's HEAD; required via curl | bash)
   --registry-prefix=PATH        Container registry path without a URL scheme
+  --allow-unverified-source     Provision from a dirty or mismatched checkout (local script edits
+                                are applied even though the deployed image was built elsewhere)
+  --enable-google-chat          Enable Google Chat integration
+  --chat-topic-name=TOPIC       Pub/Sub topic name for Google Chat (default: platform-agent-chat-events)
+  --google-chat-mode=MODE       Google Chat output mode: default | debug (default: default)
   --menu, --config              Launch interactive Day-2 Control Panel Menu (raspi-config style)
   -h, --help, -?                Show this help message
 EOF
@@ -100,18 +151,27 @@ parse_args() {
       --region=*) PARAM_REGION="${1#*=}"; shift ;;
       --cluster-name=*) PARAM_CLUSTER_NAME="${1#*=}"; shift ;;
       --model-provider=*) PARAM_MODEL_PROVIDER="${1#*=}"; shift ;;
+      --model-default-name=*) PARAM_MODEL_DEFAULT_NAME="${1#*=}"; shift ;;
+      --vertex-project-id=*) PARAM_VERTEX_PROJECT_ID="${1#*=}"; shift ;;
+      --vertex-location=*) PARAM_VERTEX_LOCATION="${1#*=}"; shift ;;
       --gemini-api-key=*) PARAM_GEMINI_API_KEY="${1#*=}"; shift ;;
       --openai-api-key=*) PARAM_OPENAI_API_KEY="${1#*=}"; shift ;;
       --anthropic-api-key=*) PARAM_ANTHROPIC_API_KEY="${1#*=}"; shift ;;
       --gitops-org=*) PARAM_GITOPS_ORG="${1#*=}"; shift ;;
       --gitops-repo=*) PARAM_GITOPS_REPO="${1#*=}"; shift ;;
       --permission-set=*) PARAM_PERMISSION_SET="${1#*=}"; shift ;;
+      --custom-roles=*) PARAM_CUSTOM_ROLES="${1#*=}"; shift ;;
       --gvisor=*) PARAM_ENABLE_GVISOR="${1#*=}"; shift ;;
       --enable-web-ui=*|--enable-webui=*|--webui=*) PARAM_ENABLE_WEBUI="${1#*=}"; shift ;;
       --enable-web-ui|--enable-webui|--webui) PARAM_ENABLE_WEBUI="true"; shift ;;
+      --user-profile-enabled=*) PARAM_USER_PROFILE_ENABLED="${1#*=}"; shift ;;
+      --memory=*) PARAM_MEMORY="${1#*=}"; shift ;;
       --image-tag=*) PARAM_IMAGE_TAG="${1#*=}"; shift ;;
       --registry-prefix=*) PARAM_REGISTRY_PREFIX="${1#*=}"; shift ;;
+      --allow-unverified-source|--allow-dirty) PARAM_ALLOW_UNVERIFIED_SOURCE="true"; shift ;;
       --enable-google-chat|--google-chat) PARAM_ENABLE_GOOGLE_CHAT="true"; shift ;;
+      --chat-topic-name=*) PARAM_CHAT_TOPIC_NAME="${1#*=}"; shift ;;
+      --google-chat-mode=*) PARAM_GOOGLE_CHAT_MODE="${1#*=}"; shift ;;
       -h|--help|-\?|help) show_help; exit 0 ;;
       *) print_error "Unknown parameter: $1"; show_help >&2; return 2 ;;
     esac
@@ -134,6 +194,7 @@ draw_separator() {
     width=75
   fi
   printf '%*s' "$width" '' | tr ' ' '='
+  printf '\n'
 }
 
 print_banner() {
@@ -160,11 +221,33 @@ EOF
   printf '%b\n\n' "${C_RESET}"
 }
 
-print_step() { echo -e "\n${C_MAGENTA}${C_BOLD}>>> $1 <<<${C_RESET}"; }
-print_success() { echo -e "  ${C_GREEN}✓ $1${C_RESET}"; }
-print_info() { echo -e "  ${C_CYAN}ℹ $1${C_RESET}"; }
-print_warning() { echo -e "  ${C_YELLOW}⚠ $1${C_RESET}"; }
-print_error() { echo -e "  ${C_RED}✗ $1${C_RESET}"; }
+# Re-applied after sourcing common.sh, which defines its own print_* helpers
+# formatted for the provisioning pipeline.
+define_print_helpers() {
+  print_step() { echo -e "\n${C_MAGENTA}${C_BOLD}>>> $1 <<<${C_RESET}"; }
+  print_success() { echo -e "  ${C_GREEN}✓ $1${C_RESET}"; }
+  print_info() { echo -e "  ${C_CYAN}ℹ $1${C_RESET}"; }
+  print_warning() { echo -e "  ${C_YELLOW}⚠ $1${C_RESET}"; }
+  print_error() { echo -e "  ${C_RED}✗ $1${C_RESET}"; }
+}
+define_print_helpers
+
+# Minimum tool versions, shared with the provisioning scripts so the numbers
+# live in exactly one place. This installer is also downloaded and run on its
+# own, before any checkout exists, so the source is guarded: in that case the
+# workspace step clones the repository and provision_01 enforces the same
+# minimum a few steps later.
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || echo "")"
+_min_versions="${_script_dir}/k8s-operator/scripts/min_versions.sh"
+if [ -r "$_min_versions" ]; then
+  # CI runs shellcheck without -x, so the source= hint alone still raises
+  # SC1091 for a file it was not handed as input.
+  # shellcheck source=k8s-operator/scripts/min_versions.sh disable=SC1091
+  source "$_min_versions"
+else
+  require_min_gcloud_version() { return 0; }
+fi
+unset _min_versions
 
 validate_immutable_ref() {
   local ref="${1:-}"
@@ -179,18 +262,40 @@ validate_immutable_ref() {
       ;;
   esac
   if [[ ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]] \
-    && [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-    print_error "Image/source ref must be a full 40-character commit SHA or a SemVer release tag (vX.Y.Z)."
+    && [[ ! "$ref" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+    print_error "Image/source ref must be a full 40-character commit SHA or a pure numeric SemVer release tag (X.Y.Z, e.g. 0.1.0)."
     return 1
   fi
 }
 
-derive_kms_location() {
-  local location="${1:-}"
-  if [[ "$location" =~ ^(.+)-[a-z]$ ]]; then
-    location="${BASH_REMATCH[1]}"
+# The image tag doubles as the source ref that verify_local_source_ref checks the
+# checkout against, so HEAD is the natural default: it is an immutable 40-character
+# SHA and it is exactly the revision of the scripts about to run. Empty when the
+# installer runs outside a Git worktree (curl | bash), where the caller must supply one.
+default_image_tag() {
+  local repo_dir="${1:-.}"
+  # Only a kube-agents checkout may supply the default. Without this guard,
+  # running the curl | bash one-liner from inside any unrelated Git repository
+  # would offer that repository's HEAD, which then fails at `git fetch` for a
+  # ref the kube-agents clone has never heard of.
+  if [ ! -f "${repo_dir}/k8s-operator/scripts/provision.sh" ]; then
+    return 0
   fi
-  printf '%s\n' "$location"
+  git -C "$repo_dir" rev-parse HEAD 2>/dev/null || echo ""
+}
+
+# How that default is shown in a prompt: the full SHA is unreadable, so abbreviate
+# it the way git does and say where it came from. Empty outside a Git worktree.
+default_image_tag_label() {
+  local repo_dir="${1:-.}"
+  if [ ! -f "${repo_dir}/k8s-operator/scripts/provision.sh" ]; then
+    return 0
+  fi
+  local short=""
+  short="$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || echo "")"
+  if [ -n "$short" ]; then
+    printf 'local HEAD checkout %s' "$short"
+  fi
 }
 
 json_escape() {
@@ -213,48 +318,205 @@ write_state_var() {
 verify_local_source_ref() {
   local repo_dir="$1"
   local expected_ref="$2"
+  # The installer runs k8s-operator/scripts/* from this checkout while deploying
+  # the container image built from $expected_ref, so a mismatch means the cluster
+  # gets manifests from one revision and an agent runtime from another. --dry-run
+  # touches nothing, and --allow-unverified-source is the explicit opt-out for
+  # developing against locally modified scripts; both downgrade this to a warning.
+  local lenient="false"
+  local unverified="false"
+  if [ "$PARAM_DRY_RUN" = "true" ] || [ "$PARAM_ALLOW_UNVERIFIED_SOURCE" = "true" ]; then
+    lenient="true"
+  fi
+  if [ "$SOURCE_REF_VERIFIED" = "${repo_dir}@${expected_ref}" ]; then
+    return 0
+  fi
+
   if ! git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [ -f "$repo_dir/.release-bundle" ]; then
       local bundled_version
-      if ! bundled_version="$(grep '^appVersion:' "$repo_dir/charts/kube-agents/Chart.yaml" | awk '{print $2}' | tr -d '"' 2>/dev/null)" || [ -z "$bundled_version" ]; then
-        print_error "Could not parse appVersion from release bundle's Chart.yaml"
+      if ! bundled_version="$(grep ^appVersion: "$repo_dir/charts/kube-agents/Chart.yaml" | awk "{print $2}" | tr -d """ 2>/dev/null)" || [ -z "$bundled_version" ]; then
+        print_error "Could not parse appVersion from release bundle Chart.yaml"
         return 1
       fi
       if [ "$bundled_version" != "$expected_ref" ]; then
         print_error "Source/image version mismatch: release bundle is version ${bundled_version}, requested ref resolves to ${expected_ref}."
         return 1
       fi
-      print_warning "Source directory '$repo_dir' is an unpacked release bundle; proceeding using bundled manifests."
+      print_warning "Source directory $repo_dir is an unpacked release bundle; proceeding using bundled manifests."
+      SOURCE_REF_VERIFIED="${repo_dir}@${expected_ref}"
       return 0
     fi
-    if [ "$PARAM_DRY_RUN" = "true" ]; then
-      print_warning "Dry-run is proceeding outside a Git worktree without a versioned release bundle."
+    if [ "$lenient" = "true" ]; then
+      print_warning "Cannot verify source/image alignment because $repo_dir is not a Git worktree."
+      SOURCE_REF_VERIFIED="${repo_dir}@${expected_ref}"
       return 0
+    fi      return 0
     fi
     print_error "Refusing to provision from an unversioned source directory: $repo_dir"
+    print_info "Pass --allow-unverified-source to provision anyway."
     return 1
   fi
 
   local expected_commit current_commit
   if ! expected_commit="$(git -C "$repo_dir" rev-parse --verify "${expected_ref}^{commit}" 2>/dev/null)"; then
+    if [ "$lenient" = "true" ]; then
+      print_warning "Cannot verify source/image alignment: ref '$expected_ref' is not present in this checkout."
+      SOURCE_REF_VERIFIED="${repo_dir}@${expected_ref}"
+      return 0
+    fi
     print_error "The requested image/source ref '$expected_ref' is not present in the current checkout. Check out that exact revision first."
+    print_info "Pass --allow-unverified-source to provision anyway."
     return 1
   fi
   current_commit="$(git -C "$repo_dir" rev-parse HEAD)"
   if [ "$current_commit" != "$expected_commit" ]; then
-    print_error "Source/image version mismatch: checkout is ${current_commit}, requested ref resolves to ${expected_commit}."
-    return 1
-  fi
-
-  if [ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=no)" ]; then
-    if [ "$PARAM_DRY_RUN" = "true" ]; then
-      print_warning "Dry-run is using uncommitted source changes; a real deployment would require a clean checkout."
+    if [ "$lenient" = "true" ]; then
+      unverified="true"
+      print_warning "Source/image version mismatch: checkout is ${current_commit}, requested ref resolves to ${expected_commit}."
     else
-      print_error "Refusing to provision from a dirty checkout because its scripts do not exactly match '$expected_ref'."
+      print_error "Source/image version mismatch: checkout is ${current_commit}, requested ref resolves to ${expected_commit}."
+      print_info "Pass --allow-unverified-source to provision anyway."
       return 1
     fi
   fi
+
+  if [ -n "$(git -C "$repo_dir" status --porcelain --untracked-files=no)" ]; then
+    if [ "$lenient" = "true" ]; then
+      unverified="true"
+      print_warning "Provisioning scripts have uncommitted changes; they do not match '$expected_ref'."
+    else
+      print_error "Refusing to provision from a dirty checkout because its scripts do not exactly match '$expected_ref'."
+      print_info "Pass --allow-unverified-source to provision anyway, or stash the changes first."
+      return 1
+    fi
+  fi
+
+  SOURCE_REF_VERIFIED="${repo_dir}@${expected_ref}"
+  if [ "$unverified" = "true" ]; then
+    print_warning "Continuing with unverified provisioning sources: the cluster will get local scripts plus the image built from ${expected_ref}."
+    return 0
+  fi
   print_success "Verified provisioning scripts and image ref resolve to commit ${expected_commit}."
+}
+
+# Put the provisioning scripts on disk and return the directory holding them.
+# Runs before the interview so a bad source ref or a dirty tree fails immediately,
+# and so common.sh — which owns every provisioning default — can be sourced.
+acquire_source_repo() {
+  # Stores the directory in the variable named by $1 rather than echoing it: the
+  # progress lines below would otherwise be captured along with the path.
+  local dest_var="$1"
+  local expected_ref="$2"
+  local resolved_dir=""
+  local script_dir=""
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" 2>/dev/null && pwd || echo "")"
+  if [ -n "$script_dir" ] && [ -f "${script_dir}/k8s-operator/scripts/provision.sh" ]; then
+    resolved_dir="$script_dir"
+    print_success "Using repository directory: $resolved_dir"
+  elif [ -f "k8s-operator/scripts/provision.sh" ]; then
+    resolved_dir="$(pwd)"
+    print_success "Using current repository directory: $resolved_dir"
+  else
+    resolved_dir="$HOME/kube-agents"
+    if [ -d "$resolved_dir" ]; then
+      print_info "Using existing repository at $resolved_dir without modifying local changes."
+    else
+      print_info "Cloning kube-agents provisioning scripts at '$expected_ref' into $resolved_dir..."
+      git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$resolved_dir"
+      git -C "$resolved_dir" fetch --depth=1 origin "$expected_ref"
+      git -C "$resolved_dir" checkout --detach FETCH_HEAD
+    fi
+    cd "$resolved_dir"
+  fi
+  verify_local_source_ref "$resolved_dir" "$expected_ref"
+  printf -v "$dest_var" '%s' "$resolved_dir"
+}
+
+# k8s-operator/scripts/ is the source of truth for provisioning defaults and
+# validation rules. The installer sources common.sh and reads them from there
+# rather than keeping its own copies, which is how the two drifted apart before
+# (an installer menu defaulting to gke-admin against a read-only default, an
+# a us-central1 default against us-east4, a second copy of derive_kms_location).
+source_provisioning_helpers() {
+  local repo_dir="$1"
+  local common_script="${repo_dir}/k8s-operator/scripts/common.sh"
+  if [ ! -f "$common_script" ]; then
+    print_error "Cannot find provisioning helpers at $common_script."
+    exit 1
+  fi
+  SCRIPT_DIR="${repo_dir}/k8s-operator/scripts"
+  VARS_FILE="${SCRIPT_DIR}/vars.sh"
+  # shellcheck source=/dev/null
+  source "$common_script"
+  # common.sh brings its own colours and print_* helpers; restore the installer's.
+  configure_colors
+  define_print_helpers
+  print_success "Loaded provisioning defaults from k8s-operator/scripts/common.sh"
+}
+
+# Fill in the parameters whose default lives in common.sh. Called once, after
+# sourcing, so a flag or environment variable still wins over the shared default.
+resolve_shared_defaults() {
+  PARAM_MODEL_PROVIDER="${PARAM_MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}"
+  PARAM_REGISTRY_PREFIX="${PARAM_REGISTRY_PREFIX:-$DEFAULT_REGISTRY_PREFIX}"
+}
+
+# Wait for one deployment to roll out, animating a spinner with the elapsed time
+# and kubectl's own latest progress line. Falls back to plain streaming output
+# when stdout is not a terminal (CI, piped logs). Returns kubectl's exit status.
+wait_for_rollout() {
+  local deployment="$1"
+  local namespace="$2"
+  local timeout_secs="$3"
+
+  if [ ! -t 1 ]; then
+    kubectl rollout status "deployment/${deployment}" -n "$namespace" --timeout="${timeout_secs}s"
+    return $?
+  fi
+
+  local log_file=""
+  log_file="$(mktemp -t kube-agents-rollout.XXXXXX)"
+  kubectl rollout status "deployment/${deployment}" -n "$namespace" --timeout="${timeout_secs}s" \
+    >"$log_file" 2>&1 &
+  local kubectl_pid=$!
+
+  local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+  local frame=0
+  local started=$SECONDS
+  local status_line=""
+  local term_width=0
+  term_width="$(get_term_width)"
+  # Everything except the kubectl line: two spaces, spinner, name, "(NNNs)",
+  # separators. Keep one column spare so the line never wraps — a wrapped line
+  # cannot be rewritten with \r and would scroll the spinner down the screen.
+  local status_width=$((term_width - ${#deployment} - 15))
+  if [ "$status_width" -lt 10 ]; then
+    status_width=10
+  fi
+  tput civis 2>/dev/null || true
+  while kill -0 "$kubectl_pid" 2>/dev/null; do
+    status_line="$(tail -n 1 "$log_file" 2>/dev/null | tr -d '\r' | cut -c1-"$status_width")"
+    printf '\r  %b%s%b %s %b(%ss)%b %-*s' \
+      "$C_CYAN" "${frames[$((frame % 10))]}" "$C_RESET" "$deployment" \
+      "$C_YELLOW" "$((SECONDS - started))" "$C_RESET" "$status_width" "$status_line"
+    frame=$((frame + 1))
+    sleep 0.2
+  done
+  tput cnorm 2>/dev/null || true
+  printf '\r%*s\r' "$term_width" ''
+
+  local rc=0
+  wait "$kubectl_pid" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    print_success "$deployment rolled out in $((SECONDS - started))s"
+  else
+    tail -n 3 "$log_file" | tr -d '\r' | while IFS= read -r line; do
+      [ -n "$line" ] && print_info "$line"
+    done
+  fi
+  rm -f -- "$log_file"
+  return "$rc"
 }
 
 has_controlling_tty() {
@@ -267,6 +529,10 @@ prompt_read() {
   local var_name="$2"
   local default_val="${3:-}"
   local secret_mode="${4:-false}"
+  # What "[default: …]" shows, when the stored value reads badly (a 40-character
+  # SHA) or does not read at all (an empty list) but must still be what an empty
+  # answer selects. Supplying a label also makes the hint appear for an empty default.
+  local default_label="${5:-}"
 
   # Non-interactive mode override
   if [ "$PARAM_NON_INTERACTIVE" = "true" ] || ! has_controlling_tty; then
@@ -284,8 +550,8 @@ prompt_read() {
     return 0
   fi
 
-  if [ -n "$default_val" ]; then
-    prompt_text="$prompt_text [default: ${C_BOLD}$default_val${C_RESET}]: "
+  if [ -n "$default_val" ] || [ -n "$default_label" ]; then
+    prompt_text="$prompt_text [default: ${C_BOLD}${default_label:-$default_val}${C_RESET}]: "
   else
     prompt_text="$prompt_text: "
   fi
@@ -340,6 +606,95 @@ prompt_menu() {
       break
     else
       print_error "Invalid selection. Please enter a number between 1 and ${#options[@]}." >/dev/tty
+    fi
+  done
+}
+
+# How long each deployment gets to report ready in the post-install health check.
+ROLLOUT_TIMEOUT_SECS=300
+
+# Number of projects listed in the interactive project picker. Accounts with
+# more projects than this can still type an ID that the list does not show.
+PROJECT_LIST_LIMIT=5
+
+# GCP project IDs are 6-30 characters, start with a lowercase letter, and hold
+# only lowercase letters, digits, and hyphens. A valid ID is never all digits,
+# so a numeric answer is unambiguously a menu index.
+is_valid_project_id() {
+  local id="${1:-}"
+  # Legacy domain-scoped IDs ("example.com:my-project") keep the same rules on
+  # each side of the colon.
+  if [[ "$id" == *:* ]]; then
+    [[ "${id%%:*}" =~ ^[a-z0-9][a-z0-9.-]*[a-z0-9]$ ]] || return 1
+    id="${id#*:}"
+  fi
+  [[ "$id" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]
+}
+
+# Interactive GCP project picker. Accepts either a menu number or a project ID
+# typed in full, so an account whose project is missing from the truncated list
+# is not stuck. Stores the result in the variable named by $1.
+select_gcp_project() {
+  local dest_var="$1"
+  local current_proj="${2:-}"
+  local listed=""
+  local ids=()
+  local labels=()
+  local p_id="" p_name="" idx=0
+
+  print_info "Fetching available GCP projects from your account..."
+  listed=$(gcloud projects list --sort-by=projectId \
+    --format="value(projectId,name)" --limit="$PROJECT_LIST_LIMIT" 2>/dev/null || echo "")
+
+  # The active project leads the menu even when it falls outside the listing.
+  if [ -n "$current_proj" ]; then
+    ids+=("$current_proj")
+    labels+=("$current_proj ${C_GREEN}[active]${C_RESET}")
+  fi
+  while IFS=$'\t' read -r p_id p_name; do
+    if [ -n "$p_id" ] && [ "$p_id" != "$current_proj" ]; then
+      ids+=("$p_id")
+      if [ -n "$p_name" ] && [ "$p_name" != "$p_id" ]; then
+        labels+=("$p_id ($p_name)")
+      else
+        labels+=("$p_id")
+      fi
+    fi
+  done <<< "$listed"
+
+  if [ "${#ids[@]}" -eq 0 ]; then
+    prompt_read "Target GCP Project ID" "$dest_var" "$current_proj"
+    return 0
+  fi
+
+  local sink="/dev/stdout"
+  if has_controlling_tty; then
+    sink="/dev/tty"
+  fi
+  {
+    echo -e "\n${C_BOLD}Select target GCP Project:${C_RESET}"
+    for idx in "${!labels[@]}"; do
+      echo -e "  ${C_YELLOW}$((idx+1)))${C_RESET} ${labels[$idx]}"
+    done
+    if [ "$(printf '%s\n' "$listed" | grep -c '[^[:space:]]')" -ge "$PROJECT_LIST_LIMIT" ]; then
+      echo -e "  ${C_CYAN}ℹ Showing the first ${PROJECT_LIST_LIMIT} projects — type a project ID to use one that is not listed.${C_RESET}"
+    fi
+  } > "$sink"
+
+  local answer=""
+  while true; do
+    prompt_read "Select a number, or type a GCP Project ID" answer "${ids[0]}"
+    if [[ "$answer" =~ ^[0-9]+$ ]]; then
+      if [ "$answer" -ge 1 ] && [ "$answer" -le "${#ids[@]}" ]; then
+        printf -v "$dest_var" '%s' "${ids[$((answer-1))]}"
+        return 0
+      fi
+      print_error "Invalid selection. Enter a number between 1 and ${#ids[@]}, or type a project ID."
+    elif is_valid_project_id "$answer"; then
+      printf -v "$dest_var" '%s' "$answer"
+      return 0
+    else
+      print_error "'$answer' is neither a menu number nor a valid GCP project ID (6-30 characters: lowercase letters, digits, hyphens)."
     fi
   done
 }
@@ -415,6 +770,7 @@ write_json_report() {
   "model_provider": "$(json_escape "${model_provider:-}")",
   "permission_set": "$(json_escape "${permission_set:-}")",
   "gvisor_enabled": ${enable_gvisor:-false},
+  "memory_mode": "$(json_escape "${memory_mode:-file}")",
   "gitops_repo": "$(json_escape "$report_gitops_repo")",
   "vars_file": "$(json_escape "${vars_file:-}")",
   "timestamp": "$(json_escape "$timestamp")"
@@ -445,6 +801,10 @@ run_menu_system() {
   export VARS_FILE="$vars_file"
   # shellcheck disable=SC1090
   source "$common_script"
+  # common.sh defines the colour variables unconditionally and its own print_*
+  # helpers; restore the installer's, as source_provisioning_helpers does.
+  configure_colors
+  define_print_helpers
 
   if [ -f "$vars_file" ]; then
     # shellcheck disable=SC1090
@@ -456,19 +816,22 @@ run_menu_system() {
 
   local project_id="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo "")}"
   local project_number="${PROJECT_NUMBER:-}"
-  local cluster_name="${CLUSTER_NAME:-platform-agent-host}"
-  local region="${REGION:-us-central1}"
-  local model_provider="${MODEL_PROVIDER:-gemini}"
-  local model_default_name="${MODEL_DEFAULT_NAME:-gemini-3.5-flash}"
+  local cluster_name="${CLUSTER_NAME:-$DEFAULT_CLUSTER_NAME}"
+  local region="${REGION:-$DEFAULT_REGION}"
+  local model_provider="${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}"
+  local model_default_name="${MODEL_DEFAULT_NAME:-$(default_model_for_provider "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}")}"
+  local vertex_project_id="${VERTEX_PROJECT_ID:-$project_id}"
+  local vertex_location="${VERTEX_LOCATION:-$region}"
   local gemini_api_key="${GEMINI_API_KEY:-}"
   local openai_api_key="${OPENAI_API_KEY:-}"
   local anthropic_api_key="${ANTHROPIC_API_KEY:-}"
   local google_chat_enabled="${GOOGLE_CHAT_ENABLED:-false}"
   local slack_enabled="${SLACK_ENABLED:-false}"
-  local allowed_users="${ALLOWED_USERS:-$(gcloud config get-value account 2>/dev/null || echo "")}"
+  local allowed_users="${ALLOWED_USERS:-}"
   local chat_topic_name="${CHAT_TOPIC_NAME:-platform-agent-chat-events}"
   local chat_sub_name="${CHAT_SUB_NAME:-platform-agent-chat-events-sub}"
   local permission_set="${PLATFORM_AGENT_PERMISSION_SET:-read-only}"
+  local custom_roles="${PLATFORM_AGENT_CUSTOM_ROLES:-}"
   local enable_gvisor="${ENABLE_GVISOR:-false}"
   local enable_webui="${HERMES_DASHBOARD_ENABLED:-false}"
   local github_org="${GITHUB_ORG:-}"
@@ -487,10 +850,10 @@ run_menu_system() {
     echo -e "${C_RESET}"
     echo -e "${C_BOLD}Active Configuration State:${C_RESET}"
     echo -e "  • ${C_CYAN}GCP Project ID:${C_RESET} ${project_id:-Not Set}"
-    echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${cluster_name:-Not Set} (${region:-us-central1})"
+    echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${cluster_name:-Not Set} (${region:-$DEFAULT_REGION})"
     echo -e "  • ${C_CYAN}Hermes Web UI (Port 9119):${C_RESET} $([ "$enable_webui" = "true" ] && echo -e "${C_GREEN}ENABLED${C_RESET}" || echo -e "${C_YELLOW}DISABLED${C_RESET}")"
     echo -e "  • ${C_CYAN}Chat Integrations:${C_RESET} Google Chat: $([ "$google_chat_enabled" = "true" ] && echo -e "${C_GREEN}ON${C_RESET}" || echo "OFF"), Slack: $([ "$slack_enabled" = "true" ] && echo -e "${C_GREEN}ON${C_RESET}" || echo "OFF")"
-    echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
+    echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})$([ "$model_provider" = "vertex_ai" ] && echo " @ ${vertex_project_id}/${vertex_location}" || echo "")"
     echo -e "  • ${C_CYAN}Permission Boundary:${C_RESET} ${permission_set}"
     echo -e "  • ${C_CYAN}Runtime Isolation:${C_RESET} $([ "$enable_gvisor" = "true" ] && echo -e "${C_GREEN}gVisor Sandbox${C_RESET}" || echo "Standard")"
 
@@ -523,7 +886,15 @@ run_menu_system() {
           "Disable All Chat Integrations" \
           c_opt
         case "$c_opt" in
-          1) google_chat_enabled="true"; prompt_read "Allowed Google Chat User Emails" allowed_users "$allowed_users" ;;
+          1)
+            google_chat_enabled="true"
+            local gchat_users_hint=""
+            if [ -z "$allowed_users" ]; then
+              gchat_users_hint="empty list"
+            fi
+            prompt_read "Allowed Google Chat User Emails (comma-separated, empty allows all users)" \
+              allowed_users "$allowed_users" false "$gchat_users_hint"
+            ;;
           2) slack_enabled="true" ;;
           3) google_chat_enabled="false"; slack_enabled="false" ;;
         esac
@@ -531,35 +902,55 @@ run_menu_system() {
       3)
         local m_opt=""
         prompt_menu "Select AI Model Provider:" \
-          "Google Gemini (gemini-3.5-flash)" \
-          "OpenAI (gpt-5.4)" \
-          "Anthropic (claude-sonnet-4-5-20250929)" \
+          "Google Gemini ($(default_model_for_provider gemini))" \
+          "Google Vertex AI / Model Garden (no API key — Workload Identity)" \
+          "OpenAI ($(default_model_for_provider openai))" \
+          "Anthropic ($(default_model_for_provider anthropic))" \
           m_opt
         case "$m_opt" in
           1)
             model_provider="gemini"
-            model_default_name="gemini-3.5-flash"
+            model_default_name="$(default_model_for_provider gemini)"
             prompt_read "Gemini API Key" gemini_api_key "$gemini_api_key" true
             ;;
           2)
-            model_provider="openai"
-            model_default_name="gpt-5.4"
-            prompt_read "OpenAI API Key" openai_api_key "$openai_api_key" true
+            model_provider="vertex_ai"
+            prompt_read "Vertex AI Project ID" vertex_project_id "$vertex_project_id"
+            prompt_read "Vertex AI Location" vertex_location "$vertex_location"
+            prompt_read "Vertex Model ID (publisher model, e.g. gemini-3.5-flash)" model_default_name "${model_default_name:-$(default_model_for_provider vertex_ai)}"
+            print_info "Vertex also needs 'make gcp-provision-04-iam' and 'make gcp-provision-09-litellm' re-run: Save & Apply only redeploys the agent."
             ;;
           3)
+            model_provider="openai"
+            model_default_name="$(default_model_for_provider openai)"
+            prompt_read "OpenAI API Key" openai_api_key "$openai_api_key" true
+            ;;
+          4)
             model_provider="anthropic"
-            model_default_name="claude-sonnet-4-5-20250929"
+            model_default_name="$(default_model_for_provider anthropic)"
             prompt_read "Anthropic API Key" anthropic_api_key "$anthropic_api_key" true
             ;;
         esac
         ;;
       4)
         local p_opt=""
-        prompt_menu "Select Permission Boundary:" \
-          "SRE GitOps & Remediations (Full Read/Write)" \
-          "Read-Only Audit & Observability" \
+        prompt_menu "Select GCP IAM Permission Set:" \
+          "read-only — auditing and observability, no GCP write capability (Default)" \
+          "gke-admin — the agent manages GKE lifecycle and node pools directly" \
+          "custom — exactly the roles you list, no built-in bundle" \
           p_opt
-        if [ "$p_opt" = "1" ]; then permission_set="gke-admin"; else permission_set="read-only"; fi
+        case "$p_opt" in
+          1) permission_set="read-only" ;;
+          2) permission_set="gke-admin" ;;
+          3)
+            permission_set="custom"
+            while true; do
+              prompt_read "Custom GCP IAM Roles (space- or comma-separated)" custom_roles "$custom_roles"
+              [ -n "$custom_roles" ] && break
+              print_error "The custom permission set needs at least one role, e.g. roles/container.viewer."
+            done
+            ;;
+        esac
         ;;
       5)
         prompt_read "GitHub Org / Username" github_org "$github_org"
@@ -568,7 +959,8 @@ run_menu_system() {
       6)
         print_step "Saving & Re-applying Configuration State"
         if [ -z "$image_tag" ]; then
-          prompt_read "Container image tag (validated release tag or full commit SHA)" image_tag ""
+          prompt_read "Container image tag (validated release tag or full commit SHA)" \
+            image_tag "$(default_image_tag "$repo_dir")" false "$(default_image_tag_label "$repo_dir")"
         fi
         validate_immutable_ref "$image_tag"
         verify_local_source_ref "$repo_dir" "$image_tag"
@@ -584,6 +976,8 @@ run_menu_system() {
         save_var KMS_LOCATION "$(derive_kms_location "$region")"
         save_var MODEL_PROVIDER "$model_provider"
         save_var MODEL_DEFAULT_NAME "$model_default_name"
+        save_var VERTEX_PROJECT_ID "$vertex_project_id"
+        save_var VERTEX_LOCATION "$vertex_location"
         save_secret_var GEMINI_API_KEY "$gemini_api_key"
         save_secret_var OPENAI_API_KEY "$openai_api_key"
         save_secret_var ANTHROPIC_API_KEY "$anthropic_api_key"
@@ -593,6 +987,9 @@ run_menu_system() {
         save_var GOOGLE_CHAT_ENABLED "$google_chat_enabled"
         save_var SLACK_ENABLED "$slack_enabled"
         save_var PLATFORM_AGENT_PERMISSION_SET "$permission_set"
+        if [ "$permission_set" = "custom" ]; then
+          save_var PLATFORM_AGENT_CUSTOM_ROLES "$custom_roles"
+        fi
         save_var ENABLE_GVISOR "$enable_gvisor"
         save_var HERMES_DASHBOARD_ENABLED "$enable_webui"
         save_var GITHUB_ORG "$github_org"
@@ -643,11 +1040,19 @@ main() {
 
   local image_tag="${PARAM_IMAGE_TAG:-}"
   if [ -z "$image_tag" ]; then
+    local head_sha=""
+    head_sha="$(default_image_tag)"
     if [ "$PARAM_NON_INTERACTIVE" = "true" ]; then
-      print_error "--image-tag is required; use a validated release tag or full commit SHA."
-      exit 1
+      if [ -z "$head_sha" ]; then
+        print_error "--image-tag is required; use a validated release tag or full commit SHA."
+        exit 1
+      fi
+      image_tag="$head_sha"
+      print_info "Defaulting image tag to the checkout's HEAD: ${C_BOLD}${image_tag}${C_RESET}"
+    else
+      prompt_read "Container image tag (validated release tag or full commit SHA)" \
+        image_tag "$head_sha" false "$(default_image_tag_label)"
     fi
-    prompt_read "Container image tag (validated release tag or full commit SHA)" image_tag ""
   fi
   validate_immutable_ref "$image_tag"
 
@@ -660,9 +1065,17 @@ main() {
       auto_install_tool "$tool"
     fi
   done
+  require_min_gcloud_version || exit 1
+
+  # 3. Provisioning Sources & Shared Defaults
+  print_step "2. Setting up Workspace Repository"
+  local repo_dir=""
+  acquire_source_repo repo_dir "$image_tag"
+  source_provisioning_helpers "$repo_dir"
+  resolve_shared_defaults
 
   # 3. Google Cloud Authentication Check
-  print_step "2. Verifying Google Cloud Authentication"
+  print_step "3. Verifying Google Cloud Authentication"
   local active_account=""
   active_account=$(gcloud config get-value account 2>/dev/null || echo "")
 
@@ -681,7 +1094,7 @@ main() {
   print_success "Authenticated as: ${C_BOLD}${active_account:-Google Cloud User}${C_RESET}"
 
   # 4. GCP Project Target Configuration
-  print_step "3. Google Cloud Target Configuration"
+  print_step "4. Google Cloud Target Configuration"
   local active_proj=""
   if [ "$is_cloud_shell" = "true" ] && [ -n "${DEVSHELL_PROJECT_ID:-}" ]; then
     active_proj="${DEVSHELL_PROJECT_ID}"
@@ -692,37 +1105,15 @@ main() {
   local project_id=""
   if [ -n "$PARAM_PROJECT_ID" ]; then
     project_id="$PARAM_PROJECT_ID"
+  elif [ "$PARAM_NON_INTERACTIVE" = "true" ] || ! has_controlling_tty; then
+    prompt_read "Target GCP Project ID" project_id "$active_proj"
   else
-    print_info "Fetching available GCP projects from your account..."
-    local proj_lines=""
-    proj_lines=$(gcloud projects list --format="value(projectId,name)" --limit=10 2>/dev/null || echo "")
+    select_gcp_project project_id "$active_proj"
+  fi
 
-    if [ -n "$proj_lines" ] && [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
-      local proj_menu_opts=()
-      local proj_ids=()
-      while IFS=$'\t' read -r p_id p_name; do
-        if [ -n "$p_id" ]; then
-          proj_ids+=("$p_id")
-          if [ "$p_id" = "$active_proj" ]; then
-            proj_menu_opts+=("$p_id ($p_name) ${C_GREEN}[active]${C_RESET}")
-          else
-            proj_menu_opts+=("$p_id ($p_name)")
-          fi
-        fi
-      done <<< "$proj_lines"
-      proj_menu_opts+=("Enter a custom GCP Project ID manually")
-
-      local proj_choice=""
-      prompt_menu "Select target GCP Project:" "${proj_menu_opts[@]}" proj_choice
-
-      if [ "$proj_choice" -le "${#proj_ids[@]}" ]; then
-        project_id="${proj_ids[$((proj_choice-1))]}"
-      else
-        prompt_read "Target GCP Project ID" project_id "${active_proj:-my-gcp-project}"
-      fi
-    else
-      prompt_read "Target GCP Project ID" project_id "${active_proj:-my-gcp-project}"
-    fi
+  if [ -z "$project_id" ]; then
+    print_error "No GCP project selected. Re-run with --project-id=<project-id>."
+    exit 1
   fi
 
   if [ "$PARAM_DRY_RUN" = "true" ]; then
@@ -747,11 +1138,11 @@ main() {
   active_region=$(gcloud config get-value compute/region 2>/dev/null || echo "")
   local region="${PARAM_REGION:-}"
   if [ -z "$region" ]; then
-    prompt_read "Target GCP Region" region "${active_region:-us-central1}"
+    prompt_read "Target GCP Region" region "${active_region:-$DEFAULT_REGION}"
   fi
 
   # 5. GKE Cluster Selection & Provisioning Strategy
-  print_step "4. GKE Cluster Topology & Capacity Setup"
+  print_step "5. GKE Cluster Topology & Capacity Setup"
   local cluster_choice=""
   if [ "$PARAM_NON_INTERACTIVE" = "true" ] || [ -n "$PARAM_CLUSTER_NAME" ]; then
     if [ -n "$PARAM_CLUSTER_NAME" ]; then
@@ -769,7 +1160,7 @@ main() {
   local cluster_name="${PARAM_CLUSTER_NAME:-}"
   if [ "$cluster_choice" = "1" ]; then
     if [ -z "$cluster_name" ]; then
-      prompt_read "New GKE Cluster Name" cluster_name "kube-agents-platform"
+      prompt_read "New GKE Cluster Name" cluster_name "$DEFAULT_CLUSTER_NAME"
     fi
   else
     if [ -n "$PARAM_CLUSTER_NAME" ]; then
@@ -800,18 +1191,18 @@ main() {
           region="${cluster_locations[$((c_choice-1))]}"
           print_success "Using discovered cluster location: ${C_BOLD}${region}${C_RESET}"
         else
-          prompt_read "Existing GKE Cluster Name" cluster_name "platform-agent-host"
+          prompt_read "Existing GKE Cluster Name" cluster_name "$DEFAULT_CLUSTER_NAME"
         fi
       else
         print_warning "No existing GKE clusters found in project '$project_id'."
-        prompt_read "Existing GKE Cluster Name" cluster_name "platform-agent-host"
+        prompt_read "Existing GKE Cluster Name" cluster_name "$DEFAULT_CLUSTER_NAME"
       fi
     fi
   fi
   print_success "Selected Cluster Name: ${C_BOLD}${cluster_name}${C_RESET}"
 
   # 6. Chat & Messaging Platform Integration
-  print_step "5. Chat & Messaging Integrations Setup"
+  print_step "6. Chat & Messaging Integrations Setup"
   local chat_choice=""
   if [ "$PARAM_NON_INTERACTIVE" = "true" ] || [ "${PARAM_ENABLE_GOOGLE_CHAT:-false}" = "true" ]; then
     if [ "${PARAM_ENABLE_GOOGLE_CHAT:-false}" = "true" ]; then
@@ -830,9 +1221,19 @@ main() {
 
   local google_chat_enabled="false"
   local slack_enabled="false"
-  local allowed_users="${active_account:-user@example.com}"
-  local chat_topic_name="platform-agent-chat-events"
-  local chat_sub_name="platform-agent-chat-events-sub"
+  # Empty by default: the allowlist is opt-in, and an unset list allows all users.
+  local allowed_users="${ALLOWED_USERS:-}"
+  local allowed_users_hint=""
+  if [ -z "$allowed_users" ]; then
+    allowed_users_hint="empty list"
+  fi
+  local chat_topic_name="${PARAM_CHAT_TOPIC_NAME:-${CHAT_TOPIC_NAME:-platform-agent-chat-events}}"
+  local chat_sub_name="${CHAT_SUB_NAME:-platform-agent-chat-events-sub}"
+  local google_chat_mode="${PARAM_GOOGLE_CHAT_MODE:-${GOOGLE_CHAT_MODE:-default}}"
+  if [[ ! "$google_chat_mode" =~ ^(default|debug)$ ]]; then
+    print_error "--google-chat-mode must be either 'default' or 'debug'."
+    exit 1
+  fi
   local slack_bot_token=""
   local slack_app_token=""
   local slack_allowed_users=""
@@ -842,8 +1243,9 @@ main() {
   case "$chat_choice" in
     1)
       google_chat_enabled="true"
-      prompt_read "Allowed User Email(s) for Google Chat (comma-separated)" allowed_users "$allowed_users"
-      prompt_read "Pub/Sub Topic Name for Google Chat" chat_topic_name "platform-agent-chat-events"
+      prompt_read "Allowed User Email(s) for Google Chat (comma-separated, empty allows all users)" \
+        allowed_users "$allowed_users" false "$allowed_users_hint"
+      prompt_read "Pub/Sub Topic Name for Google Chat" chat_topic_name "$chat_topic_name"
       ;;
     2)
       slack_enabled="true"
@@ -856,8 +1258,9 @@ main() {
     3)
       google_chat_enabled="true"
       slack_enabled="true"
-      prompt_read "Allowed User Email(s) for Google Chat (comma-separated)" allowed_users "$allowed_users"
-      prompt_read "Pub/Sub Topic Name for Google Chat" chat_topic_name "platform-agent-chat-events"
+      prompt_read "Allowed User Email(s) for Google Chat (comma-separated, empty allows all users)" \
+        allowed_users "$allowed_users" false "$allowed_users_hint"
+      prompt_read "Pub/Sub Topic Name for Google Chat" chat_topic_name "$chat_topic_name"
       prompt_read "Slack Bot Token (xoxb-...)" slack_bot_token "" true
       prompt_read "Slack App Token (xapp-...)" slack_app_token "" true
       prompt_read "Allowed Slack User IDs / Emails (comma-separated)" slack_allowed_users "$allowed_users"
@@ -870,19 +1273,21 @@ main() {
   esac
 
   # 7. LLM Model Provider Selection & API Key Auto-Discovery
-  print_step "6. AI Model Provider Credentials"
-  local model_provider="${PARAM_MODEL_PROVIDER:-gemini}"
-  local model_default_name=""
+  print_step "7. AI Model Provider Credentials"
+  local model_provider="$PARAM_MODEL_PROVIDER"
+  if ! is_valid_model_provider "$model_provider"; then
+    print_error "Unsupported model provider '$model_provider'. Use gemini, vertex_ai, anthropic, chatgpt, or openai."
+    exit 1
+  fi
+  local model_default_name="${PARAM_MODEL_DEFAULT_NAME:-${MODEL_DEFAULT_NAME:-}}"
+  if [ -z "$model_default_name" ]; then
+    model_default_name="$(default_model_for_provider "$model_provider")"
+  fi
 
-  case "$model_provider" in
-    gemini) model_default_name="gemini-3.5-flash" ;;
-    openai) model_default_name="gpt-5.4" ;;
-    anthropic) model_default_name="claude-sonnet-4-5-20250929" ;;
-    *)
-      print_error "Unsupported model provider '$model_provider'. Use gemini, openai, or anthropic."
-      exit 1
-      ;;
-  esac
+  # Vertex authenticates with Workload Identity rather than an API key, so these
+  # two are the only credentials it needs and both default to the install target.
+  local vertex_project_id="${PARAM_VERTEX_PROJECT_ID:-$project_id}"
+  local vertex_location="${PARAM_VERTEX_LOCATION:-$region}"
 
   local detected_gemini_key="${PARAM_GEMINI_API_KEY:-${GEMINI_API_KEY:-}}"
   if [ -z "$detected_gemini_key" ]; then
@@ -895,15 +1300,16 @@ main() {
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
     local model_choice=""
     prompt_menu "Select Model Provider for the Platform Agent:" \
-      "Google Gemini (Recommended: gemini-3.5-flash / Gemini API)" \
-      "OpenAI (gpt-5.4 / OpenAI API)" \
-      "Anthropic (claude-sonnet-4-5-20250929 / Anthropic API)" \
+      "Google Gemini (Recommended: $(default_model_for_provider gemini) / Gemini API)" \
+      "Google Vertex AI / Model Garden (no API key — Workload Identity)" \
+      "OpenAI ($(default_model_for_provider openai) / OpenAI API)" \
+      "Anthropic ($(default_model_for_provider anthropic) / Anthropic API)" \
       model_choice
 
     case "$model_choice" in
       1)
         model_provider="gemini"
-        model_default_name="gemini-3.5-flash"
+        model_default_name="$(default_model_for_provider gemini)"
         local detected_key="${GEMINI_API_KEY:-}"
         if [ -z "$detected_key" ]; then
           detected_key=$(gcloud secrets versions access latest --secret="gemini-api-key" --project="$project_id" 2>/dev/null || echo "")
@@ -911,13 +1317,19 @@ main() {
         prompt_read "Gemini API Key" gemini_api_key "$detected_key" true
         ;;
       2)
-        model_provider="openai"
-        model_default_name="gpt-5.4"
-        prompt_read "OpenAI API Key" openai_api_key "${OPENAI_API_KEY:-}" true
+        model_provider="vertex_ai"
+        prompt_read "Vertex AI Project ID" vertex_project_id "$vertex_project_id"
+        prompt_read "Vertex AI Location" vertex_location "$vertex_location"
+        prompt_read "Vertex Model ID (publisher model, e.g. gemini-3.5-flash)" model_default_name "$(default_model_for_provider vertex_ai)"
         ;;
       3)
+        model_provider="openai"
+        model_default_name="$(default_model_for_provider openai)"
+        prompt_read "OpenAI API Key" openai_api_key "${OPENAI_API_KEY:-}" true
+        ;;
+      4)
         model_provider="anthropic"
-        model_default_name="claude-sonnet-4-5-20250929"
+        model_default_name="$(default_model_for_provider anthropic)"
         prompt_read "Anthropic API Key" anthropic_api_key "${ANTHROPIC_API_KEY:-}" true
         ;;
     esac
@@ -927,7 +1339,11 @@ main() {
     gemini)
       [ -n "$gemini_api_key" ] || print_warning "No Gemini API key was provided; the agent will require a credential update before model calls can succeed."
       ;;
-    openai)
+    vertex_ai)
+      print_info "Vertex AI needs no API key: LiteLLM authenticates as ${LITELLM_GSA_NAME:-kubeagents-litellm-gsa}@${project_id}.iam.gserviceaccount.com via Workload Identity."
+      print_info "Serving ${model_default_name} from projects/${vertex_project_id}/locations/${vertex_location}."
+      ;;
+    chatgpt | openai)
       [ -n "$openai_api_key" ] || print_warning "No OpenAI API key was provided; the agent will require a credential update before model calls can succeed."
       ;;
     anthropic)
@@ -936,7 +1352,7 @@ main() {
   esac
 
   # 8. GitOps Infrastructure Repository Connection
-  print_step "7. GitOps Infrastructure Repository Setup"
+  print_step "8. GitOps Infrastructure Repository Setup"
   local github_org="${PARAM_GITOPS_ORG:-}"
   local github_repo="${PARAM_GITOPS_REPO:-gke-fleet-iac}"
   local github_app_id=""
@@ -953,9 +1369,40 @@ main() {
       gitops_choice
 
     if [ "$gitops_choice" = "1" ] || [ "$gitops_choice" = "2" ]; then
-      local detected_gh_user=""
-      detected_gh_user=$(gh api user -q .login 2>/dev/null || git config user.name 2>/dev/null || echo "")
-      prompt_read "GitHub Org / Username" github_org "${detected_gh_user:-github-user}"
+      # The repo must be organization-owned: the token minter resolves App
+      # installations at /orgs/{org}/installation, which does not exist for
+      # personal accounts. So the default offered here is the operator's first
+      # organization, never their login — suggesting a username would guarantee
+      # the failure below.
+      local detected_gh_org=""
+      detected_gh_org=$(gh api user/orgs -q '.[0].login' 2>/dev/null || echo "")
+      print_info "The GitOps repo must belong to a GitHub organization; a personal account cannot"
+      print_info "mint tokens. A free organization is enough."
+      while true; do
+        prompt_read "GitHub Organization" github_org "${detected_gh_org}"
+
+        local org_problem=""
+        if [ -z "$github_org" ]; then
+          org_problem="A GitHub organization is required to connect a GitOps repo."
+        elif ! is_truthy "${SKIP_GITHUB_ORG_CHECK:-false}"; then
+          case "$(github_account_type "$github_org")" in
+            organization) ;;
+            user) org_problem="'${github_org}' is a personal GitHub account, not an organization. The token minter cannot mint tokens for it." ;;
+            missing) org_problem="'${github_org}' does not exist on GitHub. Check the spelling." ;;
+            *) print_warning "Could not reach GitHub to verify '${github_org}'; continuing." ;;
+          esac
+        fi
+        [ -z "$org_problem" ] && break
+
+        print_error "$org_problem"
+        # provision_04_gcp_iam.sh exits on a non-organization, and that would
+        # land after the cluster, node pools and operator are already built.
+        # Settle it here, while nothing has been created yet.
+        if [ "$PARAM_NON_INTERACTIVE" = "true" ] || ! has_controlling_tty; then
+          print_error "Set GITHUB_ORG to an organization and re-run, or export SKIP_GITHUB_ORG_CHECK=true to bypass this check."
+          exit 1
+        fi
+      done
       prompt_read "GitOps Repository Name" github_repo "gke-fleet-iac"
 
       print_info "GitHub access uses the short-lived GitHub App token minter."
@@ -967,10 +1414,18 @@ main() {
   fi
 
   # 9. Agent Permissions & Sandbox Isolation Boundary
-  print_step "8. Agent Security & Runtime Isolation Boundary"
+  print_step "9. Agent Security & Runtime Isolation Boundary"
   local permission_set="${PARAM_PERMISSION_SET:-read-only}"
-  if [[ ! "$permission_set" =~ ^(read-only|gke-admin)$ ]]; then
-    print_error "Unsupported permission set '$permission_set'. Use read-only or gke-admin."
+  if ! is_valid_permission_set "$permission_set"; then
+    print_error "Unsupported permission set '$permission_set'. Use read-only, gke-admin, or custom."
+    exit 1
+  fi
+  local custom_roles="${PARAM_CUSTOM_ROLES:-}"
+  # init_var_platform_agent_permission_set in k8s-operator/scripts/common.sh owns
+  # this rule; repeated here only so the run fails at the prompt instead of eight
+  # steps later inside provision_04_gcp_iam.sh.
+  if [ "$permission_set" = "custom" ] && [ "$PARAM_NON_INTERACTIVE" = "true" ] && [ -z "$custom_roles" ]; then
+    print_error "--permission-set=custom requires --custom-roles with at least one role."
     exit 1
   fi
   local enable_gvisor="${PARAM_ENABLE_GVISOR:-false}"
@@ -982,18 +1437,48 @@ main() {
     print_error "--enable-web-ui must be either true or false."
     exit 1
   fi
+  # An agent that forgets every conversation is the worse default, so memory is
+  # on unless it is turned off. The choice decides two things: whether the
+  # harness keeps memory at all, and — when it does — whether that costs an
+  # extra API server and Postgres database in the cluster. Nothing downstream
+  # infers one from the other, so both are recorded.
+  #
+  # `file` is the default because it is what every install got before the
+  # searchable store existed: an upgrade that says nothing about memory keeps
+  # the store it already has, and no install grows a Postgres database it never
+  # asked for. Enterprise deployments opt in with --memory=hindsight.
+  local memory_mode="${PARAM_MEMORY:-file}"
+  if [[ ! "$memory_mode" =~ ^(off|file|hindsight)$ ]]; then
+    print_error "--memory must be one of: off, file, hindsight."
+    exit 1
+  fi
   if [ "$PARAM_NON_INTERACTIVE" != "true" ]; then
+    # These are GCP IAM role bundles for the agent's GSA, nothing else. Kubernetes
+    # RBAC stays read-only in every set, and the GitOps pull-request path works in
+    # every set, so neither belongs in these labels. read-only leads because it is
+    # the documented default and the only set that enforces no cloud-plane writes.
+    # See docs/site/src/content/docs/reference/security-and-iam.md.
     local perm_choice=""
-    prompt_menu "Select Platform Agent Permission Boundary:" \
-      "SRE GitOps & Remediations (Full read/write with GitOps PR submission)" \
-      "Read-Only Audit & Observability (Read-only cluster inspection)" \
+    prompt_menu "Select Platform Agent GCP IAM Permission Set:" \
+      "read-only — auditing and observability, no GCP write capability (Default)" \
+      "gke-admin — the agent manages GKE lifecycle and node pools directly" \
+      "custom — exactly the roles you list, no built-in bundle" \
       perm_choice
 
-    if [ "$perm_choice" = "1" ]; then
-      permission_set="gke-admin"
-    elif [ "$perm_choice" = "2" ]; then
-      permission_set="read-only"
-    fi
+    case "$perm_choice" in
+      1) permission_set="read-only" ;;
+      2) permission_set="gke-admin" ;;
+      3) permission_set="custom" ;;
+    esac
+
+    while [ "$permission_set" = "custom" ] && [ -z "$custom_roles" ]; do
+      prompt_read "Custom GCP IAM Roles (space- or comma-separated)" custom_roles ""
+      if [ -z "$custom_roles" ]; then
+        # provision_04_gcp_iam.sh exits on an empty custom list; that would land
+        # after the cluster and operator are already provisioned.
+        print_error "The custom permission set needs at least one role, e.g. roles/container.viewer."
+      fi
+    done
 
     local gvisor_choice=""
     prompt_menu "Enable GKE Sandbox (gVisor) Runtime Isolation for Agent Workloads?" \
@@ -1014,31 +1499,62 @@ main() {
     if [ "$webui_choice" = "2" ]; then
       PARAM_ENABLE_WEBUI="true"
     fi
+
+    # The two stores differ in what they cost to run and in how far they scale,
+    # and the label says which so the choice can be made without reading a design
+    # doc: the file store adds no services but is loaded into the model's context
+    # whole on every turn, so it is bounded by the window; Hindsight retrieves only
+    # what a question needs, at the price of an API server and a database.
+    #
+    # The file store is listed first because prompt_menu's default answer is
+    # always option 1, and this is the one an install should get for saying
+    # nothing — it is what installs got before the searchable store existed, and
+    # it is the only option that adds no services to the cluster.
+    local memory_choice=""
+    prompt_menu "Should the agent remember things between conversations?" \
+      "Files on the agent's own disk (Default) - For small or personal deployments. Per-user Markdown, no extra services to run, does not scale past a few pages" \
+      "Searchable store - For enterprise deployments. Ranked recall that scales, deploys Hindsight (API + Postgres) into the cluster" \
+      "No - Nothing is retained once a session ends" \
+      memory_choice
+
+    # Every branch assigns, rather than letting option 1 fall through to
+    # --memory=: an answer given at the prompt is the more recent instruction of
+    # the two, and the permission-set and gVisor prompts above already work this way.
+    case "$memory_choice" in
+      1) memory_mode="file" ;;
+      2) memory_mode="hindsight" ;;
+      3) memory_mode="off" ;;
+    esac
   fi
 
-  # 10. Repository Cloning & Execution Context
-  print_step "9. Setting up Workspace Repository"
-  local repo_dir=""
-  if [ -f "k8s-operator/scripts/provision.sh" ]; then
-    repo_dir="$(pwd)"
-    print_success "Using current repository directory: $repo_dir"
-    verify_local_source_ref "$repo_dir" "$image_tag"
-  else
-    repo_dir="$HOME/kube-agents"
-    if [ -d "$repo_dir" ]; then
-      print_info "Using existing repository at $repo_dir without modifying local changes."
-      cd "$repo_dir"
-      verify_local_source_ref "$repo_dir" "$image_tag"
-    else
-      local source_ref="$image_tag"
-      print_info "Cloning kube-agents provisioning scripts at '$source_ref' into $repo_dir..."
-      git clone --filter=blob:none --no-checkout https://github.com/gke-labs/kube-agents.git "$repo_dir"
-      git -C "$repo_dir" fetch --depth=1 origin "$source_ref"
-      git -C "$repo_dir" checkout --detach FETCH_HEAD
-      cd "$repo_dir"
-      verify_local_source_ref "$repo_dir" "$image_tag"
-    fi
-  fi
+  # MEMORY_PROVIDER carries the whole choice — including "no memory at all",
+  # which is what `none` means. Everything downstream reads it and nothing else:
+  # provisioning step 13 deploys Hindsight only for a Hindsight-backed provider,
+  # the specialist overlay blanks anything that cannot be made read-only, and the
+  # entrypoint gates the one-way file import the same way.
+  #
+  # MEMORY_ENABLED is a different switch and stays false. It turns on Hermes'
+  # *built-in* MEMORY.md/USER.md, which has no per-user scoping and would sit
+  # alongside whichever provider is chosen — two competing stores in front of one
+  # agent. Every provider here replaces it rather than supplementing it. Nothing
+  # about memory keys off this flag, so an upgrade cannot read a false left in an
+  # old vars.sh as "this install wanted no memory".
+  #
+  # `none` rather than an empty string: the choice has to survive the trip
+  # through the CR, and an absent provider takes the CRD default. The operator
+  # translates `none` back to Hermes' own spelling — see MEMORY_PROVIDER_CHOICES
+  # in k8s-operator/scripts/common.sh.
+  #
+  # `multiuser_memory` is the default provider everywhere it is named with no
+  # install to ask (the CRD default, common.sh, and both profiles' config.yaml),
+  # and `file` is what an install that says nothing about memory gets — the same
+  # store those installs already had before the searchable one existed.
+  local memory_enabled="false"
+  local memory_provider="multiuser_memory"
+  case "$memory_mode" in
+    hindsight) memory_provider="kube_agents_memory" ;;
+    off) memory_provider="none" ;;
+  esac
 
   print_step "10. Generating Configuration State (k8s-operator/scripts/vars.sh)"
   local vars_file="${repo_dir}/k8s-operator/scripts/vars.sh"
@@ -1070,6 +1586,8 @@ main() {
   write_state_var "$vars_file" GVISOR_POOL_NAME "gvisor-pool"
   write_state_var "$vars_file" MODEL_PROVIDER "$model_provider"
   write_state_var "$vars_file" MODEL_DEFAULT_NAME "$model_default_name"
+  write_state_var "$vars_file" VERTEX_PROJECT_ID "$vertex_project_id"
+  write_state_var "$vars_file" VERTEX_LOCATION "$vertex_location"
   write_state_var "$vars_file" GEMINI_API_KEY "$gemini_api_key"
   write_state_var "$vars_file" OPENAI_API_KEY "$openai_api_key"
   write_state_var "$vars_file" ANTHROPIC_API_KEY "$anthropic_api_key"
@@ -1077,6 +1595,7 @@ main() {
   write_state_var "$vars_file" CHAT_TOPIC_NAME "$chat_topic_name"
   write_state_var "$vars_file" CHAT_SUB_NAME "$chat_sub_name"
   write_state_var "$vars_file" GOOGLE_CHAT_ENABLED "$google_chat_enabled"
+  write_state_var "$vars_file" GOOGLE_CHAT_MODE "$google_chat_mode"
   write_state_var "$vars_file" SLACK_ENABLED "$slack_enabled"
   write_state_var "$vars_file" SLACK_BOT_TOKEN "$slack_bot_token"
   write_state_var "$vars_file" SLACK_APP_TOKEN "$slack_app_token"
@@ -1085,15 +1604,18 @@ main() {
   write_state_var "$vars_file" SLACK_HOME_CHANNEL_NAME "$slack_home_channel_name"
   write_state_var "$vars_file" API_SERVER_KEY "$api_server_key"
   write_state_var "$vars_file" PLATFORM_AGENT_PERMISSION_SET "$permission_set"
+  if [ "$permission_set" = "custom" ]; then
+    write_state_var "$vars_file" PLATFORM_AGENT_CUSTOM_ROLES "$custom_roles"
+  fi
   write_state_var "$vars_file" GITHUB_ORG "$github_org"
   write_state_var "$vars_file" GITHUB_REPO "$github_repo"
   write_state_var "$vars_file" GITHUB_APP_ID "$github_app_id"
   write_state_var "$vars_file" KMS_KEYRING "$kms_keyring"
   write_state_var "$vars_file" KMS_KEY "$kms_key"
   write_state_var "$vars_file" GITHUB_PEM_PATH "$github_pem_path"
-  write_state_var "$vars_file" MEMORY_ENABLED "false"
-  write_state_var "$vars_file" MEMORY_PROVIDER "multiuser_memory"
-  write_state_var "$vars_file" USER_PROFILE_ENABLED "false"
+  write_state_var "$vars_file" MEMORY_ENABLED "$memory_enabled"
+  write_state_var "$vars_file" MEMORY_PROVIDER "$memory_provider"
+  write_state_var "$vars_file" USER_PROFILE_ENABLED "${PARAM_USER_PROFILE_ENABLED:-${USER_PROFILE_ENABLED:-false}}"
   write_state_var "$vars_file" HERMES_DASHBOARD_ENABLED "${PARAM_ENABLE_WEBUI:-false}"
   write_state_var "$vars_file" REGISTRY_PREFIX "$registry_prefix"
   write_state_var "$vars_file" OPERATOR_IMAGE "${registry_prefix}/k8s-operator"
@@ -1109,7 +1631,7 @@ main() {
   print_success "Configuration saved to: $vars_file"
 
   # Pre-Flight Summary & Final Confirmation Checkpoint
-  print_step "10. Pre-Flight Configuration Summary"
+  print_step "11. Pre-Flight Configuration Summary"
   echo -e "${C_CYAN}${C_BOLD}"
   draw_separator
   echo -e "${C_RESET}${C_BOLD}Please review your selections before provisioning begins:${C_RESET}"
@@ -1117,7 +1639,11 @@ main() {
   echo -e "  • ${C_CYAN}GKE Cluster:${C_RESET} ${C_BOLD}${cluster_name}${C_RESET} (${region}, GKE Standard)"
   echo -e "  • ${C_CYAN}gVisor Sandbox Isolation:${C_RESET} ${enable_gvisor}"
   echo -e "  • ${C_CYAN}AI Model Provider:${C_RESET} ${model_provider} (${model_default_name})"
+  if [ "$model_provider" = "vertex_ai" ]; then
+    echo -e "  • ${C_CYAN}Vertex AI Endpoint:${C_RESET} projects/${vertex_project_id}/locations/${vertex_location}"
+  fi
   echo -e "  • ${C_CYAN}Permission Boundary:${C_RESET} ${permission_set}"
+  echo -e "  • ${C_CYAN}Long-Term Memory:${C_RESET} ${memory_mode}"
   if [ -n "$github_org" ] && [ -n "$github_repo" ]; then
     echo -e "  • ${C_CYAN}GitOps Infrastructure Repo:${C_RESET} https://github.com/${github_org}/${github_repo}"
   fi
@@ -1143,7 +1669,7 @@ main() {
   fi
 
   # 12. Execute Automated Provisioning
-  print_step "11. Launching Automated GKE Provisioning Pipeline"
+  print_step "12. Launching Automated GKE Provisioning Pipeline"
   print_info "Provisioning GCP APIs, GKE Cluster, cert-manager, Operator, LiteLLM gateway, and Platform Agent..."
   print_info "Starting build..."
 
@@ -1159,21 +1685,36 @@ main() {
   cd "${repo_dir}"
 
   # 12. Workload & Pod Health Verification Checkpoint
-  print_step "12. Verifying Workload & Pod Health"
+  print_step "13. Verifying Workload & Pod Health"
   print_info "Verifying deployment rollouts in namespace 'kubeagents-system'..."
   if ! kubectl get ns kubeagents-system >/dev/null 2>&1; then
     print_error "Namespace 'kubeagents-system' was not created. Installation is incomplete."
     exit 1
   fi
+  local slow_rollouts=()
   for deployment in kubeagents-controller-manager litellm platform-agent-gateway; do
     if ! kubectl get deployment "$deployment" -n kubeagents-system >/dev/null 2>&1; then
       print_error "Expected deployment '$deployment' was not created."
       exit 1
     fi
-    kubectl rollout status "deployment/$deployment" -n kubeagents-system --timeout=120s
+    # The agent pulls a large image and waits on LiteLLM before it reports ready,
+    # so a couple of minutes is normal. Running past the budget means "still
+    # coming up", not "broken": say so and keep the summary below, which carries
+    # the chat links and port-forward command.
+    if ! wait_for_rollout "$deployment" kubeagents-system "$ROLLOUT_TIMEOUT_SECS"; then
+      slow_rollouts+=("$deployment")
+      print_warning "$deployment did not report ready within ${ROLLOUT_TIMEOUT_SECS}s."
+    fi
   done
-  print_success "All core control plane deployments are healthy and available!"
-  write_json_report "SUCCESS"
+  if [ "${#slow_rollouts[@]}" -eq 0 ]; then
+    print_success "All core control plane deployments are healthy and available!"
+    write_json_report "SUCCESS"
+  else
+    print_warning "Still waiting on: ${slow_rollouts[*]}"
+    print_info "Keep watching with: ${C_BOLD}kubectl rollout status deployment/${slow_rollouts[0]} -n kubeagents-system${C_RESET}"
+    print_info "Inspect a stuck pod with: ${C_BOLD}kubectl describe pod -l app=${slow_rollouts[0]} -n kubeagents-system${C_RESET}"
+    write_json_report "SUCCESS_PENDING_ROLLOUT"
+  fi
 
   # 13. Installation Summary & Next Steps
   print_step "🎉 Installation Complete!"
@@ -1204,12 +1745,16 @@ main() {
 
   if [ "${google_chat_enabled:-false}" = "true" ]; then
     echo ""
-    bash "${repo_dir}/k8s-operator/scripts/print_instructions_gchat.sh" || true
+    IMAGE_TAG="$image_tag" bash "${repo_dir}/k8s-operator/scripts/print_instructions_gchat.sh" || true
   fi
   if [ "${slack_enabled:-false}" = "true" ]; then
     echo ""
-    bash "${repo_dir}/k8s-operator/scripts/print_instructions_slack.sh" || true
+    IMAGE_TAG="$image_tag" bash "${repo_dir}/k8s-operator/scripts/print_instructions_slack.sh" || true
   fi
 }
 
-main "$@"
+if [ "${KUBE_AGENTS_SOURCE_ONLY:-false}" != "true" ]; then
+  main "$@"
+else
+  echo "ℹ️ Sourced install.sh functions without executing main (KUBE_AGENTS_SOURCE_ONLY=true)." >&2
+fi
