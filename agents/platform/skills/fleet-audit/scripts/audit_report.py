@@ -234,6 +234,17 @@ AUDITS: dict[str, AuditSpec] = {
             "cloud-armor-false-positive",
         ),
     ),
+    "gke-runtime-telemetry-audit": AuditSpec(
+        "GKE Runtime Telemetry Audit",
+        "gke_runtime_telemetry_sop.md",
+        (
+            "cfs-quota-throttling",
+            "conntrack-table-exhaustion",
+            "ingress-502-drain",
+            "ephemeral-storage-eviction",
+            "ulimit-exhaustion",
+        ),
+    ),
 }
 
 SEVERITIES = ("critical", "major", "minor")
