@@ -234,6 +234,17 @@ AUDITS: dict[str, AuditSpec] = {
             "cloud-armor-false-positive",
         ),
     ),
+    "gce-compute-fleet-audit": AuditSpec(
+        "GCE Compute Engine and MIG Fleet Audit",
+        "gce_compute_fleet_sop.md",
+        (
+            "gce-startup-script-status",
+            "mig-autoscaler-flapping",
+            "ops-agent-health-degraded",
+            "sole-tenant-headroom-risk",
+            "orphaned-snapshot-schedule",
+        ),
+    ),
 }
 
 SEVERITIES = ("critical", "major", "minor")
