@@ -234,6 +234,17 @@ AUDITS: dict[str, AuditSpec] = {
             "cloud-armor-false-positive",
         ),
     ),
+    "gcp-recommender-audit": AuditSpec(
+        "GCP Recommender & Cloud Notifications Ingest",
+        "gcp_recommender_sop.md",
+        (
+            "iam-least-privilege",
+            "gke-upgrade-available",
+            "idle-resource-waste",
+            "container-rightsizing",
+            "security-posture-insight",
+        ),
+    ),
 }
 
 SEVERITIES = ("critical", "major", "minor")
