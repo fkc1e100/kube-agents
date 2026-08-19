@@ -239,9 +239,9 @@ AUDITS: dict[str, AuditSpec] = {
         "gke_runtime_telemetry_sop.md",
         (
             "cfs-quota-throttling",
-            "conntrack-table-exhaustion",
+            "conntrack-saturation",
             "ingress-502-drain",
-            "ephemeral-storage-eviction",
+            "ephemeral-growth-rate",
             "ulimit-exhaustion",
         ),
     ),
