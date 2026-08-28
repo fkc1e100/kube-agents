@@ -3,7 +3,8 @@ name: Release Build, Verification & Publish Pipeline
 on:
   push:
     tags:
-      - "v[0-9]*.[0-9]*.[0-9]*"
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: read
@@ -67,6 +68,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve Version
+        id: version
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION_NUM="${TAG_NAME#v}"
+          echo "version=${VERSION_NUM}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -82,47 +91,46 @@ jobs:
           helm lint charts/kube-agents "${SET_FLAGS[@]}"
           helm template test-release charts/kube-agents "${SET_FLAGS[@]}" > /dev/null
 
-      - name: Create Build Directory
-        run: mkdir -p build/dist
+      - name: Stage Tracked Files & Package Helm Chart
+        run: |
+          VERSION_NUM="${{ steps.version.outputs.version }}"
+          BUNDLE_PREFIX="kube-agents-${VERSION_NUM}"
+          BUILD_DIR="build/dist"
+          STAGE_DIR="/tmp/${BUNDLE_PREFIX}"
+
+          rm -rf "${BUILD_DIR}" "${STAGE_DIR}"
+          mkdir -p "${BUILD_DIR}"
+          mkdir -p "${STAGE_DIR}"
+
+          # 1. Package Helm Chart (both version and appVersion set to clean SemVer X.Y.Z)
+          helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${VERSION_NUM}" -d "${BUILD_DIR}"
+
+          # 2. Stage Tracked Files using git archive allowlist
+          git archive HEAD charts k8s-operator agents terraform README.md install.sh uninstall.sh upgrade.sh INSTALL.md LICENSE | tar -x -C "${STAGE_DIR}"
+
+          if [ -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml" ]; then
+            sed -i "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
+            sed -i "s/^appVersion:.*/appVersion: \"${VERSION_NUM}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
+          fi
 
       - name: Generate SPDX Software Bill of Materials (SBOM)
         uses: anchore/sbom-action@f325610c9f50a54015d37c8d16ca3b0cd261b6de # v0.17.9
         with:
-          path: ./
+          path: /tmp/kube-agents-${{ steps.version.outputs.version }}
           format: spdx-json
-          output-file: build/dist/kube-agents-${{ github.ref_name }}.spdx.json
+          output-file: build/dist/kube-agents-${{ steps.version.outputs.version }}.spdx.json
 
-      - name: Package Release Bundles (.tar.gz, .tgz, .zip, Helm & SHA256 Checksums)
+      - name: Create Archives & Checksums
         run: |
-          TAG_NAME="${GITHUB_REF#refs/tags/}"
-          VERSION_NUM="${TAG_NAME#v}"
-          BUNDLE_PREFIX="kube-agents-${TAG_NAME}"
+          VERSION_NUM="${{ steps.version.outputs.version }}"
+          BUNDLE_PREFIX="kube-agents-${VERSION_NUM}"
           BUILD_DIR="build/dist"
-          STAGE_DIR="/tmp/${BUNDLE_PREFIX}"
 
-          mkdir -p "${BUILD_DIR}"
-          mkdir -p "${STAGE_DIR}"
-
-          # 1. Package Helm Chart (version = 0.1.0, appVersion = v0.1.0 matching container tag)
-          helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${TAG_NAME}" -d "${BUILD_DIR}"
-
-          # 2. Stage Helm Charts, Operator Specs, Agents & Terraform Manifest Bundle
-          cp -r charts/ k8s-operator/ agents/ terraform/ README.md "${STAGE_DIR}/"
-          if [ -f "INSTALL.md" ]; then cp INSTALL.md "${STAGE_DIR}/"; fi
-          if [ -f "LICENSE" ]; then cp LICENSE "${STAGE_DIR}/"; fi
-          touch "${STAGE_DIR}/.release-bundle"
-          sed -i "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
-          sed -i "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml"
-
-          # 3. Create .tar.gz and .tgz web download bundles
           tar -czf "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" -C /tmp "${BUNDLE_PREFIX}"
           cp "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" "${BUILD_DIR}/${BUNDLE_PREFIX}.tgz"
-
-          # 4. Create .zip web download bundle
-          (cd /tmp && zip -r "${GITHUB_WORKSPACE}/${BUILD_DIR}/${BUNDLE_PREFIX}.zip" "${BUNDLE_PREFIX}")
-
-          # 5. Generate SHA256 checksums file
+          (cd /tmp && zip -q -r "${GITHUB_WORKSPACE}/${BUILD_DIR}/${BUNDLE_PREFIX}.zip" "${BUNDLE_PREFIX}")
           (cd "${BUILD_DIR}" && sha256sum * > checksums.txt)
+          rm -rf "/tmp/${BUNDLE_PREFIX}"
 
       - name: Upload Packaging Artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.6.0
@@ -143,6 +151,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Resolve Version
+        id: version
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION_NUM="${TAG_NAME#v}"
+          echo "version=${VERSION_NUM}" >> "$GITHUB_OUTPUT"
 
       - name: Create Ephemeral Kind Cluster
         uses: helm/kind-action@0025e74a8c7512023d06dc019c617aa3cf561fde # v1.10.0
@@ -177,15 +192,16 @@ jobs:
           esac
           EOF
           chmod +x "$RUNNER_TEMP/kube-agents-test-bin/gcloud"
-          for tool in gh; do
+          for tool in gh terraform; do
             printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNNER_TEMP/kube-agents-test-bin/$tool"
             chmod +x "$RUNNER_TEMP/kube-agents-test-bin/$tool"
           done
 
       - name: Test Non-Interactive Dry-Run Execution & Kind Server-Side Validation
         run: |
-          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./install.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1" --image-tag="${{ github.ref_name }}"
-          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./upgrade.sh --dry-run -y --upgrade-mode=full --project-id="release-project" --image-tag="${{ github.ref_name }}"
+          VERSION_NUM="${{ steps.version.outputs.version }}"
+          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./install.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1" --image-tag="${VERSION_NUM}"
+          PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./upgrade.sh --dry-run -y --upgrade-mode=full --project-id="release-project" --image-tag="${VERSION_NUM}"
           PATH="$RUNNER_TEMP/kube-agents-test-bin:$PATH" ./uninstall.sh --dry-run -y --project-id="release-project" --cluster-name="release-cluster" --region="us-central1"
           kubectl apply --server-side -f charts/kube-agents/crds/
           helm template release-gate charts/kube-agents --set platformAgent.harness.clusterName="release-cluster" --set platformAgent.harness.location="us-central1" --set platformAgent.harness.projectId="release-project" --set litellm.podMonitoring=false | kubectl apply --dry-run=server -f -
