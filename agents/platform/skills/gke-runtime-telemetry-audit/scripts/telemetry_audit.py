@@ -832,6 +832,12 @@ def audit_project_telemetry(project_id: str, workspace: str, skipped_clusters: l
     clusters = run_gcloud_json(["gcloud", "container", "clusters", "list", "--project", project_id, "--format=json"])
     if not isinstance(clusters, list):
         sys.stderr.write(f"Failed to list clusters in project {project_id} or no clusters found.\n")
+        skipped_clusters.append({
+            "name": "*",
+            "location": "*",
+            "project": project_id,
+            "reason": f"Failed to list GKE clusters in project {project_id} (permission denied or API unavailable)"
+        })
         return findings
 
     for c in clusters:
@@ -869,6 +875,15 @@ def main():
     all_findings = []
     skipped_clusters = []
     active_clusters = []
+
+    if not target_projects:
+        sys.stderr.write("No target projects resolved from CLI, environment, or gcloud.\n")
+        skipped_clusters.append({
+            "name": "*",
+            "location": "*",
+            "project": "unknown",
+            "reason": "No GCP project ID configured or resolved"
+        })
 
     for proj in target_projects:
         proj_findings = audit_project_telemetry(proj, workspace, skipped_clusters, active_clusters)
