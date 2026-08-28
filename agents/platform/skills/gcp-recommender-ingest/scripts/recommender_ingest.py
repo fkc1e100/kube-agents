@@ -64,11 +64,13 @@ RECOMMENDER_SPECS = {
     }
 }
 
-def run_cmd(cmd: list[str]) -> tuple[int, str, str]:
-    """Runs a shell command and returns (rc, stdout, stderr)."""
+def run_cmd(cmd: list[str], timeout: int = 60) -> tuple[int, str, str]:
+    """Runs a shell command with a timeout and returns (rc, stdout, stderr)."""
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
         return res.returncode, res.stdout, res.stderr
+    except subprocess.TimeoutExpired:
+        return -1, "", f"Command timed out after {timeout} seconds"
     except Exception as e:
         return -1, "", str(e)
 
@@ -173,9 +175,12 @@ def query_recommender(project_id: str, recommender_id: str, location: str) -> li
     res = run_gcloud_json(cmd)
     return res if isinstance(res, list) else []
 
-def audit_project_recommenders(project_id: str) -> list[dict]:
+def audit_project_recommenders(project_id: str, skipped_targets: list, active_targets: list) -> list[dict]:
     """Sweeps all supported Recommenders for target GCP project."""
     findings = []
+    checks_run = []
+    limitations = []
+
     zones, regions, cluster_locations = get_project_locations(project_id)
 
     for check_slug, spec in RECOMMENDER_SPECS.items():
@@ -196,6 +201,11 @@ def audit_project_recommenders(project_id: str) -> list[dict]:
             locations = cluster_locations
 
         for loc in locations:
+            cmd_str = f"gcloud recommender recommendations list --recommender={rec_id} --location={loc} --project={project_id} --format=json"
+            checks_run.append({
+                "check": check_slug,
+                "command": cmd_str
+            })
             recs = query_recommender(project_id, rec_id, loc)
             for rec in recs:
                 rec_name = rec.get("name", "").split("/")[-1]
@@ -236,6 +246,16 @@ def audit_project_recommenders(project_id: str) -> list[dict]:
                     }
                 })
 
+    target_scope = {
+        "name": f"project-{project_id}",
+        "location": "global",
+        "project": project_id,
+        "checks_run": checks_run
+    }
+    if limitations:
+        target_scope["limitations"] = "; ".join(limitations)
+    active_targets.append(target_scope)
+
     return findings
 
 def main():
@@ -246,22 +266,42 @@ def main():
 
     target_projects = get_target_projects(args.project_id)
     all_findings = []
+    skipped_targets = []
+    active_targets = []
+
+    if not target_projects:
+        sys.stderr.write("No target projects resolved from CLI, environment, or gcloud.\n")
+        skipped_targets.append({
+            "name": "project-unknown",
+            "location": "global",
+            "project": "unknown",
+            "reason": "No GCP project ID configured or resolved"
+        })
 
     for proj in target_projects:
-        proj_findings = audit_project_recommenders(proj)
+        proj_findings = audit_project_recommenders(proj, skipped_targets, active_targets)
         all_findings.extend(proj_findings)
+
+    findings_document = {
+        "audit": "gcp-recommender-audit",
+        "scope": {
+            "clusters": active_targets,
+            "skipped": skipped_targets
+        },
+        "findings": all_findings
+    }
 
     if args.output:
         try:
             os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-            with open(args.output, "w") as f:
-                json.dump(all_findings, f, indent=2)
-            print(f"Wrote {len(all_findings)} recommender findings across {len(target_projects)} projects to {args.output}")
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(findings_document, f, indent=2)
+            print(f"Wrote {len(all_findings)} recommender findings across {len(active_targets)} active projects to {args.output}")
         except Exception as e:
             sys.stderr.write(f"Failed to write output to {args.output}: {e}\n")
             sys.exit(1)
     else:
-        print(f"Collected {len(all_findings)} recommender findings across {len(target_projects)} projects")
+        print(f"Collected {len(all_findings)} recommender findings across {len(active_targets)} active projects")
 
 if __name__ == "__main__":
     main()
