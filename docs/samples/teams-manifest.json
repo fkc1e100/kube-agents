@@ -26,18 +26,10 @@
   "bots": [
     {
       "botId": "${TEAMS_APP_ID}",
-      "scopes": [
-        "personal",
-        "team",
-        "groupchat"
-      ],
+      "scopes": ["personal", "team", "groupchat"],
       "commandLists": [
         {
-          "scopes": [
-            "personal",
-            "team",
-            "groupchat"
-          ],
+          "scopes": ["personal", "team", "groupchat"],
           "commands": [
             {
               "title": "audit",
@@ -62,12 +54,6 @@
       "isNotificationOnly": false
     }
   ],
-  "permissions": [
-    "identity",
-    "message.read"
-  ],
-  "validDomains": [
-    "smba.trafficmanager.net",
-    "*.botframework.com"
-  ]
+  "permissions": ["identity", "message.read"],
+  "validDomains": ["smba.trafficmanager.net", "*.botframework.com"]
 }

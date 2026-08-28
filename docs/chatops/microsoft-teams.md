@@ -9,6 +9,7 @@ This guide walks through configuring and deploying the **Microsoft Teams ChatOps
 The Microsoft Teams integration allows cluster operators, SREs, and developers to interact with PlatformAgents directly from Microsoft Teams channels, group chats, or direct messages.
 
 ### Architecture Highlights
+
 - **Deterministic Gateway & Credential Isolation**: The agent harness runs in an isolated container without ambient Microsoft credentials. The `credential-proxy` sidecar handles Microsoft Entra ID token acquisition, OAuth lifecycle caching, and webhook activity queues.
 - **Single-Tenant Enterprise Lock-Down**: Optional verification of `TEAMS_TENANT_ID` ensures incoming activities are strictly rejected if they originate from outside your organization's Microsoft Entra ID tenant.
 - **User Authorization**: Granular allowlisting via `allowedUsers` (supporting Entra ID Object IDs and UserPrincipalName emails) or tenant-wide access via `allowAllUsers: true`.
@@ -21,12 +22,12 @@ The Microsoft Teams integration allows cluster operators, SREs, and developers t
 1. Navigate to the [Azure Portal](https://portal.azure.com/) -> **Azure Active Directory (Entra ID)** -> **App registrations**.
 2. Click **New registration**:
    - **Name**: `kube-agents-kage` (or your preferred agent name).
-   - **Supported account types**: Select *Accounts in this organizational directory only (Single tenant)* or *Multitenant*.
+   - **Supported account types**: Select _Accounts in this organizational directory only (Single tenant)_ or _Multitenant_.
 3. Note the **Application (client) ID** and **Directory (tenant) ID**.
 4. Under **Certificates & secrets**, create a new client secret and copy its value (`TEAMS_APP_PASSWORD`).
 5. Create an **Azure Bot** resource in the Azure Portal:
    - Bot handle: `kube-agents-bot`
-   - App Type: *Single Tenant* or *MultiTenant*
+   - App Type: _Single Tenant_ or _MultiTenant_
    - Microsoft App ID: Use the client ID created above.
    - **Messaging endpoint**: `https://<YOUR_INGRESS_DOMAIN>/api/v1/teams/events`
 6. In the Azure Bot blade, navigate to **Channels** and add **Microsoft Teams**.
@@ -47,7 +48,7 @@ type: Opaque
 stringData:
   TEAMS_APP_ID: "00000000-0000-0000-0000-000000000000"
   TEAMS_APP_PASSWORD: "your-azure-app-client-secret"
-  TEAMS_TENANT_ID: "11111111-1111-1111-1111-111111111111"  # Optional single-tenant lock-down
+  TEAMS_TENANT_ID: "11111111-1111-1111-1111-111111111111" # Optional single-tenant lock-down
 ```
 
 ---
