@@ -68,12 +68,28 @@ def get_target_projects(cli_project: str | None = None) -> list[str]:
 
     return sorted(list(projects))
 
-def audit_project_compute(project_id: str) -> list[dict]:
+def audit_project_compute(project_id: str, skipped_targets: list, active_targets: list) -> list[dict]:
     """Audits instances and snapshots in target project."""
     findings = []
+    checks_run = []
+    limitations = []
 
     # 1. Inspect running compute instances for startup script errors in serial port output
     instances = run_gcloud_json(["gcloud", "compute", "instances", "list", "--project", project_id, "--format=json"])
+    if instances is None:
+        skipped_targets.append({
+            "name": f"project-{project_id}",
+            "location": "global",
+            "project": project_id,
+            "reason": f"Failed to list compute instances in project {project_id} (permission denied or API unavailable)"
+        })
+        return findings
+
+    checks_run.append({
+        "check": "gce-startup-script-status",
+        "command": f"gcloud compute instances list --project={project_id} --format=json"
+    })
+
     if isinstance(instances, list):
         for inst in instances:
             name = inst.get("name", "")
@@ -131,6 +147,10 @@ def audit_project_compute(project_id: str) -> list[dict]:
 
         snapshots = run_gcloud_json(["gcloud", "compute", "snapshots", "list", "--project", project_id, "--format=json"])
         if isinstance(snapshots, list):
+            checks_run.append({
+                "check": "orphaned-snapshots",
+                "command": f"gcloud compute snapshots list --project={project_id} --format=json"
+            })
             now = datetime.datetime.now(datetime.timezone.utc)
             for snap in snapshots:
                 s_name = snap.get("name", "")
@@ -175,6 +195,16 @@ def audit_project_compute(project_id: str) -> list[dict]:
                             }
                         })
 
+    target_scope = {
+        "name": f"project-{project_id}",
+        "location": "global",
+        "project": project_id,
+        "checks_run": checks_run
+    }
+    if limitations:
+        target_scope["limitations"] = "; ".join(limitations)
+    active_targets.append(target_scope)
+
     return findings
 
 def main():
@@ -185,20 +215,41 @@ def main():
 
     target_projects = get_target_projects(args.project_id)
     all_findings = []
+    skipped_targets = []
+    active_targets = []
+
+    if not target_projects:
+        sys.stderr.write("No target projects resolved from CLI, environment, or gcloud.\n")
+        skipped_targets.append({
+            "name": "project-unknown",
+            "location": "global",
+            "project": "unknown",
+            "reason": "No GCP project ID configured or resolved"
+        })
 
     for proj in target_projects:
-        proj_findings = audit_project_compute(proj)
+        proj_findings = audit_project_compute(proj, skipped_targets, active_targets)
         all_findings.extend(proj_findings)
+
+    findings_document = {
+        "audit": "gce-compute-fleet-audit",
+        "scope": {
+            "clusters": active_targets,
+            "skipped": skipped_targets
+        },
+        "findings": all_findings
+    }
 
     if args.output:
         try:
             os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-            with open(args.output, "w") as f:
-                json.dump(all_findings, f, indent=2)
+            with open(args.output, "w", encoding="utf-8") as f:
+                json.dump(findings_document, f, indent=2)
         except Exception as e:
             sys.stderr.write(f"Failed to write output to {args.output}: {e}\n")
+            sys.exit(1)
 
-    print(f"Wrote {len(all_findings)} compute findings across {len(target_projects)} projects")
+    print(f"Wrote {len(all_findings)} compute findings across {len(active_targets)} active projects. {len(skipped_targets)} targets skipped.")
 
 if __name__ == "__main__":
     main()
