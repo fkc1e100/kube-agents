@@ -24,6 +24,8 @@ import os
 import re
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 # Append global scripts path to allow importing the shared helpers
@@ -42,6 +44,30 @@ BARE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 PROTECTED_BRANCHES = {"main", "master", "production"}
 
 OWNER = "submit-suggestion"
+
+
+def fetch_hermes_session_tokens(session_id: str, timeout: float = 3.0) -> dict | None:
+    """Attempt to fetch token usage from Hermes API server for the given session ID."""
+    endpoint = os.environ.get("HERMES_API_ENDPOINT") or "http://hermes-api-server.kube-system.svc.cluster.local:8080"
+    if not endpoint.startswith("http"):
+        endpoint = f"http://{endpoint}"
+    quoted = urllib.parse.quote(session_id, safe="")
+    url = f"{endpoint.rstrip('/')}/api/sessions/{quoted}"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            input_tokens = data.get("input_tokens")
+            output_tokens = data.get("output_tokens")
+            if input_tokens is not None or output_tokens is not None:
+                return {
+                    "input_tokens": int(input_tokens or 0),
+                    "output_tokens": int(output_tokens or 0),
+                    "total_tokens": int((input_tokens or 0) + (output_tokens or 0)),
+                }
+    except Exception as exc:
+        log(f"Hermes session token lookup skipped: {exc}")
+    return None
 
 
 def check_branch(branch_name: str) -> str:
@@ -185,19 +211,42 @@ def handle_submit(args) -> int:
     validate_repo(repo)
     refresh_git_credentials(repo)
 
-    tokens = getattr(args, "tokens", None) or os.environ.get("HERMES_SESSION_TOKENS")
+    input_tokens = getattr(args, "input_tokens", None)
+    output_tokens = getattr(args, "output_tokens", None)
+    tokens_raw = getattr(args, "tokens", None) or os.environ.get("HERMES_SESSION_TOKENS")
+
+    # If numeric tokens were not passed via CLI, try auto-sourcing from active Hermes session
+    if input_tokens is None and output_tokens is None and not tokens_raw:
+        session_id = os.environ.get("HERMES_SESSION_ID")
+        if session_id:
+            fetched = fetch_hermes_session_tokens(session_id)
+            if fetched:
+                input_tokens = fetched.get("input_tokens")
+                output_tokens = fetched.get("output_tokens")
+
     elapsed = getattr(args, "elapsed", None) or os.environ.get("HERMES_SESSION_ELAPSED")
     model = getattr(args, "model", None) or os.environ.get("HERMES_MODEL")
     trace_id = getattr(args, "trace_id", None) or os.environ.get("OTEL_TRACE_ID")
     steps = getattr(args, "steps", None) or os.environ.get("HERMES_TOOL_STEPS")
 
+    token_display = None
+    if input_tokens is not None and output_tokens is not None:
+        total = input_tokens + output_tokens
+        token_display = f"{total:,} ({input_tokens:,} input / {output_tokens:,} output)"
+    elif input_tokens is not None:
+        token_display = f"{input_tokens:,} input"
+    elif output_tokens is not None:
+        token_display = f"{output_tokens:,} output"
+    elif tokens_raw:
+        token_display = str(tokens_raw)
+
     body = args.body
-    if tokens or elapsed or model or trace_id or steps:
+    if token_display or elapsed or model or trace_id or steps:
         telemetry = ["\n\n---", "### ⏱️ Telemetry & SLA Metrics"]
         if elapsed:
             telemetry.append(f"- **Discovery-to-PR Duration:** `{elapsed}`")
-        if tokens:
-            telemetry.append(f"- **Token Consumption:** `{tokens}`")
+        if token_display:
+            telemetry.append(f"- **Token Consumption:** `{token_display}`")
         if model:
             telemetry.append(f"- **AI Model:** `{model}`")
         if steps:
@@ -207,13 +256,28 @@ def handle_submit(args) -> int:
 
         # Machine-readable JSON comment for automated downstream CI/CD
         meta = {}
-        if tokens: meta["tokens"] = tokens
-        if elapsed: meta["elapsed"] = elapsed
-        if model: meta["model"] = model
-        if steps: meta["steps"] = steps
-        if trace_id: meta["trace_id"] = trace_id
-        telemetry.append(f"\n<!-- kube-agents-telemetry: {json.dumps(meta)} -->")
+        if input_tokens is not None:
+            meta["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            meta["output_tokens"] = output_tokens
+        if input_tokens is not None and output_tokens is not None:
+            meta["total_tokens"] = input_tokens + output_tokens
+        elif tokens_raw and not meta:
+            meta["tokens"] = tokens_raw
 
+        if elapsed:
+            meta["elapsed"] = elapsed
+        if model:
+            meta["model"] = model
+        if steps:
+            try:
+                meta["steps"] = int(steps)
+            except (ValueError, TypeError):
+                meta["steps"] = steps
+        if trace_id:
+            meta["trace_id"] = trace_id
+
+        telemetry.append(f"\n<!-- kube-agents-telemetry: {json.dumps(meta, sort_keys=True)} -->")
         body += "\n" + "\n".join(telemetry)
 
     push_branch(branch, workspace)
@@ -350,9 +414,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     submit.add_argument("--repo", default=None, help="Target repository as owner/name")
     submit.add_argument(
+        "--input-tokens",
+        type=int,
+        default=None,
+        help="Input / prompt tokens consumed (e.g. 14820)",
+    )
+    submit.add_argument(
+        "--output-tokens",
+        type=int,
+        default=None,
+        help="Output / completion tokens generated (e.g. 1240)",
+    )
+    submit.add_argument(
         "--tokens",
         default=None,
-        help="Token usage metrics (e.g. '16,060 tokens' or '14,820 prompt / 1,240 completion')",
+        help="Token usage metrics summary string (e.g. '16,060 tokens' or '14,820 prompt / 1,240 completion')",
     )
     submit.add_argument(
         "--elapsed",
@@ -372,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument(
         "--steps",
         default=None,
-        help="Tool execution step count during session (e.g. '4 tool calls')",
+        help="Tool execution step count during session (e.g. '4 tool calls' or 4)",
     )
     return parser
 

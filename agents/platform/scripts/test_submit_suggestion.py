@@ -622,6 +622,93 @@ class TestArgvCompatibility(unittest.TestCase):
                 self.assertEqual(submit_suggestion.normalise_argv(argv), argv)
 
 
+class TestTelemetryMetrics(SubmitSuggestionTestCase):
+    def test_no_telemetry_leaves_body_byte_identical(self):
+        payload = self.prepare()
+        self.commit(payload["workspace"])
+        original_body = "This is a clean suggestion body without metrics."
+        self.submit(payload["branch"], payload["workspace"], body=original_body)
+
+        create_calls = [c for c in self.gh_calls if c[0][1:3] == ["pr", "create"]]
+        self.assertEqual(len(create_calls), 1)
+        argv = create_calls[0][0]
+        body_idx = argv.index("--body") + 1
+        self.assertEqual(argv[body_idx], original_body)
+
+    def test_explicit_telemetry_flags_embed_markdown_and_json_comment(self):
+        payload = self.prepare()
+        self.commit(payload["workspace"])
+        original_body = "Suggestion description."
+
+        args = [
+            "submit",
+            "--branch", payload["branch"],
+            "--title", "title",
+            "--body", original_body,
+            "--workspace", str(payload["workspace"]),
+            "--repo", "acme/fleet",
+            "--input-tokens", "14820",
+            "--output-tokens", "1240",
+            "--elapsed", "45s",
+            "--model", "gemini-3.5-flash",
+            "--steps", "4",
+            "--trace-id", "0af7651916cd43dd8448eb211c80319c",
+        ]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            submit_suggestion.dispatch(args)
+
+        create_calls = [c for c in self.gh_calls if c[0][1:3] == ["pr", "create"]]
+        self.assertEqual(len(create_calls), 1)
+        argv = create_calls[0][0]
+        submitted_body = argv[argv.index("--body") + 1]
+
+        self.assertIn("### ⏱️ Telemetry & SLA Metrics", submitted_body)
+        self.assertIn("- **Discovery-to-PR Duration:** `45s`", submitted_body)
+        self.assertIn("- **Token Consumption:** `16,060 (14,820 input / 1,240 output)`", submitted_body)
+        self.assertIn("- **AI Model:** `gemini-3.5-flash`", submitted_body)
+        self.assertIn("- **Tool Call Executions:** `4`", submitted_body)
+        self.assertIn("- **OpenTelemetry Trace ID:** `0af7651916cd43dd8448eb211c80319c`", submitted_body)
+
+        # Extract and parse JSON comment
+        prefix = "<!-- kube-agents-telemetry: "
+        self.assertIn(prefix, submitted_body)
+        json_part = submitted_body.split(prefix, 1)[1].split(" -->", 1)[0]
+        meta = json.loads(json_part)
+        self.assertEqual(meta["input_tokens"], 14820)
+        self.assertEqual(meta["output_tokens"], 1240)
+        self.assertEqual(meta["total_tokens"], 16060)
+        self.assertEqual(meta["elapsed"], "45s")
+        self.assertEqual(meta["model"], "gemini-3.5-flash")
+        self.assertEqual(meta["steps"], 4)
+        self.assertEqual(meta["trace_id"], "0af7651916cd43dd8448eb211c80319c")
+
+    def test_hermes_session_tokens_auto_sourcing(self):
+        payload = self.prepare()
+        self.commit(payload["workspace"])
+
+        with patch.object(
+            submit_suggestion,
+            "fetch_hermes_session_tokens",
+            return_value={"input_tokens": 5000, "output_tokens": 250, "total_tokens": 5250},
+        ):
+            with patch.dict(os.environ, {"HERMES_SESSION_ID": "sess-test-999"}):
+                self.submit(payload["branch"], payload["workspace"], body="Body text")
+
+        create_calls = [c for c in self.gh_calls if c[0][1:3] == ["pr", "create"]]
+        self.assertEqual(len(create_calls), 1)
+        argv = create_calls[0][0]
+        submitted_body = argv[argv.index("--body") + 1]
+
+        self.assertIn("- **Token Consumption:** `5,250 (5,000 input / 250 output)`", submitted_body)
+        prefix = "<!-- kube-agents-telemetry: "
+        json_part = submitted_body.split(prefix, 1)[1].split(" -->", 1)[0]
+        meta = json.loads(json_part)
+        self.assertEqual(meta["input_tokens"], 5000)
+        self.assertEqual(meta["output_tokens"], 250)
+        self.assertEqual(meta["total_tokens"], 5250)
+
+
 class _GhStub:
     """Stand in for the `subprocess` module inside submit_suggestion.
 

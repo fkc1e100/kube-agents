@@ -135,16 +135,21 @@ Please review the code diffs and merge this PR to trigger the GitOps CI/CD rollo
 
 #### Optional Telemetry & SLA Flags
 
-When exact runtime metrics are provided by the harness or session environment variables (`HERMES_SESSION_TOKENS`, `HERMES_SESSION_ELAPSED`, `HERMES_MODEL`, `OTEL_TRACE_ID`), `submit_suggestion.py` automatically injects telemetry summaries into the PR. You may also pass explicit flags if exact numbers are known:
+When exact runtime metrics are provided by the harness or session environment variables (`HERMES_SESSION_ID`, `HERMES_SESSION_TOKENS`, `HERMES_SESSION_ELAPSED`, `HERMES_MODEL`, `HERMES_TOOL_STEPS`, `OTEL_TRACE_ID`), `submit_suggestion.py` automatically injects telemetry summaries and machine-readable JSON metadata into the PR description. When `HERMES_SESSION_ID` is present, token consumption is queried directly from the Hermes API server (`GET /api/sessions/<id>`). You may also pass explicit flags if exact numbers are known:
 
 ```bash
-  --tokens "14820" \
+  --input-tokens 14820 \
+  --output-tokens 1240 \
   --elapsed "49s" \
   --model "gemini-3.5-flash" \
+  --steps 4 \
   --trace-id "<otel_trace_id>"
 ```
 
-**CRITICAL ACCURACY RULE:** Never guess, estimate, or fabricate token counts or SLA durations. Note that `HERMES_SESSION_TOKENS` and related telemetry environment variables are reserved for future harness exporter integration and are currently unpopulated by default. If exact metrics are unmeasured or unknown, omit these flags—`submit_suggestion.py` gracefully omits the telemetry section when data is absent.
+> [!NOTE]
+> **Scope & Coverage:** This telemetry is attached exclusively to one-off suggestion PRs generated via `submit_suggestion.py`. Scheduled fleet audit runs generate their own ledger issues and remediation PRs via the `fleet-audit` harness.
+
+**CRITICAL ACCURACY RULE:** Never guess, estimate, or fabricate token counts or SLA durations. If exact metrics are unmeasured or unknown, omit these flags—`submit_suggestion.py` gracefully omits the telemetry section when data is absent.
 
 `--lease` is not optional bookkeeping. `prepare` and `submit` are separate
 processes, and outside a kanban card there is no session identity for `submit`
