@@ -105,6 +105,10 @@ class TestTeamsRelayPatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plain_payload["text"], "Plain notification")
         self.assertNotIn("attachments", plain_payload)
 
+    def test_install_noop_without_relay_url(self):
+        with mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": ""}):
+            teams_relay_patch.install()
+
     @mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": "http://127.0.0.1:8642"})
     async def test_teams_relay_adapter_lifecycle_and_message_processing(self):
         from gateway.platform_registry import PlatformRegistry
@@ -146,6 +150,104 @@ class TestTeamsRelayPatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "run fleet audit")
         self.assertEqual(meta["activityId"], "act-12345")
 
+    @mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": "http://127.0.0.1:8642"})
+    async def test_send_and_send_typing(self):
+        from gateway.platform_registry import PlatformRegistry
+
+        teams_relay_patch.install()
+        registry = PlatformRegistry()
+        adapter = registry.create_adapter("teams")
+
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = json.dumps({"id": "msg-1"}).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            res = await adapter.send(
+                chat_id="conv-123",
+                message="Fleet audit passing",
+                thread_id="reply-thread-1",
+                metadata={"title": "Audit Pass", "serviceUrl": "https://smba.trafficmanager.net/teams/"},
+            )
+            self.assertEqual(res, {"id": "msg-1"})
+
+            # Send typing
+            await adapter.send_typing("conv-123", "https://smba.trafficmanager.net/teams/")
+
+    @mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": "http://127.0.0.1:8642"})
+    async def test_unauthorized_tenant_rejected(self):
+        from gateway.platform_registry import PlatformRegistry
+
+        teams_relay_patch.install()
+        registry = PlatformRegistry()
+        adapter = registry.create_adapter("teams")
+        adapter.configured_tenant_id = "allowed-tenant-only"
+
+        activity = {
+            "type": "message",
+            "channelData": {"tenant": {"id": "unauthorized-tenant"}},
+            "from": {"id": "user-1"},
+            "conversation": {"id": "conv-1"},
+        }
+        handled = []
+        adapter.set_handler(lambda c, t, m: handled.append(t))
+        await adapter._process_activity(activity)
+        self.assertEqual(len(handled), 0)
+
+    @mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": "http://127.0.0.1:8642"})
+    async def test_unauthorized_user_rejected_and_warned(self):
+        from gateway.platform_registry import PlatformRegistry
+
+        teams_relay_patch.install()
+        registry = PlatformRegistry()
+        adapter = registry.create_adapter("teams")
+        adapter.allow_all_users = False
+        adapter.allowed_users = {"allowed-admin@domain.com"}
+
+        activity = {
+            "type": "message",
+            "from": {"id": "user-unknown", "name": "Eve", "email": "eve@domain.com"},
+            "conversation": {"id": "conv-2"},
+            "serviceUrl": "https://smba.trafficmanager.net/teams/",
+        }
+
+        with mock.patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = mock.MagicMock()
+            mock_resp.read.return_value = json.dumps({"status": "ok"}).encode("utf-8")
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            await adapter._process_activity(activity)
+            self.assertTrue(mock_urlopen.called)
+
+    @mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": "http://127.0.0.1:8642"})
+    async def test_non_message_ignored(self):
+        from gateway.platform_registry import PlatformRegistry
+
+        teams_relay_patch.install()
+        registry = PlatformRegistry()
+        adapter = registry.create_adapter("teams")
+
+        handled = []
+        adapter.set_handler(lambda c, t, m: handled.append(t))
+        await adapter._process_activity({"type": "conversationUpdate"})
+        self.assertEqual(len(handled), 0)
+
+    @mock.patch.dict(os.environ, {"TEAMS_RELAY_URL": "http://127.0.0.1:8642"})
+    async def test_connect_and_disconnect(self):
+        from gateway.platform_registry import PlatformRegistry
+
+        teams_relay_patch.install()
+        registry = PlatformRegistry()
+        adapter = registry.create_adapter("teams")
+
+        self.assertTrue(await adapter.connect())
+        self.assertTrue(adapter._running)
+        await adapter.disconnect()
+        self.assertFalse(adapter._running)
+
 
 if __name__ == "__main__":
     unittest.main()
+
