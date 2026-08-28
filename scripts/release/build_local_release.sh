@@ -11,12 +11,17 @@ STAGE_BASE="$(mktemp -d)"
 STAGE_DIR="${STAGE_BASE}/${BUNDLE_PREFIX}"
 
 # Verify required prerequisite tools early
-for req_cmd in make go helm tar zip; do
+for req_cmd in make go helm tar zip git; do
   if ! command -v "$req_cmd" &>/dev/null; then
     echo "❌ Missing required prerequisite tool: $req_cmd" >&2
     exit 1
   fi
 done
+
+if ! command -v sha256sum &>/dev/null && ! command -v shasum &>/dev/null; then
+  echo "❌ Missing required prerequisite tool: sha256sum or shasum" >&2
+  exit 1
+fi
 
 echo "============================================================"
 echo "🚀 LOCAL RELEASE BUILD ENGINE: Packaging ${TAG_NAME}"
@@ -77,31 +82,19 @@ helm template test-release charts/kube-agents "${SET_FLAGS[@]}" > /dev/null
 echo "2.2 Packaging Helm Chart..."
 helm package charts/kube-agents --version "${VERSION_NUM}" --app-version "${TAG_NAME}" -d "${BUILD_DIR}"
 
-echo "2.3 Staging Release Source & Manifest Bundle..."
-mkdir -p "${STAGE_DIR}"
-for item in charts k8s-operator agents terraform README.md install.sh uninstall.sh upgrade.sh INSTALL.md LICENSE; do
-  if [ -e "${REPO_ROOT}/${item}" ]; then
-    cp -r "${REPO_ROOT}/${item}" "${STAGE_DIR}/"
-  fi
-done
-rm -rf "${STAGE_DIR}/k8s-operator/bin" 2>/dev/null || true
-find "${STAGE_DIR}" -type f \( -name "vars.sh" -o -name ".env*" -o -name "*.log" -o -name "*.tmp" \) -exec rm -f {} + 2>/dev/null || true
-find "${STAGE_DIR}/terraform" "${STAGE_DIR}/k8s-operator" -type d -name ".terraform" -exec rm -rf {} + 2>/dev/null || true
-find "${STAGE_DIR}/terraform" "${STAGE_DIR}/k8s-operator" -type f \( -name "*.tfstate*" -o -name "*.tfvars" -o -name ".terraform.lock.hcl" \) -exec rm -f {} + 2>/dev/null || true
-sed -i.bak "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
-sed -i.bak "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
+echo "2.3 Staging Release Source & Manifest Bundle via git archive allowlist..."
+# Extract strictly committed/tracked files for release distribution
+git archive HEAD charts k8s-operator agents terraform README.md install.sh uninstall.sh upgrade.sh INSTALL.md LICENSE | tar -x -C "${STAGE_DIR}"
 
-echo "2.4 Creating Web Download Archives (.tar.gz, .tgz, .zip)..."
-tar -czf "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" -C "${STAGE_BASE}" "${BUNDLE_PREFIX}"
-cp "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" "${BUILD_DIR}/${BUNDLE_PREFIX}.tgz"
-(cd "${STAGE_BASE}" && zip -q -r "${BUILD_DIR}/${BUNDLE_PREFIX}.zip" "${BUNDLE_PREFIX}")
-chmod -R u+w "${STAGE_BASE}" 2>/dev/null || true
-rm -rf "${STAGE_BASE}"
+if [ -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml" ]; then
+  sed -i.bak "s/^version:.*/version: ${VERSION_NUM}/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
+  sed -i.bak "s/^appVersion:.*/appVersion: \"${TAG_NAME}\"/" "${STAGE_DIR}/charts/kube-agents/Chart.yaml" && rm -f "${STAGE_DIR}/charts/kube-agents/Chart.yaml.bak"
+fi
 
-echo "2.5 Generating SPDX Software Bill of Materials (SBOM)..."
+echo "2.4 Generating SPDX Software Bill of Materials (SBOM)..."
 if command -v syft &>/dev/null; then
-  syft dir:. -o spdx-json="${BUILD_DIR}/${BUNDLE_PREFIX}.spdx.json"
-  echo "✓ Generated SPDX SBOM via syft."
+  syft "dir:${STAGE_DIR}" -o spdx-json="${BUILD_DIR}/${BUNDLE_PREFIX}.spdx.json"
+  echo "✓ Generated SPDX SBOM for staged release bundle via syft."
 else
   cat <<EOF > "${BUILD_DIR}/${BUNDLE_PREFIX}.spdx.json"
 {
@@ -118,6 +111,13 @@ else
 EOF
   echo "✓ Generated fallback SPDX JSON manifest."
 fi
+
+echo "2.5 Creating Web Download Archives (.tar.gz, .tgz, .zip)..."
+tar -czf "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" -C "${STAGE_BASE}" "${BUNDLE_PREFIX}"
+cp "${BUILD_DIR}/${BUNDLE_PREFIX}.tar.gz" "${BUILD_DIR}/${BUNDLE_PREFIX}.tgz"
+(cd "${STAGE_BASE}" && zip -q -r "${BUILD_DIR}/${BUNDLE_PREFIX}.zip" "${BUNDLE_PREFIX}")
+chmod -R u+w "${STAGE_BASE}" 2>/dev/null || true
+rm -rf "${STAGE_BASE}"
 
 echo "2.6 Computing SHA-256 Checksums..."
 cd "${BUILD_DIR}"
@@ -166,7 +166,7 @@ esac
 EOF
 chmod +x "${TEST_BIN_DIR}/gcloud"
 
-for tool in kubectl gh helm; do
+for tool in kubectl gh helm terraform; do
   printf '#!/usr/bin/env bash\nexit 0\n' > "${TEST_BIN_DIR}/$tool"
   chmod +x "${TEST_BIN_DIR}/$tool"
 done
