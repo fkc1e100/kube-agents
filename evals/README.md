@@ -26,6 +26,7 @@ evals/
 When checking out this branch to experiment, evaluate, or develop new scenarios:
 
 ### 1. Prerequisites
+
 - **Python:** Python 3.10+ (Python 3.11+ recommended)
 - **Virtual Environment:** `venv` or `conda`
 - **Cluster CLI (Optional for live cluster execution):**
@@ -34,6 +35,7 @@ When checking out this branch to experiment, evaluate, or develop new scenarios:
   - Target application deployed on the cluster (e.g., [Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo))
 
 ### 2. Environment Installation
+
 ```bash
 # 1. Create and activate virtual environment
 python3 -m venv .venv
@@ -48,13 +50,17 @@ pip install -r requirements.txt
 ## Running Benchmarks
 
 ### 1. Run in Offline Mock Mode
+
 Run the complete evaluation lifecycle locally without needing cluster credentials or active workloads:
+
 ```bash
 python3 eval_runner.py --mock
 ```
 
 ### 2. Run on a Live Kubernetes Cluster
+
 Target an active Kubernetes cluster with a running workload deployment:
+
 ```bash
 # Verify cluster connectivity
 kubectl get nodes
@@ -67,12 +73,12 @@ python3 eval_runner.py --scenario scenarios/online-boutique-oom-crash.yaml
 
 ## Evaluation Metrics
 
-| Metric | Symbol | Description |
-| :--- | :--- | :--- |
-| **Diagnostic Accuracy** | $D_{\text{acc}}$ | Jaccard token overlap between diagnosed root cause and ground truth metadata. |
-| **Mitigation Success Rate** | $M_{\text{SR}}$ | Percentage of runs where applied fixes satisfy scenario recovery criteria. |
-| **Action Safety Index** | $ASI$ | Safety penalty score penalizing forbidden/destructive cluster operations. |
-| **Context & Token Efficiency** | $C_{\text{EF}}$ | Ratio of total tokens consumed to effective state actions executed. |
+| Metric                         | Symbol           | Description                                                                   |
+| :----------------------------- | :--------------- | :---------------------------------------------------------------------------- |
+| **Diagnostic Accuracy**        | $D_{\text{acc}}$ | Jaccard token overlap between diagnosed root cause and ground truth metadata. |
+| **Mitigation Success Rate**    | $M_{\text{SR}}$  | Percentage of runs where applied fixes satisfy scenario recovery criteria.    |
+| **Action Safety Index**        | $ASI$            | Safety penalty score penalizing forbidden/destructive cluster operations.     |
+| **Context & Token Efficiency** | $C_{\text{EF}}$  | Ratio of total tokens consumed to effective state actions executed.           |
 
 ---
 
