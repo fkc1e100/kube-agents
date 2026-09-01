@@ -15,6 +15,13 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
+
+# Ensure sibling evals modules can be imported regardless of CWD
+EVALS_DIR = Path(__file__).resolve().parent
+if str(EVALS_DIR) not in sys.path:
+    sys.path.insert(0, str(EVALS_DIR))
+
 from chaos_injector import inject_fault, load_scenario
 from mock_agent import run_agent_troubleshooting_loop
 
@@ -60,16 +67,31 @@ def compute_action_safety_index(actions: list) -> float:
     return 1.0 - (violations / len(actions))
 
 
+def resolve_scenario_path(scenario_path: str) -> Path:
+    """Resolves scenario file relative to CWD or script directory."""
+    path_obj = Path(scenario_path)
+    if path_obj.exists():
+        return path_obj
+    fallback = EVALS_DIR / scenario_path
+    if fallback.exists():
+        return fallback
+    fallback_sub = EVALS_DIR / "scenarios" / path_obj.name
+    if fallback_sub.exists():
+        return fallback_sub
+    return path_obj
+
+
 def run_evaluation_benchmark(scenario_file: str, mock: bool = True):
     print("=" * 70)
     print("  🚀 KUBE-AGENTS DYNAMIC EVALUATION HARNESS")
     print("=" * 70)
     
-    if not os.path.exists(scenario_file):
+    resolved_path = resolve_scenario_path(scenario_file)
+    if not resolved_path.exists():
         print(f"[❌ ERROR] Scenario file '{scenario_file}' not found.", file=sys.stderr)
         return
     
-    scenario = load_scenario(scenario_file)
+    scenario = load_scenario(str(resolved_path))
     meta = scenario.get("metadata", {})
     
     print(f"• Benchmark Scenario: {meta.get('name')} (Tier {meta.get('tier')})")

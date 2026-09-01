@@ -8,8 +8,10 @@ official Kubernetes Python API, with built-in '--mock' support for local testing
 """
 
 import argparse
+import os
 import sys
 import time
+from pathlib import Path
 import yaml
 
 try:
@@ -21,7 +23,18 @@ except ImportError:
 
 def load_scenario(scenario_path: str) -> dict:
     """Loads and validates a ScenarioSpec YAML file."""
-    with open(scenario_path, "r", encoding="utf-8") as f:
+    path_obj = Path(scenario_path)
+    if not path_obj.exists():
+        # Fallback to checking relative to the script directory
+        fallback = Path(__file__).resolve().parent / scenario_path
+        if fallback.exists():
+            path_obj = fallback
+        else:
+            fallback_scenario = Path(__file__).resolve().parent / "scenarios" / path_obj.name
+            if fallback_scenario.exists():
+                path_obj = fallback_scenario
+
+    with open(path_obj, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
