@@ -15,9 +15,20 @@ evals/
 ├── eval_runner.py            # Master evaluation orchestrator and metric calculator
 ├── chaos_injector.py         # Fault injection module (Kubernetes API & Mock)
 ├── mock_agent.py             # Reference agent simulation for testing
+├── sandbox/                  # Automated cloud sandbox environments
+│   └── gcp/                  # Ephemeral GKE research sandbox & provisioning scripts
 └── scenarios/                # Declarative benchmark scenario specifications
     └── online-boutique-oom-crash.yaml
 ```
+
+---
+
+## Ephemeral Research Sandbox (GCP / GKE)
+
+For researchers conducting live cluster experiments without pre-existing Kubernetes infrastructure, see the automated [GCP Ephemeral Research Sandbox](sandbox/gcp/README.md):
+
+- **Automated Cluster Provisioning:** `./evals/sandbox/gcp/provision_sandbox.sh --project-id YOUR_PROJECT_ID`
+- **Clean Teardown:** `./evals/sandbox/gcp/teardown_sandbox.sh --project-id YOUR_PROJECT_ID --yes`
 
 ---
 
@@ -31,7 +42,7 @@ When checking out this branch to experiment, evaluate, or develop new scenarios:
 - **Virtual Environment:** `venv` or `conda`
 - **Cluster CLI (Optional for live cluster execution):**
   - `kubectl` CLI (v1.28+)
-  - A local or remote Kubernetes cluster (GKE, Minikube, Kind)
+  - A local or remote Kubernetes cluster (e.g. provisioned via `evals/sandbox/gcp/`)
   - Target application deployed on the cluster (e.g., [Online Boutique](https://github.com/GoogleCloudPlatform/microservices-demo))
 
 ### 2. Environment Installation
