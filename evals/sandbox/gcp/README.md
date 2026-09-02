@@ -34,7 +34,7 @@ The GCP Ephemeral Sandbox solves this by providing:
 |  | Evaluation Harness (`evals/eval_runner.py`)                       |  |
 |  | - Dynamic Chaos Injection (`evals/chaos_injector.py`)             |  |
 |  | - Agent Execution & Artifact Capture                              |  |
-|  | - Quantitative Scoring (MTTR, RCA Jaccard Similarity, Safety)     |  |
+|  | - Quantitative Scoring (F1_diag, M_SR, ASI, C_EF)                |  |
 |  +-------------------------------------------------------------------+  |
 +-------------------------------------------------------------------------+
 ```
@@ -106,14 +106,11 @@ The script will:
 Once the cluster is ready, run evaluation scenarios using the dynamic benchmark harness:
 
 ```bash
-# Run a specific benchmark scenario (e.g. OOMKilled triage)
-python evals/eval_runner.py --scenario scenario_01_oom_triage
+# Run against live scenario
+python evals/eval_runner.py --scenario evals/scenarios/online-boutique-oom-crash.yaml
 
 # Run in synthetic mock mode (offline verification)
-python evals/eval_runner.py --scenario scenario_01_oom_triage --mock
-
-# Run all benchmark scenarios and generate report
-python evals/eval_runner.py --report-dir evals/results/
+python evals/eval_runner.py --scenario evals/scenarios/online-boutique-oom-crash.yaml --mock
 ```
 
 ### Step 4: Teardown and Release Cloud Resources
