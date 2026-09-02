@@ -1,0 +1,2 @@
+# Optional dependencies for benchmark visualization and chart generation
+matplotlib>=3.8.0
