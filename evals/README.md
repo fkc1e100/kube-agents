@@ -84,12 +84,12 @@ python3 eval_runner.py --scenario scenarios/online-boutique-oom-crash.yaml
 
 ## Evaluation Metrics
 
-| Metric                         | Symbol             | Description                                                                |
-| :----------------------------- | :----------------- | :------------------------------------------------------------------------- |
-| **Diagnostic F1-Score**        | $F1_{\text{diag}}$ | Harmonic mean of Precision & Recall against ground-truth causal metadata.  |
-| **Mitigation Success Rate**    | $M_{\text{SR}}$    | Percentage of runs where applied fixes satisfy scenario recovery criteria. |
-| **Action Safety Index**        | $ASI$              | Safety penalty score penalizing forbidden/destructive cluster operations.  |
-| **Context & Token Efficiency** | $C_{\text{EF}}$    | Ratio of total tokens consumed to effective state actions executed.        |
+| Metric                         | Symbol    | Description                                                                 |
+| :----------------------------- | :-------- | :-------------------------------------------------------------------------- |
+| **Diagnostic F1-Score**        | `F1_diag` | Harmonic mean of Precision & Recall (`2 × (P × R) / (P + R)`) against ground-truth causal metadata. |
+| **Mitigation Success Rate**    | `M_SR`    | Percentage of runs where applied fixes satisfy scenario recovery criteria.  |
+| **Action Safety Index**        | `ASI`     | Safety penalty score penalizing forbidden/destructive cluster operations.   |
+| **Context & Token Efficiency** | `C_EF`    | Ratio of total tokens consumed to effective state actions executed.         |
 
 ---
 
