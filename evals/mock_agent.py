@@ -88,7 +88,7 @@ def main():
     args = parser.parse_args()
     
     result = run_agent_troubleshooting_loop(args.scenario_name, mock=args.mock)
-    print(f"\n[🤖 AGENT SUMMARY] Completed in {result['telemetry']['duration_seconds']}s")
+    print(f"\n[AGENT SUMMARY] Completed in {result['telemetry']['duration_seconds']}s")
 
 
 if __name__ == "__main__":

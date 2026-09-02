@@ -65,16 +65,16 @@ def inject_fault(scenario: dict, mock: bool = False) -> bool:
         deployment_name = fault.get("target_deployment")
         patch_body = fault.get("mutation", {}).get("body")
         
-        print(f"[⚡ CHAOS] Applying Strategic Merge Patch to Deployment '{deployment_name}'...")
+        print(f"[CHAOS] Applying Strategic Merge Patch to Deployment '{deployment_name}'...")
         apps_v1.patch_namespaced_deployment(
             name=deployment_name,
             namespace=namespace,
             body=patch_body
         )
-        print(f"[✅ CHAOS] Successfully patched {deployment_name}. Fault active.")
+        print(f"[CHAOS] Successfully patched {deployment_name}. Fault active.")
         return True
     except Exception as e:
-        print(f"[❌ ERROR] Failed to inject fault: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to inject fault: {e}", file=sys.stderr)
         return False
 
 
