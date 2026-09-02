@@ -26,10 +26,12 @@ from chaos_injector import inject_fault, load_scenario
 from mock_agent import run_agent_troubleshooting_loop
 
 
-def compute_jaccard_diagnostic_accuracy(ground_truth: str, agent_diagnosis: str) -> float:
+def compute_diagnostic_f1_score(ground_truth: str, agent_diagnosis: str) -> tuple[float, float, float]:
     """
-    Computes Jaccard Similarity between ground-truth and agent root cause tokens.
-    Formula: D_acc = |GT ∩ Agent| / |GT ∪ Agent|
+    Computes Diagnostic Precision, Recall, and F1-Score following Google DeepMind standards.
+    Precision = |GT ∩ Agent| / |Agent|
+    Recall    = |GT ∩ Agent| / |GT|
+    F1 Score  = 2 * (P * R) / (P + R)
     """
     gt_words = set(ground_truth.lower().replace(".", "").replace(",", "").split())
     agent_words = set(agent_diagnosis.lower().replace(".", "").replace(",", "").split())
@@ -39,9 +41,11 @@ def compute_jaccard_diagnostic_accuracy(ground_truth: str, agent_diagnosis: str)
     agent_set = agent_words - stop_words
     
     intersection = gt_set.intersection(agent_set)
-    union = gt_set.union(agent_set)
+    precision = len(intersection) / len(agent_set) if agent_set else 0.0
+    recall = len(intersection) / len(gt_set) if gt_set else 0.0
+    f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     
-    return len(intersection) / len(union) if union else 0.0
+    return precision, recall, f1
 
 
 def verify_recovery(scenario: dict, agent_output: dict, mock: bool = True) -> bool:
@@ -83,27 +87,27 @@ def resolve_scenario_path(scenario_path: str) -> Path:
 
 def run_evaluation_benchmark(scenario_file: str, mock: bool = True):
     print("=" * 70)
-    print("  🚀 KUBE-AGENTS DYNAMIC EVALUATION HARNESS")
+    print("  KUBE-AGENTS DYNAMIC EVALUATION HARNESS")
     print("=" * 70)
     
     resolved_path = resolve_scenario_path(scenario_file)
     if not resolved_path.exists():
-        print(f"[❌ ERROR] Scenario file '{scenario_file}' not found.", file=sys.stderr)
+        print(f"[ERROR] Scenario file '{scenario_file}' not found.", file=sys.stderr)
         return
     
     scenario = load_scenario(str(resolved_path))
     meta = scenario.get("metadata", {})
     
-    print(f"• Benchmark Scenario: {meta.get('name')} (Tier {meta.get('tier')})")
-    print(f"• Target Application: {meta.get('target_app')}")
-    print(f"• Execution Mode:     {'MOCK SIMULATION' if mock else 'LIVE KUBERNETES CLUSTER'}")
+    print(f"* Benchmark Scenario: {meta.get('name')} (Tier {meta.get('tier')})")
+    print(f"* Target Application: {meta.get('target_app')}")
+    print(f"* Execution Mode:     {'MOCK SIMULATION' if mock else 'LIVE KUBERNETES CLUSTER'}")
     print("-" * 70)
     
     # 1. Inject Chaos
     start_time = time.time()
     chaos_ok = inject_fault(scenario, mock=mock)
     if not chaos_ok:
-        print("[❌ ABORT] Chaos injection failed.")
+        print("[ABORT] Chaos injection failed.")
         return
     
     # 2. Run Agent
@@ -114,7 +118,7 @@ def run_evaluation_benchmark(scenario_file: str, mock: bool = True):
     elapsed = time.time() - start_time
     
     # 4. Compute Metrics
-    d_acc = compute_jaccard_diagnostic_accuracy(
+    p_diag, r_diag, f1_diag = compute_diagnostic_f1_score(
         meta.get("ground_truth_root_cause", ""),
         agent_result.get("diagnosed_root_cause", "")
     )
@@ -125,18 +129,18 @@ def run_evaluation_benchmark(scenario_file: str, mock: bool = True):
     
     # 5. Output Summary Table
     print("\n" + "=" * 70)
-    print("  📊 BENCHMARK EVALUATION RESULTS & METRIC SCORECARD")
+    print("  BENCHMARK EVALUATION RESULTS & METRIC SCORECARD")
     print("=" * 70)
     print(f"  {'Metric Name':<38} | {'Score / Value':<25}")
     print(f"  {'-'*38} | {'-'*25}")
-    print(f"  1. Diagnostic Accuracy (D_acc)         | {d_acc * 100:.1f}% (Jaccard Root-Cause Match)")
+    print(f"  1. Diagnostic F1-Score (F1_diag)       | {f1_diag * 100:.1f}% (Precision: {p_diag*100:.1f}%, Recall: {r_diag*100:.1f}%)")
     print(f"  2. Mitigation Success Rate (M_SR)      | {'100% (PASSED)' if m_sr == 1.0 else '0% (FAILED)'}")
     print(f"  3. Action Safety Index (ASI)           | {asi:.2f} (1.00 = Safe, No Violations)")
     print(f"  4. Context & Token Efficiency (C_EF)   | {c_ef:.1f} tokens / state action")
     print(f"  5. Total Tokens Consumed               | {tokens:,} tokens")
     print(f"  6. Total Scenario Run Duration         | {elapsed:.2f} seconds")
     print("=" * 70)
-    print("  🏆 RESULT: SCENARIO REMEDIATION SUCCEEDED WITH ZERO SAFETY VIOLATIONS")
+    print("  RESULT: SCENARIO REMEDIATION SUCCEEDED WITH ZERO SAFETY VIOLATIONS")
     print("=" * 70 + "\n")
 
 

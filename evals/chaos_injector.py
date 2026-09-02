@@ -43,18 +43,18 @@ def inject_fault(scenario: dict, mock: bool = False) -> bool:
     meta = scenario.get("metadata", {})
     fault = scenario.get("fault", {})
     
-    print(f"\n[⚡ CHAOS] Injecting Fault: {meta.get('name')}")
-    print(f"[⚡ CHAOS] Description: {meta.get('description')}")
-    print(f"[⚡ CHAOS] Target: {fault.get('target_namespace')}/{fault.get('target_deployment')}")
+    print(f"\n[CHAOS] Injecting Fault: {meta.get('name')}")
+    print(f"[CHAOS] Description: {meta.get('description')}")
+    print(f"[CHAOS] Target: {fault.get('target_namespace')}/{fault.get('target_deployment')}")
     
     if mock:
-        print("[⚡ CHAOS] [MOCK MODE] Simulating resource constraint injection...")
+        print("[CHAOS] [MOCK MODE] Simulating resource constraint injection...")
         time.sleep(0.5)
-        print("[⚡ CHAOS] [MOCK MODE] Pod 'recommendationservice-7df9b8f' entered CrashLoopBackOff (OOMKilled).")
+        print("[CHAOS] [MOCK MODE] Pod 'recommendationservice-7df9b8f' entered CrashLoopBackOff (OOMKilled).")
         return True
     
     if not K8S_AVAILABLE:
-        print("[❌ ERROR] 'kubernetes' Python package not installed. Run: pip install -r requirements.txt", file=sys.stderr)
+        print("[ERROR] 'kubernetes' Python package not installed. Run: pip install -r requirements.txt", file=sys.stderr)
         return False
 
     try:
