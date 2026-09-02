@@ -24,7 +24,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
