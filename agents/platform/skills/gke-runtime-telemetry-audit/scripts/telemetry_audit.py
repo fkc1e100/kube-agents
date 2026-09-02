@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import yaml
 
 # S1: Canonical system namespace regex
 SYS_RE = re.compile(
@@ -129,50 +130,28 @@ def get_kubernetes_server_version(env: dict) -> tuple[int, int] | None:
     except Exception:
         return None
 
-def is_cpu_burst_supported(env: dict) -> bool:
-    """Returns True if cluster version natively supports CPU burst."""
-    ver = get_kubernetes_server_version(env)
-    if not ver:
-        return False
-    major, minor = ver
-    if major > 1 or minor >= 29:
-        return True
-    return False
-
 def find_manifest_path(workspace_path: str, resource_kind: str, resource_name: str, namespace: str) -> str:
     """Discovers the GitOps repository file declaring the target resource."""
     if not workspace_path or not os.path.isdir(workspace_path):
         return ""
-    
+
     for root, _, files in os.walk(workspace_path):
         for file in files:
             if file.endswith((".yaml", ".yml")):
                 full_path = os.path.join(root, file)
                 try:
                     with open(full_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    
-                    docs = content.split("\n---")
+                        docs = list(yaml.safe_load_all(f))
                     for doc in docs:
-                        lines = [line.strip() for line in doc.split("\n")]
-                        
-                        has_kind = False
-                        has_name = False
-                        doc_ns = ""
-                        
-                        for line in lines:
-                            if line.startswith("kind:"):
-                                k_val = line.split(":", 1)[1].strip().strip("\"'")
-                                if k_val.lower() == resource_kind.lower():
-                                    has_kind = True
-                            elif line.startswith("name:"):
-                                n_val = line.split(":", 1)[1].strip().strip("\"'")
-                                if n_val == resource_name:
-                                    has_name = True
-                            elif line.startswith("namespace:"):
-                                doc_ns = line.split(":", 1)[1].strip().strip("\"'")
-                        
-                        if has_kind and has_name:
+                        if not isinstance(doc, dict):
+                            continue
+                        k_val = str(doc.get("kind", ""))
+                        meta = doc.get("metadata")
+                        if not isinstance(meta, dict):
+                            continue
+                        n_val = str(meta.get("name", ""))
+                        doc_ns = str(meta.get("namespace", ""))
+                        if k_val.lower() == resource_kind.lower() and n_val == resource_name:
                             if namespace and doc_ns and doc_ns != namespace:
                                 continue
                             return os.path.relpath(full_path, workspace_path)
@@ -190,7 +169,7 @@ def check_cfs_quota(env: dict, cluster_name: str, workspace: str, findings: list
     
     checks_run.append({
         "check": "cfs-quota-throttling",
-        "command": f"kubectl get deployments,statefulsets,daemonsets -A -o json --context={cluster_name}"
+        "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get deployments,statefulsets,daemonsets -A -o json"
     })
     
     if not stdout.strip():
@@ -199,11 +178,6 @@ def check_cfs_quota(env: dict, cluster_name: str, workspace: str, findings: list
     try:
         data = json.loads(stdout)
         items = data.get("items", [])
-        
-        # Determine CPU burst support
-        burst_supported = is_cpu_burst_supported(env)
-        if burst_supported:
-            return
 
         for item in items:
             meta = item.get("metadata", {})
@@ -246,7 +220,7 @@ def check_cfs_quota(env: dict, cluster_name: str, workspace: str, findings: list
                         flagged_containers.append(c_name)
                         
             if flagged_containers:
-                confirm_cmd = f"kubectl get {kind.lower()} {name} -n {ns} -o json --context={cluster_name}"
+                confirm_cmd = f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get {kind.lower()} {name} -n {ns} -o json"
                 c_rc, c_out, _ = run_cmd(["kubectl", "get", kind.lower(), name, "-n", ns, "-o", "json"], env=env)
                 
                 excerpt = ""
@@ -272,7 +246,7 @@ def check_cfs_quota(env: dict, cluster_name: str, workspace: str, findings: list
                     "cluster": cluster_name,
                     "namespace": ns,
                     "object": f"{kind}/{name}",
-                    "impact": "Containers suffer tail-latency spikes due to severe cgroup CFS CPU throttling.",
+                    "impact": "Containers risk tail-latency spikes due to severe cgroup CFS CPU throttling.",
                     "evidence": {
                         "command": confirm_cmd,
                         "excerpt": excerpt
@@ -297,90 +271,84 @@ def check_conntrack(env: dict, cluster_name: str, workspace: str, findings: list
     if rc != 0:
         limitations.append(f"conntrack-saturation: kubectl failed: {stderr.strip()}")
         return
-        
-    checks_run.append({
-        "check": "conntrack-saturation",
-        "command": f"kubectl get daemonsets,nodes -n kube-system -o json --context={cluster_name}"
-    })
-    
+
     if not stdout.strip():
         return
-        
+
     try:
         data = json.loads(stdout)
         items = data.get("items", [])
-        
+
         nodes = [item for item in items if item.get("kind") == "Node"]
         daemonsets = [item for item in items if item.get("kind") == "DaemonSet"]
-        
+
         is_autopilot = False
         for n in nodes:
             labels = n.get("metadata", {}).get("labels", {})
             if "container.googleapis.com/wle-managed" in labels or "cloud.google.com/gke-autopilot" in labels:
                 is_autopilot = True
                 break
-                
+
         if is_autopilot:
             checks_not_applicable.append({
                 "check": "conntrack-saturation",
                 "reason": "Autopilot manages node sysctls directly"
             })
             return
-            
-        has_conntrack_tuning = False
+
+        checks_run.append({
+            "check": "conntrack-saturation",
+            "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get daemonsets,nodes -n kube-system -o json"
+        })
+
         suboptimal_val = None
         tuning_ds_name = ""
-        
+
         for ds in daemonsets:
             ds_name = ds.get("metadata", {}).get("name", "")
             spec = ds.get("spec", {})
             template = spec.get("template", {})
             pod_spec = template.get("spec", {})
-            
+
             for c in pod_spec.get("containers", []) + pod_spec.get("initContainers", []):
                 args = c.get("args", [])
                 cmd_list = c.get("command", [])
                 all_tokens = [str(x) for x in cmd_list + args]
                 for token in all_tokens:
                     if "nf_conntrack_max" in token:
-                        has_conntrack_tuning = True
                         tuning_ds_name = ds_name
                         match = re.search(r"nf_conntrack_max[= ](\d+)", token)
                         if match:
                             val = int(match.group(1))
                             if val < 131072:
                                 suboptimal_val = val
-                                
-        if not has_conntrack_tuning or suboptimal_val is not None:
+
+        # Treat "no tuning DaemonSet" as healthy GKE default (kube-proxy sets 131072+ floor);
+        # only flag when an explicit tuning DaemonSet configures a sub-optimal limit < 131072.
+        if suboptimal_val is not None:
             path = ""
             if tuning_ds_name:
                 path = find_manifest_path(workspace, "DaemonSet", tuning_ds_name, "kube-system")
-                
-            title = "Cluster nodes lack optimal net.netfilter.nf_conntrack_max sysctl limits"
+
+            title = f"System tuning DaemonSet {tuning_ds_name} configures sub-optimal net.netfilter.nf_conntrack_max ({suboptimal_val})"
             impact = "Nodes risk silent packet drops and network connection failures under high connection concurrency."
-            
-            if suboptimal_val is not None:
-                title = f"System tuning DaemonSet {tuning_ds_name} configures sub-optimal net.netfilter.nf_conntrack_max ({suboptimal_val})"
-                excerpt = f"DaemonSet {tuning_ds_name} configures nf_conntrack_max={suboptimal_val}"
-            else:
-                excerpt = "No system-tuning DaemonSet in kube-system configures net.netfilter.nf_conntrack_max"
-                
-            confirm_cmd = f"kubectl get daemonsets -n kube-system -o json --context={cluster_name}"
-            
+            excerpt = f"DaemonSet {tuning_ds_name} configures nf_conntrack_max={suboptimal_val}"
+            confirm_cmd = f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get daemonset {tuning_ds_name} -n kube-system -o json"
+
             findings.append({
                 "check": "conntrack-saturation",
                 "severity": "major",
                 "title": title,
                 "cluster": cluster_name,
                 "namespace": "kube-system",
-                "object": f"DaemonSet/{tuning_ds_name}" if tuning_ds_name else "Node/system-tuning",
+                "object": f"DaemonSet/{tuning_ds_name}",
                 "impact": impact,
                 "evidence": {
                     "command": confirm_cmd,
                     "excerpt": excerpt
                 },
                 "recommendation": {
-                    "action": "Configure net.netfilter.nf_conntrack_max to at least 131072 in a node tuning DaemonSet.",
+                    "action": f"Configure net.netfilter.nf_conntrack_max to at least 131072 in DaemonSet {tuning_ds_name}.",
                     "rationale": "High connection density requires larger conntrack tables to prevent package loss.",
                     "risk": "Allocates a small amount of additional kernel memory for tracked connections."
                 },
@@ -399,15 +367,18 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
     if rc_svc != 0:
         limitations.append(f"ingress-502-drain: kubectl svc,deployments failed: {stderr_svc.strip()}")
         return
-        
+
     cmd_ing = ["kubectl", "get", "ingress,httproute,gateway", "-A", "-o", "json"]
-    rc_ing, out_ing, _ = run_cmd(cmd_ing, env=env)
-    
+    rc_ing, out_ing, stderr_ing = run_cmd(cmd_ing, env=env)
+    if rc_ing != 0:
+        limitations.append(f"ingress-502-drain: ingress/httproute/gateway read failed: {stderr_ing.strip()}")
+        return
+
     checks_run.append({
         "check": "ingress-502-drain",
-        "command": f"kubectl get svc,deployments -A -o json --context={cluster_name}"
+        "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get svc,deployments,ingress,httproute,gateway -A -o json"
     })
-    
+
     service_selectors = []
     deps = []
     if out_svc.strip():
@@ -415,7 +386,7 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
             items = json.loads(out_svc).get("items", [])
             svcs = [item for item in items if item.get("kind") == "Service"]
             deps = [item for item in items if item.get("kind") == "Deployment"]
-            
+
             for s in svcs:
                 ns = s.get("metadata", {}).get("namespace", "")
                 if SYS_RE.match(ns):
@@ -426,9 +397,9 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
         except Exception as e:
             limitations.append(f"ingress-502-drain Service parsing error: {e}")
             return
-            
+
     exposed_services = set()
-    if rc_ing == 0 and out_ing.strip():
+    if out_ing.strip():
         try:
             items = json.loads(out_ing).get("items", [])
             for item in items:
@@ -458,44 +429,44 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
                                 exposed_services.add((ns, ref.get("name")))
         except Exception as e:
             limitations.append(f"ingress-502-drain ingress/httproute parsing error: {e}")
-            
+
     for d in deps:
         meta = d.get("metadata", {})
         ns = meta.get("namespace", "")
         name = meta.get("name", "")
         if SYS_RE.match(ns):
             continue
-            
+
         if "addonmanager.kubernetes.io/mode" in (meta.get("annotations") or {}):
             continue
-            
+
         spec = d.get("spec", {})
         replicas = spec.get("replicas", 1)
         if replicas == 0:
             continue
-            
+
         template = spec.get("template", {})
         pod_labels = template.get("metadata", {}).get("labels", {})
-        
+
         is_service_exposed = False
         matching_svcs = []
         for s_ns, s_name, s_sel in service_selectors:
             if s_ns == ns and all(pod_labels.get(k) == v for k, v in s_sel.items()):
                 is_service_exposed = True
                 matching_svcs.append(s_name)
-                
+
         if not is_service_exposed:
             continue
-            
+
         is_ingress_exposed = any((ns, s_name) in exposed_services for s_name in matching_svcs)
         if not is_ingress_exposed:
             continue
-            
+
         pod_spec = template.get("spec", {})
         grace_period = pod_spec.get("terminationGracePeriodSeconds", 30)
         if grace_period > 30:
             continue
-            
+
         containers = pod_spec.get("containers", [])
         missing_containers = []
         for c in containers:
@@ -504,11 +475,11 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
             pre_stop = lifecycle.get("preStop") if isinstance(lifecycle, dict) else None
             if not pre_stop or not isinstance(pre_stop, dict) or "exec" not in pre_stop:
                 missing_containers.append(c_name)
-                
+
         if missing_containers:
             c_list_str = ", ".join(missing_containers)
-            confirm_cmd = f"kubectl get deployment {name} -n {ns} -o json --context={cluster_name}"
-            
+            confirm_cmd = f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get deployment {name} -n {ns} -o json"
+
             c_rc, c_out, _ = run_cmd(["kubectl", "get", "deployment", name, "-n", ns, "-o", "json"], env=env)
             excerpt = ""
             if c_rc == 0:
@@ -524,9 +495,9 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
                     excerpt = f"containers: [{c_list_str}], lifecycle.preStop: null"
             else:
                 excerpt = f"containers: [{c_list_str}], lifecycle.preStop: null"
-                
+
             path = find_manifest_path(workspace, "Deployment", name, ns)
-            
+
             findings.append({
                 "check": "ingress-502-drain",
                 "severity": "major",
@@ -534,7 +505,7 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
                 "cluster": cluster_name,
                 "namespace": ns,
                 "object": f"Deployment/{name}",
-                "impact": "Workload receives in-flight HTTP traffic during rolling pod termination, causing HTTP 502 Bad Gateway drops.",
+                "impact": "Workload risks receiving in-flight HTTP traffic during rolling pod termination, causing HTTP 502 Bad Gateway drops.",
                 "evidence": {
                     "command": confirm_cmd,
                     "excerpt": excerpt
@@ -560,7 +531,7 @@ def check_ephemeral_storage(env: dict, cluster_name: str, workspace: str, findin
         
     checks_run.append({
         "check": "ephemeral-growth-rate",
-        "command": f"kubectl get deployments,statefulsets,daemonsets -A -o json --context={cluster_name}"
+        "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get deployments,statefulsets,daemonsets -A -o json"
     })
     
     if not stdout.strip():
@@ -611,7 +582,7 @@ def check_ephemeral_storage(env: dict, cluster_name: str, workspace: str, findin
                         flagged_containers.append(c_name)
                         
             if flagged_containers:
-                confirm_cmd = f"kubectl get {kind.lower()} {name} -n {ns} -o json --context={cluster_name}"
+                confirm_cmd = f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get {kind.lower()} {name} -n {ns} -o json"
                 c_rc, c_out, _ = run_cmd(["kubectl", "get", kind.lower(), name, "-n", ns, "-o", "json"], env=env)
                 
                 excerpt = ""
@@ -666,7 +637,7 @@ def check_ulimit_exhaustion(env: dict, cluster_name: str, workspace: str, findin
         
     checks_run.append({
         "check": "ulimit-exhaustion",
-        "command": f"kubectl get deployments,statefulsets -A -o json --context={cluster_name}"
+        "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get deployments,statefulsets -A -o json"
     })
     
     if not stdout.strip():
@@ -729,7 +700,7 @@ def check_ulimit_exhaustion(env: dict, cluster_name: str, workspace: str, findin
                         has_limit_tuning = True
                         
             if not has_limit_tuning:
-                confirm_cmd = f"kubectl get {kind.lower()} {name} -n {ns} -o json --context={cluster_name}"
+                confirm_cmd = f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get {kind.lower()} {name} -n {ns} -o json"
                 c_rc, c_out, _ = run_cmd(["kubectl", "get", kind.lower(), name, "-n", ns, "-o", "json"], env=env)
                 
                 excerpt = ""
@@ -772,59 +743,62 @@ def check_ulimit_exhaustion(env: dict, cluster_name: str, workspace: str, findin
 
 def inspect_cluster_telemetry(project_id: str, cluster_name: str, location: str, workspace: str, skipped_clusters: list) -> dict | None:
     """Inspects a GKE cluster running all 5 telemetry checks under an isolated kubeconfig environment."""
-    import tempfile
-    kc_home = os.environ.get('HERMES_HOME')
-    if kc_home:
-        kc_dir = os.path.expanduser(f"{kc_home}/.kubeconfigs")
-    else:
-        kc_dir = os.path.join(tempfile.gettempdir(), ".kubeconfigs")
-    os.makedirs(kc_dir, exist_ok=True)
+    kc_home = os.environ.get("HERMES_HOME", "/opt/data")
+    kc_dir = os.path.expanduser(f"{kc_home}/.kubeconfigs")
+    os.makedirs(kc_dir, mode=0o700, exist_ok=True)
     kc_path = os.path.join(kc_dir, f"kubeconfig_{project_id}_{cluster_name}_{location}.yaml")
 
     env = os.environ.copy()
     env["KUBECONFIG"] = kc_path
 
-    rc, _, stderr = run_cmd([
-        "gcloud", "container", "clusters", "get-credentials", cluster_name,
-        f"--location={location}", f"--project={project_id}"
-    ], env=env)
+    try:
+        rc, _, stderr = run_cmd([
+            "gcloud", "container", "clusters", "get-credentials", cluster_name,
+            f"--location={location}", f"--project={project_id}"
+        ], env=env)
 
-    if rc != 0:
-        sys.stderr.write(f"Could not get credentials for {cluster_name}: {stderr}\n")
-        skipped_clusters.append({
+        if rc != 0:
+            sys.stderr.write(f"Could not get credentials for {cluster_name}: {stderr}\n")
+            skipped_clusters.append({
+                "name": cluster_name,
+                "location": location,
+                "project": project_id,
+                "reason": f"gcloud get-credentials failed: {stderr.strip()}"
+            })
+            return None
+
+        findings = []
+        checks_run = []
+        limitations = []
+        checks_not_applicable = []
+
+        check_cfs_quota(env, cluster_name, workspace, findings, checks_run, limitations)
+        check_conntrack(env, cluster_name, workspace, findings, checks_run, limitations, checks_not_applicable)
+        check_ingress_drain(env, cluster_name, workspace, findings, checks_run, limitations)
+        check_ephemeral_storage(env, cluster_name, workspace, findings, checks_run, limitations)
+        check_ulimit_exhaustion(env, cluster_name, workspace, findings, checks_run, limitations)
+
+        cluster_scope = {
             "name": cluster_name,
             "location": location,
             "project": project_id,
-            "reason": f"gcloud get-credentials failed: {stderr.strip()}"
-        })
-        return None
+            "checks_run": checks_run
+        }
+        if limitations:
+            cluster_scope["limitations"] = "; ".join(limitations)
+        if checks_not_applicable:
+            cluster_scope["checks_not_applicable"] = checks_not_applicable
 
-    findings = []
-    checks_run = []
-    limitations = []
-    checks_not_applicable = []
-
-    check_cfs_quota(env, cluster_name, workspace, findings, checks_run, limitations)
-    check_conntrack(env, cluster_name, workspace, findings, checks_run, limitations, checks_not_applicable)
-    check_ingress_drain(env, cluster_name, workspace, findings, checks_run, limitations)
-    check_ephemeral_storage(env, cluster_name, workspace, findings, checks_run, limitations)
-    check_ulimit_exhaustion(env, cluster_name, workspace, findings, checks_run, limitations)
-
-    cluster_scope = {
-        "name": cluster_name,
-        "location": location,
-        "project": project_id,
-        "checks_run": checks_run
-    }
-    if limitations:
-        cluster_scope["limitations"] = "; ".join(limitations)
-    if checks_not_applicable:
-        cluster_scope["checks_not_applicable"] = checks_not_applicable
-
-    return {
-        "scope": cluster_scope,
-        "findings": findings
-    }
+        return {
+            "scope": cluster_scope,
+            "findings": findings
+        }
+    finally:
+        if os.path.exists(kc_path):
+            try:
+                os.remove(kc_path)
+            except OSError:
+                pass
 
 def audit_project_telemetry(project_id: str, workspace: str, skipped_clusters: list, active_clusters: list) -> list[dict]:
     """Audits all running GKE clusters in project, returning findings."""

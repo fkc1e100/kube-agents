@@ -18,7 +18,7 @@ Follow the authoritative checklist in `governance/gke_runtime_telemetry_sop.md` 
 - `ephemeral-growth-rate`: Flag workloads lacking explicit `resources.limits.ephemeral-storage`.
 - `ulimit-exhaustion`: Flag high-concurrency workloads running with default low file descriptor limits.
 
-Optional helper runner for `ingress-502-drain`:
+Helper runner executing all five runtime configuration checks:
 ```bash
 ./skills/gke-runtime-telemetry-audit/scripts/telemetry_audit.py --output /opt/data/scratch/telemetry_raw.json
 ```

@@ -1,8 +1,8 @@
 # SOP: GKE Runtime Telemetry & Container OS Health Audit (Daily Governance)
 
-**Purpose:** Sweep all managed GKE clusters for container runtime health regressions, cgroup CFS quota throttling, silent conntrack table drops, missing preStop sleep hooks on load-balanced services, rapid ephemeral storage growth, and open file descriptor exhaustion. The question this audit answers for a platform admin is: _which workloads are silently dropping ingress traffic during rolling updates due to missing preStop drain hooks, which containers are suffering tail-latency spikes from CFS quota throttling, and which nodes are running out of conntrack capacity?_ Output is this stream's single GitHub ledger issue, rewritten in place on every run, plus narrow remediation Pull Requests carrying manifest fixes for the findings that get promoted.
+**Purpose:** Sweep all managed GKE clusters for container runtime health configurations, cgroup CFS quota throttling risks, conntrack table configuration, missing preStop sleep hooks on load-balanced services, unconstrained ephemeral storage configuration, and open file descriptor limit settings. The question this audit answers for a platform admin is: _which workloads risk dropping ingress traffic during rolling updates due to missing preStop drain hooks, which containers risk tail-latency spikes from restrictive CFS quota configurations, and which nodes risk running out of conntrack capacity due to sub-optimal limits?_ Output is this stream's single GitHub ledger issue, rewritten in place on every run, plus narrow remediation Pull Requests carrying manifest fixes for the findings that get promoted.
 
-**Cron:** id `gke-runtime-telemetry-audit`, schedule `30 7 * * *` (daily 07:30 UTC).
+**Cron:** id `gke-runtime-telemetry-audit`, schedule `50 9 * * *` (daily 09:50 UTC).
 
 **Data sources:** `kubectl` read verbs and `gcloud container clusters ...` across all managed fleet clusters (`GCP_PROJECT_ID` and `MONITORED_PROJECT_IDS`).
 
@@ -45,7 +45,7 @@ gcloud container clusters list --format=json
 #### 2.1 Severe cgroup CFS CPU quota throttling (`cfs-quota-throttling`)
 
 - **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get pods,deployments -A -o json`
+- **Command**: `KUBECONFIG=$KC kubectl get deployments,statefulsets,daemonsets -A -o json`
 - **Condition**: Workload container specifies restrictive fractional CPU limits (`limits.cpu < 500m` with `requests.cpu == limits.cpu`) without CPU burst support.
 - **Do NOT flag**: Multi-core workloads or containers with unconstrained CPU ceilings.
 - **Remediation**: `kind: manifest` at the workload declaration's path, adjusting container CPU limits or enabling CPU burst. When the manifest is not found in the repo, `kind: manual`.
@@ -53,7 +53,7 @@ gcloud container clusters list --format=json
 #### 2.2 Kernel conntrack table saturation and silent drop risk (`conntrack-saturation`)
 
 - **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get daemonsets,nodes -n kube-system -o json`
+- **Command**: `KUBECONFIG=$KC kubectl get daemonsets,nodes -n kube-system -o json`
 - **Condition**: Cluster nodes or system tuning DaemonSets configure sub-optimal `nf_conntrack_max` thresholds for high-throughput packet routing.
 - **Do NOT flag**: Autopilot managed clusters where node sysctls are managed by GKE.
 - **Remediation**: `kind: manifest` at the configuration file path (DaemonSet or ConfigMap), configuring `net.netfilter.nf_conntrack_max`. When the manifest is not found, `kind: manual`.
@@ -61,7 +61,7 @@ gcloud container clusters list --format=json
 #### 2.3 Missing graceful shutdown preStop hooks on load-balanced services (`ingress-502-drain`)
 
 - **Severity**: `major`
-- **Command**: `kubectl --context=$CLUSTER get svc,deployments -A -o json`
+- **Command**: `KUBECONFIG=$KC kubectl get svc,deployments,ingress,httproute,gateway -A -o json`
 - **Condition**: Service-exposed workload behind Ingress or Gateway lacks `lifecycle.preStop.exec` sleep hook (e.g. `sleep 15`) and `terminationGracePeriodSeconds` is default 30s.
 - **Do NOT flag**: Workloads not exposed by a Service or background batch/queue workers.
 - **Remediation**: `kind: manifest` at the workload declaration's path, adding `lifecycle.preStop.exec.command: ["/bin/sh", "-c", "sleep 15"]` to the container manifest. When the manifest is not found, `kind: manual`.
@@ -69,7 +69,7 @@ gcloud container clusters list --format=json
 #### 2.4 Unbounded container ephemeral-storage growth (`ephemeral-growth-rate`)
 
 - **Severity**: `minor`
-- **Command**: `kubectl --context=$CLUSTER get pods,deployments -A -o json`
+- **Command**: `KUBECONFIG=$KC kubectl get deployments,statefulsets,daemonsets -A -o json`
 - **Condition**: Container writes ephemeral logs/scratch data without specifying `resources.limits.ephemeral-storage`.
 - **Do NOT flag**: Workloads mounting dedicated `emptyDir` or PersistentVolumeClaims for scratch data.
 - **Remediation**: `kind: manifest` at the workload declaration's path, adding explicit `resources.requests.ephemeral-storage` and `limits.ephemeral-storage`. When the manifest is not found, `kind: manual`.
@@ -77,7 +77,7 @@ gcloud container clusters list --format=json
 #### 2.5 Container runtime file descriptor limit exhaustion (`ulimit-exhaustion`)
 
 - **Severity**: `minor`
-- **Command**: `kubectl --context=$CLUSTER get deployments,statefulsets -A -o json`
+- **Command**: `KUBECONFIG=$KC kubectl get deployments,statefulsets -A -o json`
 - **Condition**: High-concurrency reverse proxy or database workload runs with default low file descriptor limits without explicit initContainer system tuning.
 - **Do NOT flag**: Batch workloads and low-concurrency microservices.
 - **Remediation**: `kind: manifest` at the workload declaration's path, setting appropriate container system parameters or initContainer ulimits. When the manifest is not found, `kind: manual`.
