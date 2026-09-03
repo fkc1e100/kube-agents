@@ -26,6 +26,13 @@ ID_EMPTY_SEGMENT = "_"
 ID_SEGMENTS = 4
 MAX_FINDING_ID = 100
 
+# Audit thresholds and defaults
+CFS_QUOTA_THRESHOLD_MILLICORES = 500
+CONNTRACK_FLOOR = 131072
+DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS = 30
+DATA_DIR_PATH = "/opt/data"
+DATA_DIR_MODE = 0o700
+
 def run_cmd(cmd: list[str], env: dict | None = None) -> tuple[int, str, str]:
     """Runs a shell command and returns (rc, stdout, stderr)."""
     try:
@@ -216,7 +223,7 @@ def check_cfs_quota(env: dict, cluster_name: str, workspace: str, findings: list
                 
                 if cpu_limit and cpu_request == cpu_limit:
                     limit_m = parse_cpu_to_milli(cpu_limit)
-                    if limit_m is not None and limit_m < 500:
+                    if limit_m is not None and limit_m < CFS_QUOTA_THRESHOLD_MILLICORES:
                         flagged_containers.append(c_name)
                         
             if flagged_containers:
@@ -320,11 +327,11 @@ def check_conntrack(env: dict, cluster_name: str, workspace: str, findings: list
                         match = re.search(r"nf_conntrack_max[= ](\d+)", token)
                         if match:
                             val = int(match.group(1))
-                            if val < 131072:
+                            if val < CONNTRACK_FLOOR:
                                 suboptimal_val = val
 
         # Treat "no tuning DaemonSet" as healthy GKE default (kube-proxy sets 131072+ floor);
-        # only flag when an explicit tuning DaemonSet configures a sub-optimal limit < 131072.
+        # only flag when an explicit tuning DaemonSet configures a sub-optimal limit < CONNTRACK_FLOOR.
         if suboptimal_val is not None:
             path = ""
             if tuning_ds_name:
@@ -348,7 +355,7 @@ def check_conntrack(env: dict, cluster_name: str, workspace: str, findings: list
                     "excerpt": excerpt
                 },
                 "recommendation": {
-                    "action": f"Configure net.netfilter.nf_conntrack_max to at least 131072 in DaemonSet {tuning_ds_name}.",
+                    "action": f"Configure net.netfilter.nf_conntrack_max to at least {CONNTRACK_FLOOR} in DaemonSet {tuning_ds_name}.",
                     "rationale": "High connection density requires larger conntrack tables to prevent package loss.",
                     "risk": "Allocates a small amount of additional kernel memory for tracked connections."
                 },
@@ -368,15 +375,30 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
         limitations.append(f"ingress-502-drain: kubectl svc,deployments failed: {stderr_svc.strip()}")
         return
 
-    cmd_ing = ["kubectl", "get", "ingress,httproute,gateway", "-A", "-o", "json"]
+    ing_items = []
+    cmd_ing = ["kubectl", "get", "ingress", "-A", "-o", "json"]
     rc_ing, out_ing, stderr_ing = run_cmd(cmd_ing, env=env)
-    if rc_ing != 0:
-        limitations.append(f"ingress-502-drain: ingress/httproute/gateway read failed: {stderr_ing.strip()}")
-        return
+    if rc_ing == 0 and out_ing.strip():
+        try:
+            ing_items.extend(json.loads(out_ing).get("items", []))
+        except Exception as e:
+            limitations.append(f"ingress-502-drain ingress parsing error: {e}")
+    elif rc_ing != 0 and "NotFound" not in stderr_ing:
+        limitations.append(f"ingress-502-drain: ingress read failed: {stderr_ing.strip()}")
+
+    # Gateway API CRDs (HTTPRoute, Gateway) are optional and may not be registered on clusters
+    # without Gateway API enabled. Read them separately and ignore CRD-not-found errors.
+    cmd_gw = ["kubectl", "get", "httproute", "-A", "-o", "json"]
+    rc_gw, out_gw, stderr_gw = run_cmd(cmd_gw, env=env)
+    if rc_gw == 0 and out_gw.strip():
+        try:
+            ing_items.extend(json.loads(out_gw).get("items", []))
+        except Exception as e:
+            limitations.append(f"ingress-502-drain httproute parsing error: {e}")
 
     checks_run.append({
         "check": "ingress-502-drain",
-        "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get svc,deployments,ingress,httproute,gateway -A -o json"
+        "command": f"KUBECONFIG={env.get('KUBECONFIG', '')} kubectl get svc,deployments,ingress -A -o json"
     })
 
     service_selectors = []
@@ -399,36 +421,31 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
             return
 
     exposed_services = set()
-    if out_ing.strip():
-        try:
-            items = json.loads(out_ing).get("items", [])
-            for item in items:
-                kind = item.get("kind", "")
-                ns = item.get("metadata", {}).get("namespace", "")
-                spec = item.get("spec", {})
-                if kind == "Ingress":
-                    rules = spec.get("rules", [])
-                    for rule in rules:
-                        http = rule.get("http", {})
-                        paths = http.get("paths", [])
-                        for path in paths:
-                            svc_name = path.get("backend", {}).get("service", {}).get("name")
-                            if svc_name:
-                                exposed_services.add((ns, svc_name))
-                    def_backend = spec.get("defaultBackend", {})
-                    svc_name = def_backend.get("service", {}).get("name")
+    for item in ing_items:
+        kind = item.get("kind", "")
+        ns = item.get("metadata", {}).get("namespace", "")
+        spec = item.get("spec", {})
+        if kind == "Ingress":
+            rules = spec.get("rules", [])
+            for rule in rules:
+                http = rule.get("http", {})
+                paths = http.get("paths", [])
+                for path in paths:
+                    svc_name = path.get("backend", {}).get("service", {}).get("name")
                     if svc_name:
                         exposed_services.add((ns, svc_name))
-                elif kind == "HTTPRoute":
-                    rules = spec.get("rules", [])
-                    for rule in rules:
-                        backend_refs = rule.get("backendRefs", [])
-                        for ref in backend_refs:
-                            ref_kind = ref.get("kind", "Service")
-                            if ref_kind == "Service":
-                                exposed_services.add((ns, ref.get("name")))
-        except Exception as e:
-            limitations.append(f"ingress-502-drain ingress/httproute parsing error: {e}")
+            def_backend = spec.get("defaultBackend", {})
+            svc_name = def_backend.get("service", {}).get("name")
+            if svc_name:
+                exposed_services.add((ns, svc_name))
+        elif kind == "HTTPRoute":
+            rules = spec.get("rules", [])
+            for rule in rules:
+                backend_refs = rule.get("backendRefs", [])
+                for ref in backend_refs:
+                    ref_kind = ref.get("kind", "Service")
+                    if ref_kind == "Service":
+                        exposed_services.add((ns, ref.get("name")))
 
     for d in deps:
         meta = d.get("metadata", {})
@@ -463,8 +480,8 @@ def check_ingress_drain(env: dict, cluster_name: str, workspace: str, findings: 
             continue
 
         pod_spec = template.get("spec", {})
-        grace_period = pod_spec.get("terminationGracePeriodSeconds", 30)
-        if grace_period > 30:
+        grace_period = pod_spec.get("terminationGracePeriodSeconds", DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS)
+        if grace_period > DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS:
             continue
 
         containers = pod_spec.get("containers", [])
@@ -743,9 +760,9 @@ def check_ulimit_exhaustion(env: dict, cluster_name: str, workspace: str, findin
 
 def inspect_cluster_telemetry(project_id: str, cluster_name: str, location: str, workspace: str, skipped_clusters: list) -> dict | None:
     """Inspects a GKE cluster running all 5 telemetry checks under an isolated kubeconfig environment."""
-    kc_home = os.environ.get("HERMES_HOME", "/opt/data")
+    kc_home = os.environ.get("HERMES_HOME", DATA_DIR_PATH)
     kc_dir = os.path.expanduser(f"{kc_home}/.kubeconfigs")
-    os.makedirs(kc_dir, mode=0o700, exist_ok=True)
+    os.makedirs(kc_dir, mode=DATA_DIR_MODE, exist_ok=True)
     kc_path = os.path.join(kc_dir, f"kubeconfig_{project_id}_{cluster_name}_{location}.yaml")
 
     env = os.environ.copy()
@@ -760,7 +777,7 @@ def inspect_cluster_telemetry(project_id: str, cluster_name: str, location: str,
         if rc != 0:
             sys.stderr.write(f"Could not get credentials for {cluster_name}: {stderr}\n")
             skipped_clusters.append({
-                "name": cluster_name,
+                "cluster": cluster_name,
                 "location": location,
                 "project": project_id,
                 "reason": f"gcloud get-credentials failed: {stderr.strip()}"
@@ -807,7 +824,7 @@ def audit_project_telemetry(project_id: str, workspace: str, skipped_clusters: l
     if not isinstance(clusters, list):
         sys.stderr.write(f"Failed to list clusters in project {project_id} or no clusters found.\n")
         skipped_clusters.append({
-            "name": "*",
+            "cluster": f"{project_id}/*",
             "location": "*",
             "project": project_id,
             "reason": f"Failed to list GKE clusters in project {project_id} (permission denied or API unavailable)"
@@ -822,7 +839,7 @@ def audit_project_telemetry(project_id: str, workspace: str, skipped_clusters: l
             continue
         if status != "RUNNING":
             skipped_clusters.append({
-                "name": name,
+                "cluster": name,
                 "location": loc,
                 "project": project_id,
                 "reason": f"Cluster is not RUNNING (status: {status})"
@@ -853,7 +870,7 @@ def main():
     if not target_projects:
         sys.stderr.write("No target projects resolved from CLI, environment, or gcloud.\n")
         skipped_clusters.append({
-            "name": "*",
+            "cluster": "unresolved/*",
             "location": "*",
             "project": "unknown",
             "reason": "No GCP project ID configured or resolved"
