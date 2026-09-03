@@ -199,9 +199,10 @@ spec:
                 "spec": {"selector": {"app": "web"}}
             }]
         })
-        # svc succeeds, ingress/httproute fails with CRD missing error
+        # svc succeeds, ingress fails with connection error, httproute fails with CRD missing error
         mock_run_cmd.side_effect = [
             (0, svc_json, ""),
+            (1, "", "error: connection refused to api-server"),
             (1, "", "error: the server doesn't have a resource type \"httproute\""),
         ]
 
@@ -213,7 +214,7 @@ spec:
         telemetry_audit.check_ingress_drain(env, "my-cluster", "", findings, checks_run, limitations)
 
         self.assertEqual(len(limitations), 1)
-        self.assertIn("ingress-502-drain: ingress/httproute/gateway read failed", limitations[0])
+        self.assertIn("ingress-502-drain: ingress read failed", limitations[0])
         self.assertEqual(len(findings), 0)
 
 
