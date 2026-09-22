@@ -34,21 +34,25 @@ The rosters, with exact cron expressions, enabled state, and prompts, are genera
 
 After the bootstrap inventory scan completes, the **First-Run Quick Value Audit** (`first-run-quick-value-audit`) triggers automatically to surface high-impact findings within the first 2 hours of installation. Without this, a user installing on Tuesday would wait up to 6 days for cost optimization findings (the Fleet Waste Audit runs weekly on Monday), and up to 24 hours for security and reliability findings.
 
-The first-run sequence executes four audits in order:
+The first-run sequence files kanban cards for four audits:
 
-| Time After Bootstrap | Audit | What It Finds |
-| -------------------- | ----- | ------------- |
-| +0 min | Fleet Waste Audit | Idle PVs, unattached disks, reserved IPs, over-provisioned pools |
-| +5 min | Security & RBAC Posture | Overprivileged service accounts, missing network policies |
-| +10 min | Workload Reliability | Missing probes, PDB gaps, restart loops |
-| +15 min | Stockout Prevention | Capacity risks, single-zone stockouts |
+| Audit | What It Finds |
+| ----- | ------------- |
+| Fleet Waste Audit | Idle PVs, unattached disks, reserved IPs, over-provisioned pools |
+| Security & RBAC Posture | Overprivileged service accounts, missing network policies |
+| Workload Reliability | Missing probes, PDB gaps, restart loops |
+| Stockout Prevention | Capacity risks, single-zone stockouts |
 
 The audits use the same SOPs as their scheduled counterparts — only the trigger differs. Results are delivered to chat and posted as GitHub ledger issues with remediation PRs where applicable.
 
-**Once-only guarantee:** The gate script writes `.first-run-audits-filed` immediately after filing the kanban cards. This marker persists on the data volume, so:
+**Once-only guarantee:** The gate script writes `.first-run-audits-filed` only after ALL cards are successfully filed. This marker persists on the data volume, so:
 - Pod restarts do not re-trigger the audits
 - Upgrades and reinstalls do not re-trigger
-- Manual re-run is possible by deleting `/opt/data/.first-run-audits-filed`
+- If any card fails to file, the marker is not written and the job retries on the next tick
+
+**Manual re-run:** To re-run the first-run audits after they have completed:
+1. Archive the existing kanban cards (required — each card holds an idempotency key)
+2. Delete `/opt/data/.first-run-audits-filed`
 
 After first-run, the regular schedules take over: security and reliability audits run daily, cost and capacity audits run weekly.
 
