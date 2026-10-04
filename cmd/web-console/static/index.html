@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kube-Agents Operations Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto+Mono:wght@400;500&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --gcp-blue: #1a73e8;
+      --gcp-blue-hover: #1557b0;
+      --gcp-blue-light: #e8f0fe;
+      --text-primary: #202124;
+      --text-secondary: #5f6368;
+      --text-muted: #80868b;
+      --bg-page: #f8f9fa;
+      --bg-surface: #ffffff;
+      --border-color: #dadce0;
+      --border-subtle: #f1f3f4;
+      --green-bg: #e6f4ea;
+      --green-text: #137333;
+      --amber-bg: #fef7e0;
+      --amber-text: #b06000;
+      --red-bg: #fce8e6;
+      --red-text: #c5221f;
+      --font-sans: 'Google Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'Roboto Mono', monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-sans);
+      background-color: var(--bg-page);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Top App Header */
+    header {
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-color);
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      flex-shrink: 0;
+      z-index: 10;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .gcp-logo {
+      height: 24px;
+      width: auto;
+    }
+
+    .brand-title {
+      font-size: 17px;
+      font-weight: 500;
+      color: var(--text-primary);
+      letter-spacing: -0.2px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .cluster-pill {
+      font-size: 11.5px;
+      font-weight: 500;
+      background: var(--gcp-blue-light);
+      color: var(--gcp-blue);
+      padding: 3px 8px;
+      border-radius: 12px;
+      margin-left: 8px;
+      font-family: var(--font-mono);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 4px 10px;
+      border-radius: 12px;
+    }
+
+    .badge-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+    }
+
+    .badge-green { background: var(--green-bg); color: var(--green-text); }
+    .badge-green .badge-dot { background: var(--green-text); }
+    .badge-amber { background: var(--amber-bg); color: var(--amber-text); }
+    .badge-amber .badge-dot { background: var(--amber-text); }
+    .badge-red { background: var(--red-bg); color: var(--red-text); }
+    .badge-red .badge-dot { background: var(--red-text); }
+
+    /* Main Container */
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      overflow: hidden;
+    }
+
+    /* Left Column: Chat Console */
+    .chat-section {
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-surface);
+      border-right: 1px solid var(--border-color);
+      height: 100%;
+      position: relative;
+    }
+
+    .prompt-chips-bar {
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .chip {
+      background: var(--bg-page);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 6px 14px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .chip:hover {
+      background: var(--gcp-blue-light);
+      color: var(--gcp-blue);
+      border-color: #aecbfa;
+    }
+
+    .chat-stream {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .message-row {
+      display: flex;
+      gap: 14px;
+      max-width: 860px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    .avatar-agent {
+      background: linear-gradient(135deg, #4285f4, #34a853);
+      color: white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+    }
+
+    .avatar-user {
+      background: #70757a;
+      color: white;
+    }
+
+    .message-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .message-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .message-author {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .message-time {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .source-tag {
+      font-size: 10px;
+      font-family: var(--font-mono);
+      background: var(--border-subtle);
+      color: var(--text-secondary);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    .message-bubble {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text-primary);
+      background: transparent;
+      word-break: break-word;
+    }
+
+    .message-bubble pre {
+      background: #202124;
+      color: #e8eaed;
+      padding: 12px 14px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      margin: 10px 0;
+    }
+
+    .message-bubble code {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: #f1f3f4;
+      color: #b06000;
+      padding: 2px 5px;
+      border-radius: 3px;
+    }
+
+    .message-bubble pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    .message-bubble p {
+      margin-bottom: 8px;
+    }
+
+    .message-bubble p:last-child {
+      margin-bottom: 0;
+    }
+
+    .message-bubble ul, .message-bubble ol {
+      margin-left: 20px;
+      margin-bottom: 8px;
+    }
+
+    .thinking-card {
+      background: #f8f9fa;
+      border-left: 3px solid #4285f4;
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+      cursor: pointer;
+    }
+
+    .thinking-card summary {
+      font-weight: 500;
+      color: var(--gcp-blue);
+      outline: none;
+    }
+
+    .thinking-body {
+      margin-top: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+
+    .chat-input-bar {
+      padding: 16px 24px;
+      border-top: 1px solid var(--border-color);
+      background: var(--bg-surface);
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+    }
+
+    .input-box {
+      flex: 1;
+      min-height: 48px;
+      max-height: 140px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.4;
+      outline: none;
+      resize: none;
+      transition: border-color 0.15s ease;
+    }
+
+    .input-box:focus {
+      border-color: var(--gcp-blue);
+      box-shadow: 0 0 0 2px var(--gcp-blue-light);
+    }
+
+    .btn-send {
+      height: 48px;
+      padding: 0 24px;
+      background: var(--gcp-blue);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-family: var(--font-sans);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: background-color 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    .btn-send:hover {
+      background: var(--gcp-blue-hover);
+    }
+
+    .btn-send:disabled {
+      background: #dadce0;
+      cursor: not-allowed;
+    }
+
+    /* Right Column: Live Incidents & Telemetry */
+    .sidebar {
+      background: var(--bg-page);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    .sidebar-header {
+      padding: 14px 18px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sidebar-title {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-primary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .tabs {
+      display: flex;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-color);
+      padding: 0 16px;
+    }
+
+    .tab-btn {
+      padding: 10px 14px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .tab-btn.active {
+      color: var(--gcp-blue);
+      border-bottom-color: var(--gcp-blue);
+    }
+
+    .sidebar-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .incident-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: box-shadow 0.15s ease;
+    }
+
+    .incident-card:hover {
+      box-shadow: 0 1px 4px rgba(60,64,67,0.12);
+    }
+
+    .incident-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .incident-reason {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .incident-target {
+      font-size: 11.5px;
+      font-family: var(--font-mono);
+      color: var(--text-secondary);
+    }
+
+    .incident-msg {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.4;
+      background: #f8f9fa;
+      padding: 6px 8px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      max-height: 80px;
+      overflow-y: auto;
+    }
+
+    .incident-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 180px;
+      color: var(--text-muted);
+      text-align: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .empty-icon {
+      font-size: 28px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <svg class="gcp-logo" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" fill="#4285F4"/>
+      </svg>
+      <div class="brand-title">
+        Kube-Agents Operations Console
+        <span class="cluster-pill" id="cluster-tag">GKE Cluster</span>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="badge badge-green" id="agent-badge">
+        <span class="badge-dot"></span>
+        <span id="agent-status-text">Platform Agent Ready</span>
+      </div>
+      <div class="badge badge-green" id="litellm-badge">
+        <span class="badge-dot"></span>
+        <span>Gemini 3.8 Flash</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Column: Interactive Chat -->
+    <section class="chat-section">
+      <div class="prompt-chips-bar">
+        <div class="chip" onclick="sendPrompt('Audit cluster health and identify any failing pods')">
+          ⚡ Cluster Health
+        </div>
+        <div class="chip" onclick="sendPrompt('Show recent Kubernetes warning events intercepted by Kube-Agents')">
+          🔍 Intercepted Warnings
+        </div>
+        <div class="chip" onclick="sendPrompt('Check GitOps configuration drift against live workloads')">
+          🧭 GitOps Drift
+        </div>
+        <div class="chip" onclick="sendPrompt('Review cluster security posture, RBAC, and workload isolation')">
+          🛡️ Security & RBAC
+        </div>
+      </div>
+
+      <div class="chat-stream" id="chat-stream">
+        <div class="message-row">
+          <div class="avatar avatar-agent">✨</div>
+          <div class="message-content">
+            <div class="message-header">
+              <span class="message-author">Kube-Agents</span>
+              <span class="source-tag">hermes-gateway</span>
+              <span class="message-time">Now</span>
+            </div>
+            <div class="message-bubble">
+              <p>Welcome to the Kube-Agents Operations Console. I am listening autonomously for Kubernetes warning events on this cluster.</p>
+              <p>You can ask operational questions, request workload diagnoses, or inspect live cluster state without configuring external chat platforms.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-bar">
+        <textarea
+          class="input-box"
+          id="prompt-input"
+          placeholder="Ask Kube-Agents a question, diagnose an incident, or type 'apply'..."
+          rows="1"
+          onkeydown="handleKeyDown(event)"
+        ></textarea>
+        <button class="btn-send" id="btn-send" onclick="submitMessage()">
+          Send
+        </button>
+      </div>
+    </section>
+
+    <!-- Right Column: Live Incident Feed & Status -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Live Telemetry</span>
+        <span class="source-tag" id="last-refresh">Syncing...</span>
+      </div>
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-incidents" onclick="switchTab('incidents')">Intercepted Events</button>
+        <button class="tab-btn" id="tab-tasks" onclick="switchTab('tasks')">Triage Cards</button>
+      </div>
+      <div class="sidebar-content" id="sidebar-list">
+        <div class="empty-state">
+          <div class="empty-icon">🌱</div>
+          <div>No active cluster incidents. Cluster is operating normally.</div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    let currentSessionId = "";
+    let activeTab = "incidents";
+
+    function formatTime(isoStr) {
+      if (!isoStr) return new Date().toLocaleTimeString();
+      try {
+        const d = new Date(isoStr);
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch (e) {
+        return isoStr;
+      }
+    }
+
+    function escapeHtml(text) {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+      return text.replace(/[&<>"']/g, m => map[m]);
+    }
+
+    function renderMarkdown(text) {
+      if (!text) return "";
+      let html = escapeHtml(text);
+      // Code blocks
+      html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+      // Inline code
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Bold
+      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      // Linebreaks
+      html = html.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>');
+      return `<p>${html}</p>`;
+    }
+
+    function appendMessage(role, text, source, thinking) {
+      const stream = document.getElementById("chat-stream");
+      const row = document.createElement("div");
+      row.className = "message-row";
+
+      const isAgent = role === "agent";
+      const avatarClass = isAgent ? "avatar-agent" : "avatar-user";
+      const avatarIcon = isAgent ? "✨" : "👤";
+      const author = isAgent ? "Kube-Agents" : "Operator";
+      const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      let thinkingHtml = "";
+      if (thinking) {
+        thinkingHtml = `
+          <details class="thinking-card">
+            <summary>Thinking trace (${escapeHtml(source || "Gemini")})</summary>
+            <div class="thinking-body">${escapeHtml(thinking)}</div>
+          </details>
+        `;
+      }
+
+      row.innerHTML = `
+        <div class="avatar ${avatarClass}">${avatarIcon}</div>
+        <div class="message-content">
+          <div class="message-header">
+            <span class="message-author">${author}</span>
+            <span class="source-tag">${escapeHtml(source || (isAgent ? "hermes" : "web-console"))}</span>
+            <span class="message-time">${timeStr}</span>
+          </div>
+          ${thinkingHtml}
+          <div class="message-bubble">${renderMarkdown(text)}</div>
+        </div>
+      `;
+
+      stream.appendChild(row);
+      stream.scrollTop = stream.scrollHeight;
+    }
+
+    async function submitMessage() {
+      const input = document.getElementById("prompt-input");
+      const text = input.value.trim();
+      if (!text) return;
+
+      appendMessage("user", text, "operator");
+      input.value = "";
+      input.style.height = "auto";
+
+      const btn = document.getElementById("btn-send");
+      btn.disabled = true;
+
+      try {
+        const resp = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text, session_id: currentSessionId })
+        });
+        const data = await resp.json();
+        if (data.session_id) currentSessionId = data.session_id;
+
+        if (resp.ok) {
+          appendMessage("agent", data.reply, data.source, data.thinking);
+        } else {
+          appendMessage("agent", "⚠️ " + (data.reply || data.error || "Request failed"), "error");
+        }
+      } catch (err) {
+        appendMessage("agent", "⚠️ Network error connecting to agent gateway: " + err.message, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function sendPrompt(text) {
+      const input = document.getElementById("prompt-input");
+      input.value = text;
+      submitMessage();
+    }
+
+    function handleKeyDown(e) {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        submitMessage();
+      }
+    }
+
+    function switchTab(tab) {
+      activeTab = tab;
+      document.getElementById("tab-incidents").className = tab === "incidents" ? "tab-btn active" : "tab-btn";
+      document.getElementById("tab-tasks").className = tab === "tasks" ? "tab-btn active" : "tab-btn";
+      fetchSidebarData();
+    }
+
+    async function fetchSidebarData() {
+      try {
+        const url = activeTab === "incidents" ? "/api/incidents" : "/api/tasks";
+        const resp = await fetch(url);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const list = document.getElementById("sidebar-list");
+        document.getElementById("last-refresh").innerText = new Date().toLocaleTimeString();
+
+        const items = data.incidents || data.tasks || [];
+        if (items.length === 0) {
+          list.innerHTML = `
+            <div class="empty-state">
+              <div class="empty-icon">🌱</div>
+              <div>No ${activeTab === 'incidents' ? 'warning events' : 'triage cards'} on record.</div>
+            </div>
+          `;
+          return;
+        }
+
+        let html = "";
+        for (const item of items) {
+          if (activeTab === "incidents") {
+            const sevClass = item.severity === "Critical" ? "badge-red" : "badge-amber";
+            html += `
+              <div class="incident-card">
+                <div class="incident-top">
+                  <div class="incident-reason">${escapeHtml(item.reason || "Warning")}</div>
+                  <span class="badge ${sevClass}">${escapeHtml(item.severity || "Warning")}</span>
+                </div>
+                <div class="incident-target">${escapeHtml(item.namespace || "default")}/${escapeHtml(item.workload || item.name || "workload")}</div>
+                ${item.message ? `<div class="incident-msg">${escapeHtml(item.message)}</div>` : ""}
+                <div class="incident-meta">
+                  <span>Occurrences: ${item.occurrences || 1}</span>
+                  <span>${formatTime(item.created_at)}</span>
+                </div>
+              </div>
+            `;
+          } else {
+            const statusClass = item.status === "completed" ? "badge-green" : "badge-amber";
+            html += `
+              <div class="incident-card">
+                <div class="incident-top">
+                  <div class="incident-reason">${escapeHtml(item.title || "Triage Task")}</div>
+                  <span class="badge ${statusClass}">${escapeHtml(item.status || "active")}</span>
+                </div>
+                <div class="incident-target">Assignee: ${escapeHtml(item.assignee || "platform")}</div>
+                ${item.summary ? `<div class="incident-msg">${escapeHtml(item.summary)}</div>` : ""}
+                <div class="incident-meta">
+                  <span>ID: ${escapeHtml(String(item.id || ""))}</span>
+                  <span>${formatTime(item.completed_at || item.created_at)}</span>
+                </div>
+              </div>
+            `;
+          }
+        }
+        list.innerHTML = html;
+      } catch (e) {
+        console.error("Telemetry sync error:", e);
+      }
+    }
+
+    async function checkStatus() {
+      try {
+        const resp = await fetch("/api/status");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.cluster) {
+          document.getElementById("cluster-tag").innerText = data.cluster;
+        }
+        const agentBadge = document.getElementById("agent-badge");
+        if (data.hermes && data.hermes.healthy) {
+          agentBadge.className = "badge badge-green";
+          document.getElementById("agent-status-text").innerText = "Agent Connected";
+        } else {
+          agentBadge.className = "badge badge-amber";
+          document.getElementById("agent-status-text").innerText = "Agent Initializing";
+        }
+      } catch (e) {
+        console.error("Status check failed:", e);
+      }
+    }
+
+    // Polling intervals
+    checkStatus();
+    fetchSidebarData();
+    setInterval(checkStatus, 15000);
+    setInterval(fetchSidebarData, 5000);
+  </script>
+</body>
+</html>
