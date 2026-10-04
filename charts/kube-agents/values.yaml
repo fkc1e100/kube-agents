@@ -1085,3 +1085,34 @@ plugins:
       sink: gke-stockout-alerts-sink
       thresholdCount: 1
       thresholdWindowSeconds: 300
+
+# In-cluster zero-configuration POC Web Console.
+# Provides a responsive, Google Cloud-styled web chat interface and live incident
+# feed connected directly to Hermes (:8642) and Session KV (:8699), eliminating
+# external chat platform dependencies for proof-of-concept evaluations.
+webConsole:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: ghcr.io/gke-labs/kube-agents/web-console
+    tag: "" # defaults to Chart.appVersion
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8080
+    nodePort: null
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 32Mi
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
