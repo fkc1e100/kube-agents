@@ -13,7 +13,7 @@ metadata:
     app.kubernetes.io/component: web-console
     {{- include "kube-agents.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.webConsole.replicaCount | default 1 }}
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: web-console
