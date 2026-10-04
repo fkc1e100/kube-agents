@@ -425,10 +425,16 @@ def is_valid_repository(repository: Any) -> bool:
 # Two shapes, because two are what the GitHub refresh helper handles: the
 # installation token Minty returns, and the Google OIDC identity token sent to
 # authenticate the request to it.
+#
+# A third, for a forge whose token has no recognisable shape of its own (a
+# self-managed forge's access token is bare hex): the header it travels in. The
+# broker presents such a token to git as an `extraheader` config value, so the
+# one place it could surface in a subprocess's output is beside that word.
 _CREDENTIAL_SHAPES = re.compile(
     r"gh[pousr]_[A-Za-z0-9]{20,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r"|(?i:\bauthorization:\s*(?:token|bearer|basic)\s+\S+)"
 )
 
 
@@ -756,6 +762,40 @@ def repository_is_managed(repository: str) -> bool:
     one in the ConfigMap from whoever registered it.
     """
     return repository.lower() in managed_repositories()
+
+
+def repository_role_on(registry: providers.Registry, forge: providers.Forge, repository: str) -> str:
+    """`repository_role`, for a repository on any forge this install built.
+
+    The default forge keeps the slug lists above, unchanged. Any other forge's
+    repositories are registered as `{type, url}` entries whose `type` is the
+    forge's name, and an entry counts when it resolves, through the same
+    registry, to this forge and this repository: the host decides which forge
+    an entry belongs to, exactly as it decides for a request. Read uncached --
+    it is one mounted file -- and raises when unreadable, for the reason
+    `managed_repositories` gives.
+    """
+    if forge is registry.default:
+        return repository_role(repository)
+    import gitops_workspace
+
+    def listed(entries: list[dict[str, str]]) -> bool:
+        for entry in entries:
+            if entry.get("type") != forge.name:
+                continue
+            try:
+                found, repo = registry.resolve(entry.get("url"))
+            except providers.WorkspaceError:
+                continue
+            if found is forge and repo.lower() == repository.lower():
+                return True
+        return False
+
+    if listed(gitops_workspace.get_managed_repo_entries()):
+        return ROLE_MANAGED
+    if listed(gitops_workspace.get_context_repo_entries()):
+        return ROLE_CONTEXT
+    return ROLE_UNREGISTERED
 
 
 _context_repository_cache: tuple[float, frozenset[str]] | None = None
@@ -3924,9 +3964,10 @@ class CommandExecutor:
             # It is a colon-separated list, and the empty string is not
             # "allow all" — it is a list containing one empty protocol name,
             # so it allows nothing and breaks every clone. The value must stay
-            # non-empty. `https` alone is correct today because every URL the
-            # skills clone, fetch or push is https (gitops_workspace builds
-            # them from a fixed https prefix).
+            # non-empty, which `Registry.protocols` guarantees by falling back
+            # to `https` when no forge is built. Every URL the skills clone,
+            # fetch or push on the default forge is https (gitops_workspace
+            # builds them from a fixed https prefix).
             #
             # It also refuses the `file` protocol, and that is load-bearing
             # rather than incidental: `--upload-pack=<cmd>` and
@@ -3936,7 +3977,13 @@ class CommandExecutor:
             # clone and both become arbitrary code execution again. They are on
             # the argv refusal list below so that widening is survivable, but
             # anyone reaching for `https:file` should read that list first.
-            "GIT_ALLOW_PROTOCOL": "https",
+            #
+            # The list is derived from the forges this install built rather
+            # than written here: `https` for every forge by default, and
+            # `http` beside it only when an administrator declared a forge on
+            # plain http (an in-cluster forge behind a Service). `file` is on
+            # no forge's list and never will be, for the reason above.
+            "GIT_ALLOW_PROTOCOL": ":".join(forge_registry().protocols),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(self.git_config_global),
             # An editor is a command git runs, and `core.editor` is settable
@@ -5804,7 +5851,14 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         )
         return False
 
-    def _repository_is_permitted(self, repository: str) -> bool:
+    def _repository_is_permitted(
+        self,
+        repository: str,
+        *,
+        registry: providers.Registry | None = None,
+        forge: providers.Forge | None = None,
+        roles: tuple[str, ...] = (ROLE_MANAGED,),
+    ) -> bool:
         """Answer 403 and return False unless this install registered ``repository``.
 
         The broker is where this belongs and where it has not been until now.
@@ -5819,7 +5873,10 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
         it was in the log: an authorization check that fails open is not one.
         """
         try:
-            permitted = repository_is_managed(repository)
+            if registry is not None and forge is not None:
+                permitted = repository_role_on(registry, forge, repository) in roles
+            else:
+                permitted = repository_is_managed(repository)
         except Exception as exc:
             LOGGER.warning(
                 "refusing a repository request: the managed-repository list "
@@ -6804,13 +6861,33 @@ class CredentialProxyHandler(BaseHTTPRequestHandler):
                 # Resolving here also rejects a host this install serves no
                 # credential for before the write verb is entered, which is the
                 # same order `/v1/forge/refresh` uses.
-                if verb in vcs_broker.WRITE_VERBS:
+                #
+                # On a forge other than the default, the reads are gated here
+                # too. The default forge's credential refuses an unmanaged
+                # repository itself, per repository, before any call; a token
+                # an administrator stored for a self-managed forge is one token
+                # for every repository it can see, so nothing downstream
+                # refuses, and the managed list (or, for a read, the context
+                # list) has to be asked here instead. `capabilities` spends
+                # nothing and stays open, as does a read naming no repository,
+                # which the route refuses itself.
+                writes = verb in vcs_broker.WRITE_VERBS
+                if verb != "capabilities" and (writes or payload.get("repository")):
+                    registry = self.vcs.registry
                     try:
-                        _, repository = self.vcs.registry.resolve(payload.get("repository"))
+                        forge, repository = registry.resolve(payload.get("repository"))
                     except providers.WorkspaceError as exc:
-                        self._json(HTTPStatus(exc.status), _redacted_fields(exc))
-                        return
-                    if not self._repository_is_permitted(repository):
+                        if writes:
+                            self._json(HTTPStatus(exc.status), _redacted_fields(exc))
+                            return
+                        forge, repository = None, ""
+                    if forge is not None and forge is not registry.default:
+                        roles = (ROLE_MANAGED,) if writes else (ROLE_MANAGED, ROLE_CONTEXT)
+                        if not self._repository_is_permitted(
+                            repository, registry=registry, forge=forge, roles=roles
+                        ):
+                            return
+                    elif writes and not self._repository_is_permitted(repository):
                         return
                 result = route(payload)
                 self._json(HTTPStatus.OK, result)

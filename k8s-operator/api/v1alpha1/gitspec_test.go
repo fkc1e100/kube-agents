@@ -459,14 +459,20 @@ func TestValidationDispatchesOnTheDeclaredProvider(t *testing.T) {
 	}
 }
 
-func TestOnlyGitHubIsRegistered(t *testing.T) {
+func TestRegisteredProviders(t *testing.T) {
 	// A provider the CRD accepts and the agent has no implementation for is a
 	// worse failure than one the CRD refuses, so the registry and the enum in
 	// ForgeSpec.Provider grow together with the agent-side provider. If this
 	// fails, check that the CRD enum was widened to match.
 	names := GitProviderNames()
-	if len(names) != 1 || names[0] != GitProviderGitHub {
-		t.Errorf("GitProviderNames() = %v, expected only %q", names, GitProviderGitHub)
+	expected := []string{GitProviderGitea, GitProviderGitHub}
+	if len(names) != len(expected) {
+		t.Fatalf("GitProviderNames() = %v, expected %v", names, expected)
+	}
+	for i, name := range names {
+		if name != expected[i] {
+			t.Errorf("GitProviderNames()[%d] = %q, expected %q", i, name, expected[i])
+		}
 	}
 }
 

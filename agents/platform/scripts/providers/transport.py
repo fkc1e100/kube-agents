@@ -30,12 +30,24 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import urllib.error
+import urllib.request
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlencode
 
 from workspace_paths import WorkspaceError
 
 from .errors import Override, forge_error
+
+# What an HTTP transport asks for when the verb did not name a media type.
+JSON_MEDIA_TYPE = "application/json"
+# How much of a refused call's body is read for the forge's reason. The
+# reason is one sentence; the rest of an error page is not worth holding.
+MAX_ERROR_BODY_BYTES = 16 << 10  # 16 KiB
+# The status recorded for a call that never reached the forge: no status, so
+# the shared guidance reads it as "did not say why", which is the truth.
+NO_STATUS = 0
 
 # What a CLI prints when the call reached the forge and the forge said no.
 _HTTP_STATUS_RE = re.compile(r"\(HTTP (\d{3})\)")
@@ -243,3 +255,157 @@ class CliTransport:
         # an override reads, because the marker a forge uses for a throttle is
         # often on the line after the summary.
         return forge_error(status, detail, self._overrides, message=output)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect, so a credential header cannot follow one.
+
+    urllib re-sends the request's headers to wherever a 3xx points, and the
+    header here is the token. A forge that moved answers the redirect as a
+    status, which `forge_error` reads as a call that did not say why -- the
+    install's declared host is wrong, and following it would only hide that.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+class HttpTransport:
+    """A forge's REST API, called in-process with the standard library.
+
+    The other half of the `transport` declaration, for a forge whose API is
+    plain HTTP with a header credential. No subprocess and no executable: the
+    token goes from the credential object into one request header and nowhere
+    else, which is a narrower path than a CLI reading it from a file.
+
+    What the broker hands in, and this class only applies:
+
+    - `base_url`, the forge's API root, composed by the forge from its own
+      declared scheme, host and port, never from a caller's URL;
+    - `headers`, a callable rather than a mapping, so the credential is read at
+      the moment of the call and a rotated Secret takes effect on the next one;
+    - `timeout` and `max_bytes`, the same two ceilings a CLI transport gets
+      from its runner;
+    - `viewer`, the forge's own "who is this credential" composition, which
+      `whoami` runs through this transport's `api`.
+
+    Redirects are refused (see `_NoRedirect`). A response larger than
+    `max_bytes` is refused rather than truncated: half a JSON document is not
+    an answer, and a diff cut short reads as a smaller change.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        headers: Callable[[], Mapping[str, str]],
+        *,
+        timeout: float,
+        max_bytes: int,
+        viewer: Callable[[Callable[..., Any]], str] | None = None,
+        overrides: Mapping[int, Override] | None = None,
+        opener: urllib.request.OpenerDirector | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._headers = headers
+        self._timeout = timeout
+        self._max_bytes = max_bytes
+        self._viewer = viewer
+        self._overrides = overrides or {}
+        self._opener = opener or urllib.request.build_opener(_NoRedirect())
+
+    def _url(self, path: str, params: Mapping[str, Any] | None) -> str:
+        # A forge composes paths from validated segments; this is the backstop
+        # that keeps a path from naming its own host or climbing out of the
+        # API root.
+        if "://" in path or path.startswith("/") or ".." in path.split("?")[0].split("/"):
+            raise WorkspaceError(
+                "the forge composed an API path this transport will not send",
+                status=500,
+                code="FORGE_CALL_FAILED",
+            )
+        return f"{self._base_url}/{_with_query(path, params)}"
+
+    def api(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        body: Mapping[str, Any] | None = None,
+        raw: str | None = None,
+    ) -> Any:
+        data = None
+        headers = {"Accept": raw or JSON_MEDIA_TYPE, **dict(self._headers())}
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = JSON_MEDIA_TYPE
+        request = urllib.request.Request(
+            self._url(path, params), data=data, headers=headers, method=method
+        )
+        try:
+            with self._opener.open(request, timeout=self._timeout) as response:
+                payload = response.read(self._max_bytes + 1)
+        except urllib.error.HTTPError as exc:
+            raise self._failure(exc) from None
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+            # Never reached the forge, or never heard back. The reason is the
+            # exception's class and its own reason, which carry no header.
+            reason = getattr(exc, "reason", None) or type(exc).__name__
+            raise forge_error(
+                NO_STATUS, f"the forge could not be reached: {reason}", self._overrides
+            ) from None
+        if len(payload) > self._max_bytes:
+            raise WorkspaceError(
+                f"the forge answered with more than {self._max_bytes} bytes, "
+                "which is past this broker's ceiling for one call",
+                status=502,
+                code="FORGE_CALL_FAILED",
+            )
+        text = payload.decode("utf-8", errors="replace")
+        if raw:
+            return text
+        if not text.strip():
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise WorkspaceError(
+                "the forge returned something that is not JSON",
+                status=502,
+                code="FORGE_CALL_FAILED",
+            ) from exc
+
+    def whoami(self) -> str:
+        if self._viewer is None:
+            return ""
+        return self._viewer(self.api)
+
+    def _failure(self, exc: urllib.error.HTTPError) -> WorkspaceError:
+        """The forge's refusal, with the reason it gave as the detail.
+
+        REST forges put the reason in a JSON body as `message`, sometimes with
+        a list of `errors` beside it. Read bounded, because a proxy in the way
+        may answer with an HTML page of any size.
+        """
+        try:
+            text = exc.read(MAX_ERROR_BODY_BYTES).decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - the status is still the answer
+            text = ""
+        reasons: list[str] = []
+        try:
+            body = json.loads(text) if text.strip().startswith("{") else None
+        except json.JSONDecodeError:
+            body = None
+        if isinstance(body, dict):
+            if body.get("message"):
+                reasons.append(str(body["message"]))
+            for item in body.get("errors") or []:
+                if isinstance(item, str):
+                    reasons.append(item)
+                elif isinstance(item, dict):
+                    found = item.get("message") or item.get("field") or item.get("code")
+                    if found:
+                        reasons.append(str(found))
+        summary = f"HTTP {exc.code}"
+        detail = f"{summary}: {'; '.join(reasons)}" if reasons else summary
+        return forge_error(exc.code, detail, self._overrides, message=f"{detail}\n{text}")

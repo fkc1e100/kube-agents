@@ -148,9 +148,28 @@ class Forge:
     # comments, and a caller that assumed one would either crash there or
     # silently skip it. Read back from `capabilities`.
     acknowledges = False
+    # The API root an "http" transport is built on, composed by the forge from
+    # its own declared scheme, host and port. Empty for a CLI-backed forge,
+    # whose CLI knows its own.
+    api_url = ""
+    # The git protocols this forge's clone URLs use. The executor's
+    # `GIT_ALLOW_PROTOCOL` is derived from the union across built forges, so
+    # plain `http` is allowed only on an install that declared a forge on it.
+    schemes: tuple[str, ...] = ("https",)
 
     def __init__(self) -> None:
         self.credential: Credential = NoCredential()
+
+    def viewer(self, api: Callable) -> str:
+        """The login the credential authenticates as, asked through `api`.
+
+        What an HTTP transport's `whoami` runs: the forge knows which route
+        answers "current user" and the transport makes the call. A forge whose
+        transport answers the question itself (a CLI's credential store) never
+        has this called. Empty means the credential named nobody; a failed call
+        raises, for the reason `Transport.whoami` gives.
+        """
+        return ""
 
     def read_credential(self, repo: str) -> Credential:
         """A credential that can only read `repo`, for one clone of it.

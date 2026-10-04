@@ -31,6 +31,8 @@ import base64
 import logging
 from typing import Callable, Protocol
 
+from workspace_paths import WorkspaceError
+
 LOGGER = logging.getLogger("credential-proxy.vcs")
 
 # The privileged operation a BrokeredCredential names: (provider, repository).
@@ -61,6 +63,17 @@ EXTRAHEADER_USERNAME = "x-access-token"
 # write credential, the fallback this credential exists to make impossible.
 # So a MintedReadCredential presents it whether or not a token was minted.
 CREDENTIAL_HELPER_KEY = "credential.helper"
+# The per-URL form of the same key, for a credential that is not always on
+# https or not always on the default port: git matches `http.<url>.*` against
+# the request URL by scheme, host and port, so the prefix a forge hands in is
+# exactly the origin its clone URL names and no other.
+HTTP_EXTRAHEADER_URL_KEY = "http.{origin}/.extraheader"
+# The header both the API and git are sent. One name, because it is one token.
+AUTHORIZATION_HEADER = "Authorization"
+# Read at most this much of a token file. A token is tens of bytes; a file
+# larger than this is not one, and reading it whole into a header is how a
+# mis-mounted Secret ends up in every request the broker sends.
+MAX_TOKEN_FILE_BYTES = 4096
 
 
 class Credential(Protocol):
@@ -195,6 +208,81 @@ class MintedReadCredential:
         return (
             (HTTP_EXTRAHEADER_KEY.format(host=self._host), f"AUTHORIZATION: basic {basic}"),
             helper_cleared,
+        )
+
+
+class StaticFileCredential:
+    """A long-lived token an administrator holds, read from a file at each use.
+
+    The second strategy the design names. There is nothing to acquire -- the
+    token does not expire on a schedule -- so `ensure` only checks that the
+    file is there, and says so in terms the caller can report: a Secret that
+    was never mounted reads as a 401 from the forge otherwise, which sends a
+    reader to the forge rather than to the install.
+
+    The file is read on every `headers` and `git_config` call and never kept
+    on the object. One instance serves every concurrent request for its forge,
+    so a cached token would be shared state, and a rotated Secret -- which the
+    kubelet rewrites in place -- takes effect on the next request rather than
+    on the next restart.
+
+    Both halves present the same header. `scheme` is the word before the
+    token (`token`, `Bearer`), which is the one thing that differs between
+    forges that accept a header on git's smart-HTTP routes as well as on their
+    API. `origin` is the forge's own `scheme://host[:port]`, and the git half
+    is keyed on it, so git sends the header only to a URL on that origin and
+    not to a host a redirect names. The git half also clears
+    `credential.helper`, for the reason `MintedReadCredential` does: no helper
+    another forge installed is consulted for this one.
+
+    What this costs, and the design records it as the trade against a helper
+    program: the token is rendered into the config value, so it sits in the
+    environment of the git child for the length of one invocation. It never
+    reaches an argv, a URL, or a log line this module writes.
+    """
+
+    def __init__(self, provider: str, token_file: str, origin: str, scheme: str) -> None:
+        self.provider = provider
+        self._token_file = token_file
+        self._origin = origin.rstrip("/")
+        self._scheme = scheme
+
+    def _token(self) -> str:
+        try:
+            with open(self._token_file, "rb") as handle:
+                raw = handle.read(MAX_TOKEN_FILE_BYTES + 1)
+        except OSError as exc:
+            raise WorkspaceError(
+                f"{self.provider}: this install's token for {self._origin} is "
+                "not readable. The Secret named in the forge's credentialsRef is "
+                "missing or has no `token` key. Report it and stop; nothing "
+                "here will make it appear.",
+                status=401,
+                code="FORGE_UNAUTHENTICATED",
+            ) from exc
+        token = raw.decode("utf-8", errors="replace").strip()
+        if not token or len(raw) > MAX_TOKEN_FILE_BYTES or any(c.isspace() for c in token):
+            raise WorkspaceError(
+                f"{self.provider}: the token file for {self._origin} does not "
+                "hold a single token. Report it and stop.",
+                status=401,
+                code="FORGE_UNAUTHENTICATED",
+            )
+        return token
+
+    def ensure(self, repo: str) -> None:
+        self._token()
+
+    def headers(self, repo: str) -> dict[str, str]:
+        return {AUTHORIZATION_HEADER: f"{self._scheme} {self._token()}"}
+
+    def git_config(self, repo: str) -> tuple[tuple[str, str], ...]:
+        return (
+            (
+                HTTP_EXTRAHEADER_URL_KEY.format(origin=self._origin),
+                f"{AUTHORIZATION_HEADER}: {self._scheme} {self._token()}",
+            ),
+            (CREDENTIAL_HELPER_KEY, ""),
         )
 
 

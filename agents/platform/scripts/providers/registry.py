@@ -20,9 +20,12 @@ import repo_ref
 from workspace_paths import WorkspaceError
 
 from .base import Forge, ForgeUnsupported, StubForge
+from .declarations import declared_forges
+from .gitea import GiteaForge
 from .github import GitHubForge
 
-AVAILABLE: tuple[type[Forge], ...] = (GitHubForge,)
+# Order matters: the first built forge is what a bare `owner/name` means.
+AVAILABLE: tuple[type[Forge], ...] = (GitHubForge, GiteaForge)
 
 
 # Hosts this design has a name and a shape for but no implementation of yet.
@@ -52,8 +55,14 @@ _UNIMPLEMENTED: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...]], ...] = 
 
 
 def build_forges(config: Mapping[str, Any] | None = None) -> tuple[Forge, ...]:
-    """Every forge instance this install has, in registration order."""
-    settings = config or {}
+    """Every forge instance this install has, in registration order.
+
+    `forges` is the administrator's declarations. Absent from `config`, it is
+    read from the environment the operator rendered, so a registry built with
+    only a privileged operation in hand sees the same forges as every other.
+    """
+    settings = dict(config or {})
+    settings.setdefault("forges", declared_forges())
     return tuple(forge for cls in AVAILABLE for forge in cls.for_config(settings))
 
 
@@ -110,6 +119,19 @@ class Registry:
                 }
             )
         )
+
+    @property
+    def protocols(self) -> tuple[str, ...]:
+        """The git protocols this install's clone URLs need, derived not listed.
+
+        The executor's `GIT_ALLOW_PROTOCOL`. Plain `http` is on it only when a
+        built forge declared it, so an install with no such forge keeps the
+        https-only boundary it always had. Never empty: an install with no
+        forge at all still gets `https`, because an empty value allows nothing
+        and breaks every clone.
+        """
+        found = {scheme for forge in self.forges for scheme in forge.schemes}
+        return tuple(sorted(found or {"https"}))
 
     def resolve(self, url: Any) -> tuple[Forge, str]:
         """The forge for this URL and the repository it names, or a refusal.

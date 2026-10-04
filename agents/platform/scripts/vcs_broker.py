@@ -73,6 +73,7 @@ from providers import (
     CliTransport,
     Forge,
     ForgeUnsupported,
+    HttpTransport,
     MAX_PAGE_SIZE,
     Registry,
     Transport,
@@ -89,6 +90,12 @@ LOGGER = logging.getLogger("credential-proxy.vcs")
 # under everything else.
 DEFAULT_MAX_CLONE_BYTES = 256 << 20  # 256 MiB
 DEFAULT_MAX_BUNDLE_BYTES = 64 << 20  # 64 MiB
+
+# The two ceilings an in-process HTTP transport gets, which a CLI transport
+# gets from its runner instead. The response ceiling is sized for a diff, the
+# largest thing a verb reads in one call; a JSON page is far smaller.
+DEFAULT_FORGE_HTTP_TIMEOUT_SECONDS = 30
+DEFAULT_MAX_FORGE_RESPONSE_BYTES = 32 << 20  # 32 MiB
 
 # How many open proposals the `advance` check reads off a branch. One would
 # settle whether any is open; the rest are read because the second half of the
@@ -292,6 +299,12 @@ class VcsBroker:
             "CREDENTIAL_PROXY_MAX_CLONE_BYTES", DEFAULT_MAX_CLONE_BYTES
         )
         self.max_bundle_bytes = max_bundle_bytes()
+        self.forge_http_timeout = _positive_int(
+            "CREDENTIAL_PROXY_FORGE_HTTP_TIMEOUT_SECONDS", DEFAULT_FORGE_HTTP_TIMEOUT_SECONDS
+        )
+        self.max_forge_response_bytes = _positive_int(
+            "CREDENTIAL_PROXY_MAX_FORGE_RESPONSE_BYTES", DEFAULT_MAX_FORGE_RESPONSE_BYTES
+        )
         # The refresh operation is configuration in the sense that matters: it
         # is how this install performs a privileged act, and a forge decides
         # whether its credential strategy has any use for one.
@@ -310,21 +323,31 @@ class VcsBroker:
         return Binding(
             forge,
             repo,
-            lambda: self._transport(forge),
+            lambda: self._transport(forge, repo),
             self._git_for(forge, repo),
         )
 
-    def _transport(self, forge: Forge) -> Transport:
+    def _transport(self, forge: Forge, repo: str = "") -> Transport:
         """The transport the forge declared, constructed here and never there.
 
         A forge names what it needs; the broker owns everything about how the
-        call is made -- the executable, the timeout, the output ceiling. Only
-        the CLI transport exists so far, because it is the only one a forge in
-        this install declares; the seam is what lets the next one be an
-        in-process HTTP client rather than a second subprocess.
+        call is made -- the executable, the timeout, the output ceiling. A CLI
+        transport takes its ceilings from the runner it is handed. An HTTP
+        transport takes them from this broker, and its headers from the
+        forge's credential for this one repository, read at each call so a
+        rotated token is the next call's token.
         """
         if forge.transport == "cli" and forge.cli:
             return CliTransport(self._cli_runner, forge.cli, forge.error_overrides)
+        if forge.transport == "http" and forge.api_url:
+            return HttpTransport(
+                forge.api_url,
+                lambda: forge.credential.headers(repo),
+                timeout=self.forge_http_timeout,
+                max_bytes=self.max_forge_response_bytes,
+                viewer=forge.viewer,
+                overrides=forge.error_overrides,
+            )
         raise ForgeUnsupported(
             f"{forge.name} declares the {forge.transport!r} transport, which "
             "this broker does not build."
@@ -338,9 +361,11 @@ class VcsBroker:
         invocations, so a credential belonging to one forge is not installed on
         every git in the process.
         """
-        config = tuple(forge.credential.git_config(repo))
-
+        # Asked at each invocation rather than once here: a credential that
+        # reads its token from a file reads it when git is about to present
+        # it, and a verb that never runs git never reads it at all.
         def run(cwd: Path, *args: str, check: bool = True):
+            config = tuple(forge.credential.git_config(repo))
             return self._git_runner(["git", *args], cwd, check, config)
 
         return run

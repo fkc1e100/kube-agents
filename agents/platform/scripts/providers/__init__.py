@@ -27,10 +27,12 @@ from .credentials import (
     Credential,
     MintedReadCredential,
     NoCredential,
+    StaticFileCredential,
 )
 from .errors import GUIDANCE, Guidance, forge_error
 from .registry import AVAILABLE, Registry, build_forges
-from .transport import CliTransport, Transport
+from .declarations import FORGES_ENV, declared_forges
+from .transport import CliTransport, HttpTransport, Transport
 from .validate import (
     BRANCH_RE,
     DEFAULT_PAGE_SIZE,
@@ -53,6 +55,10 @@ __all__ = [
     "COLLABORATION_VERBS",
     "BrokeredCredential",
     "CliTransport",
+    "FORGES_ENV",
+    "HttpTransport",
+    "StaticFileCredential",
+    "declared_forges",
     "Credential",
     "DEFAULT_PAGE_SIZE",
     "Forge",

@@ -161,9 +161,25 @@ class ContractTest(unittest.TestCase):
     """
 
     def instances(self) -> list[tuple[str, Any, Path]]:
+        # One declaration per forge, spelled the same way for all of them. A
+        # hosted forge ignores it and builds its one instance; a self-managed
+        # one builds nothing from an empty config, so without this it would
+        # pass every test below by contributing no instance to test.
         built = []
         for name, cls in forge_cases():
-            for forge in cls.for_config({}):
+            config = {
+                "forges": [
+                    {
+                        "name": cls.name,
+                        "provider": cls.name,
+                        "host": f"{cls.name}.example.test",
+                        "tokenFile": "/var/run/secrets/kubeagents/forges/token",
+                    }
+                ]
+            }
+            forges = list(cls.for_config(config))
+            self.assertTrue(forges, f"{name} built no instance from a declaration naming it")
+            for forge in forges:
                 built.append((name, forge, fixtures_dir(cls)))
         self.assertTrue(built, "no forge in AVAILABLE built an instance")
         return built
