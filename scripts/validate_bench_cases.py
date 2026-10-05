@@ -327,6 +327,11 @@ FIXTURE_NOT_READY = {
         "project; fixture defined in #1893, waiting on fleet re-apply and pool "
         "verification sweep"
     ),
+    "autoops-warning-event-triage-open-pr": (
+        "#2513: needs an install with spec.harness.incidentTriage.openPullRequest: true "
+        "and a manifest for eval-incident-workload in each pool project's *-infra repository "
+        "so the follow-up Platform Agent card can open the recommended remediation Pull Request"
+    ),
 }
 
 # Cases graded by the judge alone. The OutcomeValidity >= 0.7 fallback in
