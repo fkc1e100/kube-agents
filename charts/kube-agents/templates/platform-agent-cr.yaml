@@ -722,7 +722,7 @@ spec:
         scheme: {{ . | quote }}
         {{- end }}
         {{- with .port }}
-        port: {{ . }}
+        port: {{ . | int }}
         {{- end }}
         {{- with .namespace }}
         namespace: {{ . | quote }}
