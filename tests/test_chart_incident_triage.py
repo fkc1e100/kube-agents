@@ -23,6 +23,7 @@ _HARNESS = (
     "platformAgent.harness.location=us-central1",
 )
 _KEY = "platformAgent.harness.incidentTriage.openPullRequest"
+_DEDUP_KEY = "platformAgent.harness.incidentTriage.workloadDedupSeconds"
 
 
 def _render(*sets: str) -> subprocess.CompletedProcess:
@@ -62,6 +63,23 @@ class ChartIncidentTriageTest(unittest.TestCase):
         result = _render("platformAgent.harness.incidentTriage.autoMerge=true")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("autoMerge", result.stderr)
+
+    def test_workload_dedup_seconds_renders_beside_open_pull_request(self):
+        self.assertEqual(
+            _harness(f"{_KEY}=true", f"{_DEDUP_KEY}=120")["incidentTriage"],
+            {"openPullRequest": True, "workloadDedupSeconds": 120},
+        )
+
+    def test_workload_dedup_seconds_renders_alone(self):
+        self.assertEqual(_harness(f"{_DEDUP_KEY}=120")["incidentTriage"], {"workloadDedupSeconds": 120})
+
+    def test_workload_dedup_zero_is_rendered_as_written(self):
+        self.assertEqual(_harness(f"{_DEDUP_KEY}=0")["incidentTriage"], {"workloadDedupSeconds": 0})
+
+    def test_the_schema_refuses_a_negative_window(self):
+        result = _render(f"{_DEDUP_KEY}=-1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("workloadDedupSeconds", result.stderr)
 
 
 if __name__ == "__main__":
