@@ -226,7 +226,12 @@ drops `temperature`, `top_p` and `top_k` from every request
 ([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-default-model)),
 and only a Claude model gets the prompt-caching breakpoints
 ([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#prompt-caching)).
-Set `litellm.enabled=false`
+`litellm.reasoningEffort`, `litellm.fallback` and `litellm.dropParams` (all off
+by default) set a reasoning effort on every alias, add a fallback alias at
+another effort with `router_settings.fallbacks` to it, and drop parameters the
+provider refuses; `litellm.vertex.credentialsSecretRef` and `projectSecretRef`
+read a Vertex service-account key and project from a Secret. The site's
+inference-gateway page has the rendered shapes. Set `litellm.enabled=false`
 only if you operate your own gateway at that address. LLM-call telemetry is
 opt-in (`litellm.otel=true`) — enable it only on clusters that run a reachable
 collector, since without one the otel callback aborts every LLM request on DNS
