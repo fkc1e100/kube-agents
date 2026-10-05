@@ -104,3 +104,17 @@ agent:
 # the next edit to it would start cutting its middle. Cluster profiles already on
 # the volume get this key from the entrypoint's back-fill in the cluster loop.
 context_file_max_chars: 100000
+
+# Session titles. Hermes names every new session with one extra model call
+# (agent/title_generator.py) that asks for the lowest reasoning setting
+# (`reasoning_config: {enabled: false}`, which LiteLLM sends to Gemini 3 as
+# thinking level MINIMAL). gemini-3.8-flash on Vertex AI rejects that level
+# ("Thinking level is unsupported: THINKING_LEVEL_MINIMAL"), so on this
+# install every title call failed twice (primary and fallback alias) and
+# inflated the gateway's error counters while the agent's own turns were
+# fine. Nothing here reads a session title: there is no TUI and the chat
+# adapters do not show it. Off until Hermes lets the title call follow the
+# profile's reasoning setting.
+auxiliary:
+  title_generation:
+    enabled: false
