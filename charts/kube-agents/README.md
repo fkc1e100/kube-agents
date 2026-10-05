@@ -494,12 +494,12 @@ Use `telemetry.otlpEndpoint` instead when you do have a collector to point at.
   fallback.
 - **Git forges and repositories** — `platformAgent.integration.forges` lists
   the forges the agent talks to (`name`, `provider`, optional `host`,
-  `namespace` and `credentialsRef`), and
+  `scheme`, `port`, `namespace` and `credentialsRef`), and
   `platformAgent.integration.repositories` the repositories on them (`forge`,
   `repository`, optional `namespace`, and `role`: `gitops` for the one the
   agent publishes to, `managed` for others it may change, `context` for
-  read-only reference). `provider` is `github` or `gitlab`. If you omit it, it is `github`. A forge at a host other than github.com must name it. `credentialsRef` is
-  ignored for `github` and required for `gitlab`: a Secret holding the access
+  read-only reference). `provider` is `github` (the default), `gitlab`, or `gitea`. `credentialsRef` is
+  ignored for `github` and required for `gitlab` and `gitea`: a Secret holding the access
   token under the key `token`, mounted into the credential broker only. A
   `gitlab` forge's `host` is gitlab.com by default or a self-managed instance,
   never a GitHub name, and one `gitlab` forge per host. A `github` forge's
@@ -514,15 +514,19 @@ Use `telemetry.otlpEndpoint` instead when you do have a collector to point at.
   Enterprise Server forge, the token minter also gets the CA, and it trusts
   the CA for all of its outbound calls (see the token minter guide). A Secret, so
   changing the CA needs the same rights as changing the token. It is for a
-  forge at a self-managed host, GitLab or GitHub Enterprise Server, never
-  gitlab.com or github.com. With a `gitlab` forge
+  forge at a self-managed host, GitLab, GitHub Enterprise Server, or Gitea, never
+  gitlab.com or github.com. With a `gitlab` or `gitea` forge
   declared beside GitHub, a bare `owner/name` still works for a GitHub
-  repository that the install registered by URL. Name a GitLab repository, or
+  repository that the install registered by URL. Name a GitLab or Gitea repository, or
   a GitHub repository that the install did not register, by its URL. Apply `crds/` before upgrading
   to a release that adds a provider, since `helm upgrade` does not update CRDs. A GitHub forge's
   `host` is a spelling of github.com (`github.com`, `www.github.com`,
-  `ssh.github.com`) or a GitHub Enterprise Server hostname, as above, and a
-  repository must name a declared forge.
+  `ssh.github.com`) or a GitHub Enterprise Server hostname, and it takes
+  neither `port` nor `scheme: http`. A Gitea forge is self-managed: `host` is
+  required, `scheme` may be `http` for a forge inside the cluster, `port` is
+  set when the forge is not on the scheme's default port, and `credentialsRef`
+  names the Secret holding its API token under the key `token`. A repository
+  must name a declared forge.
   `platformAgent.integration.github.org` / `.gitRepo` remain as a deprecated
   alias for one GitHub forge and its gitops repository — set the lists or the
   alias, not both. For a GitHub GitOps repository, the alias is still what
