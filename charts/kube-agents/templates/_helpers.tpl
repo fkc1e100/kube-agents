@@ -466,7 +466,10 @@ gateway mounts this with subPath, and a subPath ConfigMap mount never receives
 in-place updates, so the running pod would have kept the old file indefinitely.
 
 Takes a dict of provider, model, callbacks, and maxTokens (optional; 0 or
-absent renders no max_tokens).
+absent renders no max_tokens), plus the optional reasoningEffort, dropParams,
+fallback (a dict of modelName and reasoningEffort), timeoutSeconds and
+numRetries. Every optional input renders nothing when unset, so the default
+render is unchanged.
 */}}
 {{- define "kube-agents.litellmConfig" -}}
 {{- /*
@@ -478,6 +481,12 @@ absent renders no max_tokens).
   LiteLLM's router spreads litellm_params underneath the request's own
   arguments, so this is what a request that names no max_tokens gets, not a
   ceiling on one that does; values.yaml says what that means for the agent.
+
+  reasoning_effort follows the same rule: on every alias when set, and on a
+  fourth alias, <model>-<effort>, that names it. The fallback alias, when
+  asked for, is one more entry for the same upstream model at its own effort,
+  and router_settings.fallbacks sends each primary alias to it once the
+  primary's retries are spent.
 */}}
 {{- $maxTokens := int (.maxTokens | default 0) -}}
 {{- /*
@@ -497,35 +506,53 @@ absent renders no max_tokens).
   Gemini or OpenAI render stays byte-identical.
 */}}
 {{- $claude := or (eq .provider "anthropic") (and (eq .provider "vertex_ai") (hasPrefix "claude-" .model)) -}}
+{{- $effort := .reasoningEffort | default "" -}}
+{{- $fallback := .fallback | default dict -}}
+{{- $fallbackEffort := $fallback.reasoningEffort | default "" -}}
+{{- $fallbackName := "" -}}
+{{- if $fallbackEffort -}}
+{{- $fallbackName = $fallback.modelName | default (printf "%s-%s" .model $fallbackEffort) -}}
+{{- end -}}
+{{- $timeout := int (.timeoutSeconds | default 0) -}}
+{{- $numRetries := int (.numRetries | default 0) -}}
+{{- $primaries := list "model-default" "hermes-agent" .model -}}
+{{- if $effort -}}
+{{- $primaries = append $primaries (printf "%s-%s" .model $effort) -}}
+{{- end -}}
+{{- if and $fallbackName (has $fallbackName $primaries) -}}
+{{- fail (printf "litellm.fallback.modelName %q is already a primary alias (%s); a model cannot fall back to itself" $fallbackName (join ", " $primaries)) -}}
+{{- end -}}
 model_list:
-  - model_name: model-default
+{{- range $primaries }}
+  - model_name: {{ . }}
+    litellm_params:
+      model: {{ printf "%s/%s" $.provider $.model }}
+      {{- if gt $maxTokens 0 }}
+      max_tokens: {{ $maxTokens }}
+      {{- end }}
+      {{- if $effort }}
+      reasoning_effort: {{ $effort }}
+      {{- end }}
+      {{- if $claude }}
+      additional_drop_params: ["temperature", "top_p", "top_k"]
+      {{- end }}
+{{- end }}
+{{- if $fallbackName }}
+  - model_name: {{ $fallbackName }}
     litellm_params:
       model: {{ printf "%s/%s" .provider .model }}
       {{- if gt $maxTokens 0 }}
       max_tokens: {{ $maxTokens }}
       {{- end }}
+      reasoning_effort: {{ $fallbackEffort }}
       {{- if $claude }}
       additional_drop_params: ["temperature", "top_p", "top_k"]
       {{- end }}
-  - model_name: hermes-agent
-    litellm_params:
-      model: {{ printf "%s/%s" .provider .model }}
-      {{- if gt $maxTokens 0 }}
-      max_tokens: {{ $maxTokens }}
-      {{- end }}
-      {{- if $claude }}
-      additional_drop_params: ["temperature", "top_p", "top_k"]
-      {{- end }}
-  - model_name: {{ .model }}
-    litellm_params:
-      model: {{ printf "%s/%s" .provider .model }}
-      {{- if gt $maxTokens 0 }}
-      max_tokens: {{ $maxTokens }}
-      {{- end }}
-      {{- if $claude }}
-      additional_drop_params: ["temperature", "top_p", "top_k"]
-      {{- end }}
+{{- end }}
 litellm_settings:
+  {{- if .dropParams }}
+  drop_params: true
+  {{- end }}
   callbacks: {{ .callbacks }}
 {{- /*
   Prompt caching, for Anthropic-family models only: the same $claude gate as
@@ -538,8 +565,21 @@ litellm_settings:
   only in its anthropic overlay; see that file for why the breakpoints live
   here rather than in the agent's own config.
 */}}
-{{- if $claude }}
+{{- if or $claude $fallbackName (gt $timeout 0) (gt $numRetries 0) }}
 router_settings:
+  {{- if $fallbackName }}
+  fallbacks:
+    {{- range $primaries }}
+    - {{ . }}: [{{ $fallbackName }}]
+    {{- end }}
+  {{- end }}
+  {{- if gt $timeout 0 }}
+  timeout: {{ $timeout }}
+  {{- end }}
+  {{- if gt $numRetries 0 }}
+  num_retries: {{ $numRetries }}
+  {{- end }}
+  {{- if $claude }}
   default_litellm_params:
     cache_control_injection_points:
       - location: message
@@ -551,6 +591,7 @@ router_settings:
         index: -3
       - location: message
         index: -1
+  {{- end }}
 {{- end }}
 {{- end }}
 
