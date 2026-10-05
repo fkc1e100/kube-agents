@@ -137,6 +137,23 @@ TRIAGE_DEFAULT_NAMESPACE = "default"
 TRIAGE_DEFAULT_KIND = "Pod"
 TRIAGE_FALLBACK_CLUSTER = "platform-agent-host"
 
+# The opt-in that folds a second event for a workload that already has a live
+# incident into that incident instead of opening another. The watcher's dedup
+# key is the involved object's UID, so a Deployment whose two replicas both
+# fail, or whose rollout replaces a failing pod with another failing pod,
+# offers one event per pod — and with `openPullRequest` on, each of those is a
+# triage session, a diagnosis, and a pull request for the same fix. Within this
+# many seconds of a workload's last delivered event, a further event for the
+# same cluster, namespace and workload is recorded in the ledger as a
+# duplicate of that row (`duplicate_of`), answered to the watcher as filtered,
+# and starts no session. 0, the default, keeps today's one-incident-per-UID
+# behaviour. The operator sets it from
+# spec.harness.incidentTriage.workloadDedupSeconds, and only when that is set.
+INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV = "INCIDENT_WORKLOAD_DEDUP_SECONDS"
+INCIDENT_WORKLOAD_DEDUP_OFF = 0
+# The feed status of a ledger row the window folded into an earlier one.
+FEED_STATUS_DUPLICATE = "duplicate"
+
 # Deliberately not API_SERVER_KEY. That value is the loopback sentinel
 # `cluster-internal-trusted` — a marker, not a secret — so reusing it here would
 # authenticate nothing. See docs/credential-isolation-design.md.
@@ -648,18 +665,22 @@ def init_db() -> None:
                     notified    INTEGER NOT NULL DEFAULT 0,
                     delivery_error TEXT NOT NULL DEFAULT '',
                     session_id  TEXT NOT NULL DEFAULT '',
+                    duplicate_of INTEGER NOT NULL DEFAULT 0,
                     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
-            # `session_id` is the exception to the paragraph below, and gets an
-            # ALTER TABLE: it arrived after the table shipped (0.2.0 onwards
-            # carry it), so released databases lack it, and the ledger is
-            # history an operator would lose by dropping it. Additive and
-            # defaulted, so rows written before it read back with ''.
+            # `session_id` and `duplicate_of` are the exceptions to the
+            # paragraph below, and get an ALTER TABLE: they arrived after the
+            # table shipped (0.2.0 onwards carry `session_id`), so released
+            # databases lack them, and the ledger is history an operator would
+            # lose by dropping it. Additive and defaulted, so rows written
+            # before them read back with '' and 0.
             ledger_columns = {row[1] for row in conn.execute("PRAGMA table_info(intercepted_events)")}
             if "session_id" not in ledger_columns:
                 conn.execute("ALTER TABLE intercepted_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+            if "duplicate_of" not in ledger_columns:
+                conn.execute("ALTER TABLE intercepted_events ADD COLUMN duplicate_of INTEGER NOT NULL DEFAULT 0")
             # No ALTER TABLE migration accompanies the `cluster` and
             # `delivery_error` columns: this table has never been in a release,
             # so the only databases carrying an older shape are pre-release dev
@@ -759,6 +780,7 @@ def record_intercepted_event(
     occurrences: int,
     notified: bool,
     session_id: str = "",
+    duplicate_of: int = 0,
 ) -> Optional[int]:
     """Append one forwarded event to the ledger the daily recap reads.
 
@@ -797,6 +819,11 @@ def record_intercepted_event(
     than on the way out. The reader's 120-character cut is a display choice and
     leaves the row itself unbounded, and the row is what the shared session PVC
     has to hold once a storm is writing one per sighting.
+
+    `duplicate_of` is the id of the delivered row this event was folded into
+    by the workload window (`INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV`), or 0. A
+    duplicate is written with `notified=False`: nothing was sent for it, and
+    the recap must not count it as an alert.
     """
     try:
         with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
@@ -804,8 +831,8 @@ def record_intercepted_event(
                 cursor = conn.execute(
                     "INSERT INTO intercepted_events "
                     "(cluster, namespace, workload, object_uid, object_kind, reason, message, severity, "
-                    "occurrences, notified, session_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "occurrences, notified, session_id, duplicate_of) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         cluster,
                         namespace,
@@ -818,12 +845,70 @@ def record_intercepted_event(
                         int(occurrences),
                         1 if notified else 0,
                         session_id,
+                        int(duplicate_of or 0),
                     ),
                 )
                 return cursor.lastrowid
     except Exception as exc:
         logger.error(f"Failed to record intercepted event for {namespace}/{workload}: {exc}")
     return None
+
+
+def _workload_dedup_seconds() -> int:
+    """The workload window, read per call so a test can set it.
+
+    Unset, empty, non-numeric and negative all read as off: the setting
+    arrives through the operator from a validated CRD field, so anything else
+    is a hand-set env the server should not guess at.
+    """
+    raw = os.environ.get(INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, "").strip()
+    if not raw:
+        return INCIDENT_WORKLOAD_DEDUP_OFF
+    try:
+        seconds = int(raw)
+    except ValueError:
+        logger.warning(f"{INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV}={raw!r} is not an integer; workload window off")
+        return INCIDENT_WORKLOAD_DEDUP_OFF
+    return max(seconds, INCIDENT_WORKLOAD_DEDUP_OFF)
+
+
+def _recent_delivered_event(cluster: str, namespace: str, workload: str, window_seconds: int) -> Optional[int]:
+    """The newest delivered ledger row for this workload inside the window, or None.
+
+    Delivered means `notified = 1` with no `delivery_error`: a row the inject
+    route answered "injected" and whose session the agent is working. A row
+    the ceiling suppressed, the severity gate filtered, or the window already
+    folded does not anchor a window of its own — otherwise a workload whose
+    first event was refused would silence its second.
+
+    Keyed on cluster, namespace and the cleaned workload name rather than on
+    the reason: kubelet reports one failing pod under several reasons as it
+    moves through pull, start and back-off, and the window exists to treat
+    those, and the same reason on a sibling replica, as one incident.
+
+    An empty workload name anchors nothing: `clean_workload_name` returns ''
+    for a payload with no object name, and a window keyed on '' would fold
+    unrelated nameless events together.
+
+    Best-effort like the writes around it: a read failure means no window,
+    which is the behaviour an install without the setting has.
+    """
+    if window_seconds <= INCIDENT_WORKLOAD_DEDUP_OFF or not workload:
+        return None
+    try:
+        with closing(_read_only(SESSION_KV_DB_PATH)) as conn:
+            row = conn.execute(
+                "SELECT id FROM intercepted_events "
+                "WHERE cluster = ? AND namespace = ? AND workload = ? "
+                "AND notified = 1 AND delivery_error = '' "
+                "AND created_at >= datetime('now', ?) "
+                "ORDER BY id DESC LIMIT 1",
+                (cluster, namespace, workload, f"-{int(window_seconds)} seconds"),
+            ).fetchone()
+    except Exception as exc:
+        logger.error(f"Workload window lookup failed for {namespace}/{workload}: {exc}")
+        return None
+    return int(row[0]) if row else None
 
 
 def mark_delivery_failed(event_row_id: Optional[int], detail: str) -> None:
@@ -3162,7 +3247,15 @@ def inject_message(
     # `BackOff`s can exhaust it and cap-drop the node event behind them.
     quota_denied = False
     suppressed_today = 0
+    # The workload window sits between the severity gate and the ceiling: an
+    # Info event never anchors or spends anything, and a duplicate must not
+    # draw on the day's budget either — it is the same incident the budget
+    # already paid for. Checked before the ledger write so the row carries
+    # the verdict, and before the quota so the claim is skipped.
+    duplicate_of = None
     if not suppressed:
+        duplicate_of = _recent_delivered_event(event_cluster, namespace, clean_name, _workload_dedup_seconds())
+    if not suppressed and duplicate_of is None:
         allowed, suppressed_today = _claim_alert_quota(severity_label)
         quota_denied = not allowed
 
@@ -3181,9 +3274,25 @@ def inject_message(
         message=clean_msg,
         severity=severity_label,
         occurrences=count,
-        notified=not (suppressed or quota_denied),
+        notified=not (suppressed or quota_denied or duplicate_of is not None),
         session_id=session_id,
+        duplicate_of=duplicate_of or 0,
     )
+
+    if duplicate_of is not None:
+        # Answered like the severity gate below, and for the same reason: a
+        # "suppressed" makes the watcher drop its dedup entry and re-offer
+        # this pod on its next sighting, which inside the window is another
+        # duplicate and past it is a second incident for a fix that is already
+        # in review. "filtered" keeps the entry for the watcher's own window.
+        # Same skew rule as below: only a watcher that claimed the status.
+        logger.info(
+            f"Folded {severity_label} event {event_reason} for {namespace}/{clean_name} "
+            f"into ledger row {duplicate_of} (workload window {_workload_dedup_seconds()}s); no triage session"
+        )
+        if "policy-filtered" not in _watcher_features(x_watcher_features):
+            return {"status": "suppressed", "duplicate_of": str(duplicate_of)}
+        return {"status": "filtered", "duplicate_of": str(duplicate_of)}
 
     if suppressed:
         # "filtered", deliberately not the "suppressed" the ceiling answers
@@ -3461,16 +3570,19 @@ def _clamp_limit(limit: int, maximum: int) -> int:
     return max(1, min(int(limit), maximum))
 
 
-def _feed_status(notified: int, severity: str, delivery_error: str) -> str:
+def _feed_status(notified: int, severity: str, delivery_error: str, duplicate_of: int = 0) -> str:
     """What became of a ledger row, in the inject route's own words.
 
-    Derived rather than stored, from the three columns that already decide it:
-    `notified` is set only for an alert sent on to chat, an Info row is the one
-    the severity gate filters, and `delivery_error` is written only when a sent
-    alert's post then failed.
+    Derived rather than stored, from the columns that already decide it:
+    `notified` is set only for an alert sent on to chat, `duplicate_of` names
+    the delivered row the workload window folded this one into, an Info row
+    is the one the severity gate filters, and `delivery_error` is written only
+    when a sent alert's post then failed.
     """
     if notified:
         return FEED_STATUS_INJECTED
+    if duplicate_of:
+        return FEED_STATUS_DUPLICATE
     if delivery_error:
         return FEED_STATUS_UNDELIVERED
     if severity == FEED_FILTERED_SEVERITY:
@@ -3485,12 +3597,13 @@ def list_intercepted_events(since_id: int = 0, limit: int = FEED_EVENTS_DEFAULT_
     Without `since_id`, the newest `limit` rows, newest first — what a page
     shows on load. With it, the rows after that id, oldest first, so a poller
     passes back `next_since_id` and sees each row once, in order. `truncated`
-    says more rows matched than were returned.
+    says more rows matched than were returned. A `duplicate` row carries
+    `duplicate_of`, the id of the delivered row it was folded into.
     """
     limit = _clamp_limit(limit, FEED_EVENTS_MAX_LIMIT)
     columns = (
         "id, session_id, created_at, cluster, namespace, object_kind, workload, "
-        "reason, severity, notified, delivery_error, message"
+        "reason, severity, notified, delivery_error, duplicate_of, message"
     )
     with closing(_read_only(SESSION_KV_DB_PATH)) as conn:
         if since_id > 0:
@@ -3514,7 +3627,8 @@ def list_intercepted_events(since_id: int = 0, limit: int = FEED_EVENTS_DEFAULT_
             "name": row["workload"],
             "reason": row["reason"],
             "severity": row["severity"],
-            "status": _feed_status(row["notified"], row["severity"], row["delivery_error"]),
+            "status": _feed_status(row["notified"], row["severity"], row["delivery_error"], row["duplicate_of"]),
+            "duplicate_of": row["duplicate_of"],
             "message": row["message"],
         }
         for row in rows[:limit]

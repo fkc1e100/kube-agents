@@ -179,6 +179,12 @@ const (
 	// field is the only way to set it: safeSandboxEnvOverrides does not
 	// allowlist it, so a spec.deployment.env entry of the same name is dropped.
 	incidentTriageOpenPullRequestEnv = "INCIDENT_TRIAGE_OPEN_PULL_REQUEST"
+	// incidentTriageWorkloadDedupEnv tells session_kv_server.py how long after
+	// a workload's last delivered event a further event for that workload is
+	// folded into the same incident. Set on the platform agent container only
+	// when spec.harness.incidentTriage.workloadDedupSeconds is above zero, and
+	// only by the field, for the same reasons as the entry above.
+	incidentTriageWorkloadDedupEnv = "INCIDENT_WORKLOAD_DEDUP_SECONDS"
 
 	// driftDetectorProjectNumberDigits is the character set a GCP project number
 	// is made of, and the whole of the test for one: a project ID must start with
@@ -2603,6 +2609,9 @@ func buildPodTemplateSpec(agent *agentv1alpha1.PlatformAgent, configHash, fluent
 	if incidentTriageOpensPullRequest(agent) {
 		envVars = append(envVars, corev1.EnvVar{Name: incidentTriageOpenPullRequestEnv, Value: strconv.FormatBool(true)})
 	}
+	if seconds := incidentTriageWorkloadDedupSeconds(agent); seconds > 0 {
+		envVars = append(envVars, corev1.EnvVar{Name: incidentTriageWorkloadDedupEnv, Value: strconv.Itoa(int(seconds))})
+	}
 	if agent.Spec.Deployment != nil {
 		envVars = mergeEnvVars(envVars, safeSandboxEnvOverrides(agent.Spec.Deployment.Env))
 	}
@@ -3661,6 +3670,16 @@ func incidentTriageOpensPullRequest(agent *agentv1alpha1.PlatformAgent) bool {
 		return false
 	}
 	return *harness.IncidentTriage.OpenPullRequest
+}
+
+// incidentTriageWorkloadDedupSeconds reports spec.harness.incidentTriage.workloadDedupSeconds,
+// with an absent block, an absent field and zero all meaning off.
+func incidentTriageWorkloadDedupSeconds(agent *agentv1alpha1.PlatformAgent) int32 {
+	harness := agent.Spec.Harness
+	if harness == nil || harness.IncidentTriage == nil || harness.IncidentTriage.WorkloadDedupSeconds == nil {
+		return 0
+	}
+	return *harness.IncidentTriage.WorkloadDedupSeconds
 }
 
 // driftDetectorSubscription and driftDetectorGitopsManagers read their fields
