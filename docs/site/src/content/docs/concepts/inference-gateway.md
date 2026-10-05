@@ -81,6 +81,36 @@ At the default of `0` nothing is rendered and the gateway config is what it was.
 
 The value is a default the gateway supplies, not a cap it enforces: LiteLLM lets a request's own `max_tokens` win over the one in `litellm_params`. The agent image pinned today (Hermes `v2026.9.14`) does not send `max_tokens` on agent turns, so this value is the one the agent's requests get, the same as a direct call to the gateway's `/v1/chat/completions` that omits the field. Images built on `v2026.8.19` and earlier sent their own `max_tokens` on every request; on those the client's value won for agent turns and only a request that omitted the field took the configured one.
 
+### Reasoning effort and a fallback alias
+
+Three chart values, all off by default, shape how hard the model thinks and what happens when a call fails. At their defaults nothing is rendered, so the gateway config and its rollout checksum are what they were.
+
+`litellm.reasoningEffort` (`minimal`, `low`, `medium` or `high`) puts `reasoning_effort` under every primary alias (`model-default`, `hermes-agent` and the model name) and adds one more alias, `<model>-<effort>`. `litellm.fallback.reasoningEffort` adds a fallback alias for the same model at its own effort, named `litellm.fallback.modelName` or `<model>-<effort>` by default, and a `router_settings.fallbacks` entry that sends each primary alias to it once the primary's retries are spent. `litellm.fallback.timeoutSeconds` and `numRetries` render `router_settings.timeout` and `num_retries`. The render fails if the fallback alias has the name of a primary. With `reasoningEffort: high`, `fallback.reasoningEffort: low` and `gemini-3.8-flash` on Vertex AI the result reads:
+
+```yaml
+model_list:
+  - model_name: model-default
+    litellm_params:
+      model: vertex_ai/gemini-3.8-flash
+      reasoning_effort: high
+  # hermes-agent, gemini-3.8-flash and gemini-3.8-flash-high: the same
+  - model_name: gemini-3.8-flash-low
+    litellm_params:
+      model: vertex_ai/gemini-3.8-flash
+      reasoning_effort: low
+litellm_settings:
+  drop_params: true
+  callbacks: ["prometheus"]
+router_settings:
+  fallbacks:
+    - model-default: [gemini-3.8-flash-low]
+    # one entry per primary alias
+```
+
+`litellm.dropParams: true` renders `drop_params: true`, which tells LiteLLM to drop a parameter the provider does not accept rather than fail the request. It drops silently. LiteLLM decides whether a model takes `reasoning_effort` from its model cost map, so on a model the map does not list, the effort can vanish from every request with no error. Check the model is in the map before you rely on the two together.
+
+A fallback is not silent. The gateway's reply carries `x-litellm-attempted-fallbacks` (how many fallbacks it tried), `x-litellm-model-group` (the alias that answered) and `x-litellm-attempted-retries`. With LiteLLM's log level at `INFO` the pod also logs `Falling back to model_group = <alias>` and `Successful fallback b/w models.`; the chart does not raise the level.
+
 ### Prompt caching
 
 Agent turns are mostly re-sent context: the same system prompt, skills, and conversation tail go up again on every tool call. Anthropic-family models bill that at full price unless the request marks where the reusable prefix ends, and the marks have to be in the request — so the gateway adds them, via [`cache_control_injection_points`](https://docs.litellm.ai/docs/tutorials/prompt_caching) in the shipped `config.yaml`:
@@ -168,6 +198,8 @@ curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSI
 ```
 
 A re-run against an existing install reconciles the switch in one `terraform apply` — the gateway's IAM pair, its KSA, and the rolled ConfigMap land together.
+
+Where Workload Identity is not available, the chart can read a service-account key and the project from a Secret instead. `litellm.vertex.credentialsSecretRef: {name, key}` mounts that key read-only at `/var/run/secrets/vertex/sa.json` and sets `GOOGLE_APPLICATION_CREDENTIALS` to it, which Google's client libraries prefer over the KSA's Workload Identity binding. `litellm.vertex.projectSecretRef: {name, key}` sets `VERTEXAI_PROJECT` from the Secret, so the project id does not appear in the pod spec, and stands in for `projectId`. Both are chart-only, read only with `modelProvider: vertex_ai`, and the render fails if either is set for another provider or names a Secret without a key. A key file is a long-lived credential: rotate it in the Secret, and prefer Workload Identity wherever the cluster has it.
 
 ## vLLM (local models)
 
