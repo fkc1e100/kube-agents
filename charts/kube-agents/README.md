@@ -433,8 +433,9 @@ in the token minter guide.
 ### Web console
 
 `webConsole.*` renders the web console's Deployment, a ClusterIP Service and a
-deny-all ingress NetworkPolicy. `enabled` defaults to `false`; the
-`values-poc.yaml` overlay turns it on. The Service type is not configurable,
+deny-all ingress NetworkPolicy. `enabled` defaults to `false`;
+`install.sh --enable-web-console` turns it on, and the render fails if it is set
+without `platformAgent.enabled`. The Service type is not configurable,
 because the console holds the agent's API key and has no login of its own:
 `kubectl port-forward` is the only way in. The
 [Web console page](https://gke-labs.github.io/kube-agents/deploy/web-console/)
