@@ -235,9 +235,9 @@ class WebConsoleChartTest(unittest.TestCase):
 class WebConsoleRenderTest(unittest.TestCase):
     """A real render, where helm is installed."""
 
-    def _render(self, *values: str) -> list[dict]:
+    def _render(self, *values: str, release: str = "t") -> list[dict]:
         out = subprocess.run(
-            ["helm", "template", "t", str(CHART_DIR), "-n", "ns", *HELM_REQUIRED, *values],
+            ["helm", "template", release, str(CHART_DIR), "-n", "ns", *HELM_REQUIRED, *values],
             capture_output=True, text=True, check=True,
         ).stdout
         return [d for d in yaml.safe_load_all(out) if d]
@@ -273,6 +273,19 @@ class WebConsoleRenderTest(unittest.TestCase):
         without = self._console_env(self._render("--set", "webConsole.enabled=true", "--set", "litellm.enabled=false"))
         for name in ("MODEL_NAME", "MODEL_PROVIDER", "LITELLM_PEERS_HOST"):
             self.assertNotIn(name, without)
+
+    def test_long_release_name_keeps_the_peers_service_a_dns_label(self) -> None:
+        # 50 characters plus "-web-console-litellm-peers" is 76, over the
+        # 63-character limit. The cut lands after "-web-console-", and the
+        # trailing "-" is trimmed.
+        release = "r" * 47 + "-ab"
+        docs = self._render("--set", "webConsole.enabled=true", release=release)
+        (service,) = self._headless(docs)
+        name = service["metadata"]["name"]
+        self.assertEqual(name, f"{release}-web-console")
+        deployment = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == f"{release}-web-console")
+        env = {e["name"]: e.get("value") for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+        self.assertEqual(env["LITELLM_PEERS_HOST"], f"{name}.ns.svc.cluster.local")
 
     def test_console_and_litellm_name_the_same_model(self) -> None:
         docs = self._render("--set", "webConsole.enabled=true", "--set", "litellm.modelDefaultName=my-model")

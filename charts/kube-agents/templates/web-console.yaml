@@ -32,7 +32,8 @@ no credentials to read IAM.
 {{- $tag := .Values.webConsole.image.tag | default .Values.platformAgent.deployment.image.tag | default .Chart.AppVersion }}
 {{- $repo := include "kube-agents.imageRepository" (dict "repository" .Values.webConsole.image.repository "registry" (include "kube-agents.imageRegistry" .)) }}
 {{- $identity := .Values.webConsole.agentIdentity | default dict }}
-{{- $peersName := printf "%s-web-console-litellm-peers" .Release.Name }}
+{{- /* A Service name is a DNS label: 63 characters at most. LITELLM_PEERS_HOST uses the same value. */ -}}
+{{- $peersName := printf "%s-web-console-litellm-peers" .Release.Name | trunc 63 | trimSuffix "-" }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
