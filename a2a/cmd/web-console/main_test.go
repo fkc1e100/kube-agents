@@ -50,10 +50,26 @@ type fakeHermes struct {
 	reply     string
 	chatDelay time.Duration
 	chatCode  int
+	// seeded holds sessions the console did not open, by ID, with their
+	// source and title, as the event watcher or a chat platform creates them.
+	seeded map[string]map[string]any
+	// messageGets counts GET .../messages calls per session.
+	messageGets map[string]int
 }
 
 func newFakeHermes() *fakeHermes {
-	return &fakeHermes{sessions: map[string]bool{}, messages: map[string][]map[string]any{}, reply: "pods are healthy"}
+	return &fakeHermes{
+		sessions: map[string]bool{}, messages: map[string][]map[string]any{}, reply: "pods are healthy",
+		seeded: map[string]map[string]any{}, messageGets: map[string]int{},
+	}
+}
+
+// seed adds a session another caller opened.
+func (f *fakeHermes) seed(id, source, title string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions[id] = true
+	f.seeded[id] = map[string]any{"id": id, "source": source, "title": title}
 }
 
 // post appends a message to a session, as a turn or a card's wake does.
@@ -85,7 +101,11 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		data := []map[string]any{{"id": "k8s-evt-abc", "title": "Triage k8s-evt-abc", "source": "api_server", "preview": "secret text"}}
 		for id := range f.sessions {
-			data = append(data, map[string]any{"id": id, "title": "Web console", "source": "api_server"})
+			row := map[string]any{"id": id, "title": "Web console", "source": "api_server", "message_count": len(f.messages[id])}
+			for k, v := range f.seeded[id] {
+				row[k] = v
+			}
+			data = append(data, row)
 		}
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
@@ -139,12 +159,14 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.lastQuery = r.URL.RawQuery
+		f.messageGets[sid]++
 		if !f.sessions[sid] {
 			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
 			return
 		}
-		// Same paging as Hermes with order=latest: offset counts back from
-		// the newest message, and the page comes back oldest first.
+		// Same paging as Hermes. With order=latest, offset counts back from
+		// the newest message; with order=oldest, forward from the first.
+		// Either way the page comes back oldest first.
 		all := f.messages[sid]
 		limit, offset := len(all), 0
 		if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
@@ -153,12 +175,38 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil {
 			offset = v
 		}
-		end := max(len(all)-offset, 0)
-		page := all[max(end-limit, 0):end]
+		var page []map[string]any
+		if r.URL.Query().Get("order") == "oldest" {
+			start := min(offset, len(all))
+			page = all[start:min(start+limit, len(all))]
+		} else {
+			end := max(len(all)-offset, 0)
+			page = all[max(end-limit, 0):end]
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "session_id": sid, "data": page})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sessions/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/"):
+		sid := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !f.sessions[sid] {
+			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
+			return
+		}
+		session := map[string]any{"id": sid, "source": "api_server", "title": "Web console"}
+		for k, v := range f.seeded[sid] {
+			session[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "hermes.session", "session": session})
 	default:
 		hermesError(w, http.StatusNotFound, "no route")
 	}
+}
+
+// gets returns how many message reads a session has had.
+func (f *fakeHermes) gets(sid string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.messageGets[sid]
 }
 
 // state returns copies of what the fake has recorded, under its lock.
@@ -358,7 +406,11 @@ func TestChatRequiresTheConsoleRequestShape(t *testing.T) {
 
 func TestNonLoopbackHostIsRefused(t *testing.T) {
 	_, h := setup(t)
-	for _, path := range []string{"/", "/api/status", "/api/sessions/recent", "/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages"} {
+	for _, path := range []string{
+		"/", "/api/status", "/api/sessions/recent", "/api/insights",
+		"/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages",
+		"/api/sessions/k8s-evt-abc/transcript",
+	} {
 		req := httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:8080"+path, nil)
 		if rec := serve(h, req); rec.Code != http.StatusForbidden {
 			t.Errorf("%s via a foreign Host: status %d, want 403", path, rec.Code)
@@ -570,4 +622,30 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 			t.Errorf("index.html is missing %q", rule)
 		}
 	}
+	// The banner keeps its height and main takes the rest; the activity list
+	// and the identity box share the sidebar, each scrolling inside it.
+	for selector, rules := range map[string][]string{
+		".insights":        {"flex-shrink: 0;"},
+		".sidebar-content": {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".identity":        {"flex: 0 1 auto;", "min-height: 0;", "max-height: 45%;", "overflow-y: auto;"},
+	} {
+		block := cssBlock(t, string(page), selector)
+		for _, rule := range rules {
+			if !strings.Contains(block, rule) {
+				t.Errorf("%s is missing %q", selector, rule)
+			}
+		}
+	}
+}
+
+// cssBlock returns the declarations of the first rule whose selector is
+// exactly selector.
+func cssBlock(t *testing.T, page, selector string) string {
+	t.Helper()
+	start := strings.Index(page, "    "+selector+" {")
+	if start < 0 {
+		t.Fatalf("index.html has no %s rule", selector)
+	}
+	end := strings.Index(page[start:], "}")
+	return page[start : start+end]
 }
