@@ -25,17 +25,24 @@ limitations under the License.
 // pods/portforward on the namespace. Two checks in this file keep that
 // boundary from being bypassed through the operator's own browser:
 //
-//   - every route but /healthz refuses a Host header that is not loopback (or
-//     one listed in ALLOWED_HOSTS), which defeats DNS rebinding against the
-//     forwarded port;
+//   - every route but /healthz refuses a Host header that is not loopback,
+//     which defeats DNS rebinding against the forwarded port;
 //   - POST /api/chat requires a custom header and a JSON body, so a page on
 //     another origin cannot send a turn without a CORS preflight this server
-//     never answers.
+//     never answers;
+//   - every response forbids framing, so another page cannot overlay the
+//     console and trick a click into sending a turn.
 //
 // Each browser tab gets its own Hermes session, minted here with a
 // "web-console-" prefix. A client may only name a session with that prefix,
 // so the console cannot be used to post into the event watcher's triage
 // sessions or any other caller's.
+//
+// A turn reaches the Planning Agent, the same front door a chat message
+// reaches. When it delegates work to a kanban card, the card's result arrives
+// later as a new assistant message on the same session, after the turn's own
+// reply has been returned. The page polls GET /api/sessions/{id}/messages for
+// those, through a route limited to this console's own session IDs.
 package main
 
 import (
@@ -56,6 +63,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,7 +77,6 @@ const (
 	envListenPort   = "PORT"
 	envHermesURL    = "HERMES_URL"
 	envAPIServerKey = "API_SERVER_KEY"
-	envAllowedHosts = "ALLOWED_HOSTS"
 	envClusterName  = "CLUSTER_NAME"
 	envProjectID    = "PROJECT_ID"
 	envLocation     = "LOCATION"
@@ -88,6 +95,7 @@ const (
 	probeTimeout         = 3 * time.Second
 	sessionCreateTimeout = 15 * time.Second
 	sessionListTimeout   = 10 * time.Second
+	messagesTimeout      = 10 * time.Second
 
 	// maxRequestBodyBytes bounds a chat request. A turn is a typed message,
 	// and the container's memory limit is 128Mi.
@@ -99,8 +107,19 @@ const (
 	maxUpstreamBodyBytes = 8 << 20
 
 	recentSessionsLimit = 20
-	sessionIDPrefix     = "web-console-"
-	sessionIDRandBytes  = 16
+	// messagesPageLimit is how many of a session's newest messages one poll
+	// reads. A poll runs every few seconds, so a page this size covers every
+	// message written between two polls with a wide margin.
+	messagesPageLimit = 50
+	// roleAssistant and roleUser are the Hermes message roles a poll returns.
+	// The page shows assistant messages; it reads user messages only to find
+	// where its own turn starts, so it can tell the turn's working messages
+	// from a delegated result that landed before it.
+	roleAssistant = "assistant"
+	roleUser      = "user"
+
+	sessionIDPrefix    = "web-console-"
+	sessionIDRandBytes = 16
 
 	// consoleHeader is the custom header the page sends with every turn. A
 	// cross-origin page cannot set it without a preflight, and this server
@@ -109,8 +128,12 @@ const (
 	consoleHeaderValue = "1"
 
 	contentTypeJSON = "application/json"
-	bearerPrefix    = "Bearer "
-	logPrefix       = "[web-console] "
+	// cspFrameAncestorsNone is sent on every response with X-Frame-Options:
+	// DENY; browsers that know CSP use the first, older ones the second.
+	cspFrameAncestorsNone = "frame-ancestors 'none'"
+	xFrameOptionsDeny     = "DENY"
+	bearerPrefix          = "Bearer "
+	logPrefix             = "[web-console] "
 )
 
 var (
@@ -119,8 +142,10 @@ var (
 
 	sessionIDPattern = regexp.MustCompile(`^` + regexp.QuoteMeta(sessionIDPrefix) + `[0-9a-f]{32}$`)
 
-	// loopbackHosts are the Host values `kubectl port-forward` produces.
-	loopbackHosts = []string{"localhost", "127.0.0.1", "::1"}
+	// loopbackHosts are the Host values `kubectl port-forward` produces. No
+	// other Host is accepted: the Service is ClusterIP behind a deny-all
+	// NetworkPolicy, so a port-forward is the only way in.
+	loopbackHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
 
 	errSessionNotFound = errors.New("hermes session not found")
 )
@@ -130,7 +155,6 @@ type config struct {
 	ListenPort   string
 	HermesURL    string
 	APIServerKey string
-	AllowedHosts map[string]bool
 	ClusterName  string
 	ProjectID    string
 	Location     string
@@ -141,18 +165,9 @@ func loadConfig() config {
 		ListenPort:   envOr(envListenPort, defaultListenPort),
 		HermesURL:    strings.TrimRight(envOr(envHermesURL, defaultHermesURL), "/"),
 		APIServerKey: strings.TrimSpace(os.Getenv(envAPIServerKey)),
-		AllowedHosts: map[string]bool{},
 		ClusterName:  os.Getenv(envClusterName),
 		ProjectID:    os.Getenv(envProjectID),
 		Location:     os.Getenv(envLocation),
-	}
-	for _, h := range loopbackHosts {
-		cfg.AllowedHosts[h] = true
-	}
-	for _, h := range strings.Split(os.Getenv(envAllowedHosts), ",") {
-		if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
-			cfg.AllowedHosts[h] = true
-		}
 	}
 	return cfg
 }
@@ -192,8 +207,18 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /", s.requireLocalHost(http.FileServer(http.FS(static))))
 	mux.Handle("GET /api/status", s.requireLocalHost(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("GET /api/sessions/recent", s.requireLocalHost(http.HandlerFunc(s.handleRecentSessions)))
+	mux.Handle("GET /api/sessions/{id}/messages", s.requireLocalHost(http.HandlerFunc(s.handleSessionMessages)))
 	mux.Handle("POST /api/chat", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChat))))
-	return mux
+	return denyFraming(mux)
+}
+
+// denyFraming stops any other page from loading the console in a frame.
+func denyFraming(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", cspFrameAncestorsNone)
+		w.Header().Set("X-Frame-Options", xFrameOptionsDeny)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requireLocalHost refuses a request whose Host is not one the operator's own
@@ -201,7 +226,7 @@ func (s *server) routes() http.Handler {
 // carries its own name in Host, so it is refused here.
 func (s *server) requireLocalHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.cfg.AllowedHosts[hostOnly(r.Host)] {
+		if !loopbackHosts[hostOnly(r.Host)] {
 			writeError(w, http.StatusForbidden, "host_not_allowed",
 				"The web console only answers on localhost. Reach it with kubectl port-forward.")
 			return
@@ -251,11 +276,10 @@ type upstreamStatus struct {
 }
 
 type statusResponse struct {
-	Cluster          string         `json:"cluster"`
-	Project          string         `json:"project"`
-	Location         string         `json:"location"`
-	APIKeyConfigured bool           `json:"api_key_configured"`
-	Agent            upstreamStatus `json:"agent"`
+	Cluster  string         `json:"cluster"`
+	Project  string         `json:"project"`
+	Location string         `json:"location"`
+	Agent    upstreamStatus `json:"agent"`
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -272,11 +296,10 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		agent.Detail = fmt.Sprintf("agent gateway answered HTTP %d", resp.StatusCode)
 	}
 	writeJSON(w, http.StatusOK, statusResponse{
-		Cluster:          s.cfg.ClusterName,
-		Project:          s.cfg.ProjectID,
-		Location:         s.cfg.Location,
-		APIKeyConfigured: s.cfg.APIServerKey != "",
-		Agent:            agent,
+		Cluster:  s.cfg.ClusterName,
+		Project:  s.cfg.ProjectID,
+		Location: s.cfg.Location,
+		Agent:    agent,
 	})
 }
 
@@ -320,6 +343,84 @@ func (s *server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, sess)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+// sessionMessage is one user or assistant message from a poll of the page's
+// own session. ID is Hermes' message row ID, which increases in insertion
+// order.
+type sessionMessage struct {
+	ID        int64    `json:"id"`
+	Role      string   `json:"role"`
+	Content   string   `json:"content"`
+	Timestamp *float64 `json:"timestamp,omitempty"`
+}
+
+type sessionMessagesResponse struct {
+	SessionID string           `json:"session_id"`
+	LatestID  int64            `json:"latest_id"`
+	Messages  []sessionMessage `json:"messages"`
+}
+
+// handleSessionMessages returns the user and assistant messages that have
+// text on one of this console's sessions with an ID above ?after=, oldest
+// first. Tool rows and tool-call-only assistant rows are left out. LatestID is
+// the highest message ID read, of any role, so the page can move its mark past
+// messages it does not show.
+func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
+	sid := r.PathValue("id")
+	if !sessionIDPattern.MatchString(sid) {
+		writeError(w, http.StatusBadRequest, "invalid_session_id", "Session ID was not issued by this console.")
+		return
+	}
+	var after int64
+	if raw := r.URL.Query().Get("after"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_after", "after must be a non-negative message ID.")
+			return
+		}
+		after = v
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), messagesTimeout)
+	defer cancel()
+	path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d", url.PathEscape(sid), messagesPageLimit)
+	resp, err := s.hermes(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "agent_unreachable", "Could not reach the agent gateway: "+err.Error())
+		return
+	}
+	defer drainAndClose(resp)
+	if resp.StatusCode == http.StatusNotFound {
+		writeError(w, http.StatusNotFound, "session_not_found", "The agent has no record of this session.")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		writeError(w, http.StatusBadGateway, "agent_error", upstreamErrorDetail(resp))
+		return
+	}
+	var listed struct {
+		Data []struct {
+			ID        int64    `json:"id"`
+			Role      string   `json:"role"`
+			Content   *string  `json:"content"`
+			Timestamp *float64 `json:"timestamp"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(&listed); err != nil {
+		writeError(w, http.StatusBadGateway, "agent_bad_response", "Agent gateway returned unreadable messages.")
+		return
+	}
+	out := sessionMessagesResponse{SessionID: sid, LatestID: after, Messages: []sessionMessage{}}
+	for _, m := range listed.Data {
+		if m.ID > out.LatestID {
+			out.LatestID = m.ID
+		}
+		if m.ID <= after || (m.Role != roleAssistant && m.Role != roleUser) || m.Content == nil || strings.TrimSpace(*m.Content) == "" {
+			continue
+		}
+		out.Messages = append(out.Messages, sessionMessage{ID: m.ID, Role: m.Role, Content: *m.Content, Timestamp: m.Timestamp})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type chatRequest struct {

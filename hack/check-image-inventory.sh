@@ -542,6 +542,7 @@ check_mirror_prefix "$LABEL_MIRRORED" "$mirrored_images"
 check_mirror_names "$LABEL_MIRRORED" "$mirrored_images"
 
 check_toggle githubMinter "${MINTER_VALUES[@]}"
+check_toggle webConsole --set webConsole.enabled=true
 
 # ---------------------------------------------------------------------------
 # 4. The example manifests. They are applied by hand rather than rendered by
