@@ -367,7 +367,13 @@ deny-all ingress NetworkPolicy. `enabled` defaults to `false`;
 `install.sh --enable-web-console` turns it on, and the render fails if it is set
 without `platformAgent.enabled`. The Service type is not configurable,
 because the console holds the agent's API key and has no login of its own:
-`kubectl port-forward` is the only way in. The
+`kubectl port-forward` is the only way in. When `litellm.enabled`, the chart
+also renders a headless Service, `<release>-web-console-litellm-peers`, that
+selects the LiteLLM pods so the console can read each replica's token and spend
+counters. `webConsole.agentIdentity.gcpServiceAccount` and `.roles` record the
+agent's Google Cloud identity for the console's About panel; the Terraform
+composition fills them from the IAM module, and the console never reads IAM
+itself. The
 [Web console page](https://gke-labs.github.io/kube-agents/deploy/web-console/)
 is canonical for what it does and how it is reached.
 
