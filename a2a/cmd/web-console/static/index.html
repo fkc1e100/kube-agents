@@ -1913,7 +1913,9 @@
         });
       } catch (err) {
         if (!result) {
-          result = { error: "The stream from the web console broke off. The agent may still be working; ask for a status update. " + err.message };
+          // The console keeps reading the agent's turn after the page loses
+          // it, so the run finishes and its reply lands in the session.
+          result = { error: "The connection to the web console broke off. The agent is still finishing this turn; its reply will appear in this thread within a minute or so. " + err.message };
         }
       }
       return result || { error: "The web console closed the stream without a reply." };

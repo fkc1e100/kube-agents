@@ -65,6 +65,13 @@ type fakeHermes struct {
 	streams    int
 	// creates counts POST /api/sessions calls.
 	creates int
+	// streamGate, when set, holds the stream after `stream` is written;
+	// streamTail is written once it closes. streamEnd records how the
+	// stream ended: "finished" when the tail was written to a reader still
+	// there, "abandoned" when the reader left first.
+	streamGate chan struct{}
+	streamTail string
+	streamEnd  string
 }
 
 func newFakeHermes() *fakeHermes {
@@ -158,6 +165,25 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		time.Sleep(delay)
 		_, _ = w.Write([]byte(stream))
+		f.mu.Lock()
+		gate, tail := f.streamGate, f.streamTail
+		f.mu.Unlock()
+		if gate == nil {
+			return
+		}
+		w.(http.Flusher).Flush()
+		end := "abandoned"
+		select {
+		case <-gate:
+			if _, err := w.Write([]byte(tail)); err == nil && r.Context().Err() == nil {
+				w.(http.Flusher).Flush()
+				end = "finished"
+			}
+		case <-r.Context().Done():
+		}
+		f.mu.Lock()
+		f.streamEnd = end
+		f.mu.Unlock()
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/sessions/") && strings.HasSuffix(r.URL.Path, "/chat"):
 		sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/chat")
 		var body map[string]any
@@ -272,6 +298,13 @@ func hermesError(w http.ResponseWriter, status int, msg string) {
 
 func setup(t *testing.T) (*fakeHermes, http.Handler) {
 	t.Helper()
+	fake, s := setupServer(t)
+	return fake, s.routes()
+}
+
+// setupServer is setup for a test that changes a server field first.
+func setupServer(t *testing.T) (*fakeHermes, *server) {
+	t.Helper()
 	fake := newFakeHermes()
 	upstream := httptest.NewServer(fake)
 	t.Cleanup(upstream.Close)
@@ -280,7 +313,7 @@ func setup(t *testing.T) (*fakeHermes, http.Handler) {
 		APIServerKey: testKey,
 		ClusterName:  "c1",
 	}
-	return fake, newServer(cfg).routes()
+	return fake, newServer(cfg)
 }
 
 func chatReq(body string) *http.Request {
@@ -380,9 +413,9 @@ func TestChatRefusesChatPlatformAndUnknownSessions(t *testing.T) {
 	fake.seed("slack-thread-1", "slack", "Triage k8s-evt-0000000b")
 	fake.seed("api-other", "api_server", "Something else")
 	cases := map[string]int{
-		"slack-thread-1": http.StatusForbidden,
-		"api-other":      http.StatusForbidden,
-		"k8s-evt-0000dead":   http.StatusNotFound,
+		"slack-thread-1":   http.StatusForbidden,
+		"api-other":        http.StatusForbidden,
+		"k8s-evt-0000dead": http.StatusNotFound,
 	}
 	for sid, want := range cases {
 		rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
