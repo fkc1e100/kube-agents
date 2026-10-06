@@ -5126,6 +5126,19 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
         self.assertIn("Set LITELLM_REDACTION_ENABLED=true in", out)
         self.assertIn("Set LITELLM_REDACTION_IP_ALLOW_CIDRS=10.0.0.0/8\\ fd00::/8 in", out)
 
+    def test_enable_web_console_over_a_file_that_does_not_record_it_warns(self):
+        # bootstrap_install_env_file never rewrites an existing install.env, so
+        # the flag holds for one run; upgrade.sh and --menu regenerate tfvars
+        # from the file and would remove the console again.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = self._bootstrap_over(tmp, "PROJECT_ID=p\n", "PARAM_ENABLE_WEB_CONSOLE=true")
+        self.assertIn("--enable-web-console=true applies to this run only", out)
+        self.assertIn("records no WEB_CONSOLE_ENABLED", out)
+        self.assertIn("Set WEB_CONSOLE_ENABLED=true in", out)
+        with tempfile.TemporaryDirectory() as tmp:
+            quiet = self._bootstrap_over(tmp, "WEB_CONSOLE_ENABLED=true\n", "PARAM_ENABLE_WEB_CONSOLE=true")
+        self.assertNotIn("applies to this run only", quiet)
+
     def test_a_run_that_agrees_with_the_file_is_silent(self):
         # PARAM_* is seeded from the file, and a recorded yes reads as true.
         with tempfile.TemporaryDirectory() as tmp:
