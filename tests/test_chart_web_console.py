@@ -107,6 +107,24 @@ class WebConsoleChartTest(unittest.TestCase):
         values = yaml.safe_load(VALUES.read_text())
         self.assertIs(values["webConsole"]["enabled"], False)
 
+    def test_refuses_to_render_without_the_agent(self) -> None:
+        # A console with no Platform Agent renders a Deployment whose secret
+        # ref and upstream Service do not exist; it fails at render instead.
+        self.assertRegex(
+            self.template,
+            r'(?s)if \.Values\.webConsole\.enabled \}\}\s*\{\{- if not \.Values\.platformAgent\.enabled \}\}\s*\{\{- fail ',
+        )
+
+    def test_no_access_widening_knobs(self) -> None:
+        self.assertNotIn("ALLOWED_HOSTS", self.template)
+        self.assertFalse((CHART_DIR / "values-poc.yaml").exists(), "values-poc.yaml bypasses install.sh")
+
+    def test_image_inventory_renders_the_console(self) -> None:
+        self.assertRegex(
+            (REPO_ROOT / "hack" / "check-image-inventory.sh").read_text(),
+            r"(?m)^check_toggle webConsole --set webConsole\.enabled=true$",
+        )
+
 
 class WebConsoleImageTest(unittest.TestCase):
     """The image the chart pulls is built, signed, inventoried and released."""

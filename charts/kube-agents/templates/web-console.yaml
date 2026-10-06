@@ -15,6 +15,9 @@ One replica on purpose: a port-forward lands on one pod, and the console keeps
 which sessions have a turn in flight in memory.
 */ -}}
 {{- if .Values.webConsole.enabled }}
+{{- if not .Values.platformAgent.enabled }}
+{{- fail "webConsole.enabled is set but platformAgent.enabled is false; the web console is a chat page for the Platform Agent and has nothing to talk to without it" }}
+{{- end }}
 {{- $agentName := .Values.platformAgent.name | default "platform-agent" }}
 {{- $secretName := .Values.platformAgent.credentials.secretName | default "platform-agent-secrets" }}
 {{- /* Same tag resolution as the plugin images: an install pinned to an agent image of one commit gets the console of that commit. */ -}}
