@@ -145,7 +145,7 @@ Both jobs fire every minute (`* * * * *`, see [Autonomous watchdogs](/kube-agent
 
 ## When no chat platform is enabled
 
-Both channels are opt-in and default to disabled, so an install that enabled neither has no chat to talk to. The [web console](/kube-agents/deploy/web-console/) is a browser alternative you turn on with `webConsole.enabled`. The Hermes CLI above is the other way in, and the installer prints these two commands when you choose "None" at its chat prompt and again when it finishes:
+Both channels are opt-in and default to disabled, so an install that enabled neither has no chat to talk to. The [web console](/kube-agents/deploy/web-console/) is a browser alternative you turn on with `install.sh --enable-web-console`. The Hermes CLI above is the other way in, and the installer prints these two commands when you choose "None" at its chat prompt and again when it finishes:
 
 ```bash
 gcloud container clusters get-credentials <cluster> --location <region> --project <project> --dns-endpoint
