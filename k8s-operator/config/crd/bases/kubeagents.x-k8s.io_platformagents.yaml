@@ -9356,7 +9356,7 @@ spec:
                             UID, so a Deployment whose replicas fail the same way, or whose rollout
                             replaces one failing pod with another, offers one event per pod; with
                             OpenPullRequest each of those is a triage session and a pull request for
-                            the same fix. Within this many seconds of a workload's last delivered
+                            the same fix. Within this many seconds of a workload's last admitted
                             event, a further event for the same cluster, namespace and workload is
                             recorded in the event ledger as a duplicate of it, answered to the
                             watcher as filtered, and starts no session. 0, the default, keeps one

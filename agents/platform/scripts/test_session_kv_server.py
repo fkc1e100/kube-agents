@@ -870,17 +870,59 @@ class TestWorkloadWindow(unittest.TestCase):
         self.assertEqual(mock_trigger.call_count, 2)
 
     @patch.object(session_kv_server, "trigger_agent_troubleshooter")
-    def test_only_a_delivered_row_anchors_the_window(self, mock_trigger):
-        """A refused first event must not silence the second."""
+    def test_only_an_admitted_row_anchors_the_window(self, mock_trigger):
+        """A refused first event must not silence the second; a chat failure is not a refusal."""
         os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
         info = self._inject("k8s-evt-anchor-1", name="anchor-api-7d9f8b6c4-aaaaa", type="Normal")
         self.assertEqual(info.json()["status"], "filtered")
         second = self._inject("k8s-evt-anchor-2", name="anchor-api-7d9f8b6c4-bbbbb")
         self.assertEqual(second.json()["status"], "injected")
-        session_kv_server.mark_delivery_failed(self._rows("anchor-api")[1][0], "chat down")
+        # The chat post failed, but the triage turn ran: the incident is being
+        # worked, so a sibling inside the window still folds into it.
+        anchor_id = self._rows("anchor-api")[1][0]
+        session_kv_server.mark_delivery_failed(anchor_id, "chat down")
         third = self._inject("k8s-evt-anchor-3", name="anchor-api-7d9f8b6c4-ccccc")
-        self.assertEqual(third.json()["status"], "injected")
-        self.assertEqual(mock_trigger.call_count, 2)
+        self.assertEqual(third.json(), {"status": "filtered", "duplicate_of": str(anchor_id)})
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "_start_agent_turn")
+    @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
+    @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
+    def test_an_install_without_a_chat_platform_still_folds(self, mock_post, mock_session, mock_turn):
+        """The real troubleshooter path on an install whose chat post never succeeds.
+
+        `enabled_chat_platforms` never returns an empty list, so an install with
+        no chat platform runs `hermes send` to the default one, which fails, and
+        `mark_delivery_failed` clears `notified` on every admitted row within
+        seconds of the insert. The window must anchor on that row anyway: the
+        turn it started is the one working the incident.
+        """
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-nochat-1", name="nochat-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        rows = self._rows("nochat-api")
+        self.assertEqual(rows[0][1], 0, "the failed chat post cleared notified")
+        second = self._inject("k8s-evt-nochat-2", name="nochat-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json(), {"status": "filtered", "duplicate_of": str(rows[0][0])})
+        self.assertEqual(mock_turn.call_count, 1)
+
+    @patch.object(session_kv_server, "_start_agent_turn")
+    @patch.object(session_kv_server, "_create_gateway_session", side_effect=[False, True])
+    @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
+    def test_an_aborted_gateway_session_does_not_anchor_the_window(self, mock_post, mock_session, mock_turn):
+        """If gateway session creation fails, the next sibling replica must still run."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-abort-1", name="abort-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        self.assertEqual(mock_turn.call_count, 0)
+        second = self._inject("k8s-evt-abort-2", name="abort-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_turn.call_count, 1)
+        rows = self._rows("abort-api")
+        self.assertEqual(
+            [row[2] for row in rows],
+            [session_kv_server.TRIAGE_ABORTED_SENTINEL, 0],
+        )
 
     @patch.object(session_kv_server, "trigger_agent_troubleshooter")
     def test_a_duplicate_is_not_an_anchor_itself(self, mock_trigger):

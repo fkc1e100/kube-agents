@@ -205,7 +205,7 @@ const (
 	// allowlist it, so a spec.deployment.env entry of the same name is dropped.
 	incidentTriageOpenPullRequestEnv = "INCIDENT_TRIAGE_OPEN_PULL_REQUEST"
 	// incidentTriageWorkloadDedupEnv tells session_kv_server.py how long after
-	// a workload's last delivered event a further event for that workload is
+	// a workload's last admitted event a further event for that workload is
 	// folded into the same incident. Set on the platform agent container only
 	// when spec.harness.incidentTriage.workloadDedupSeconds is above zero, and
 	// only by the field, for the same reasons as the entry above.

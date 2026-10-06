@@ -111,8 +111,10 @@ TRIAGE_FALLBACK_CLUSTER = "platform-agent-host"
 # fail, or whose rollout replaces a failing pod with another failing pod,
 # offers one event per pod — and with `openPullRequest` on, each of those is a
 # triage session, a diagnosis, and a pull request for the same fix. Within this
-# many seconds of a workload's last delivered event, a further event for the
-# same cluster, namespace and workload is recorded in the ledger as a
+# many seconds of a workload's last admitted event (one the inject route
+# answered "injected", whether or not its chat post then went through), a
+# further event for the same cluster, namespace and workload is recorded in
+# the ledger as a
 # duplicate of that row (`duplicate_of`), answered to the watcher as filtered,
 # and starts no session. 0, the default, keeps today's one-incident-per-UID
 # behaviour. The operator sets it from
@@ -847,7 +849,7 @@ def record_intercepted_event(
     leaves the row itself unbounded, and the row is what the shared session PVC
     has to hold once a storm is writing one per sighting.
 
-    `duplicate_of` is the id of the delivered row this event was folded into
+    `duplicate_of` is the id of the admitted row this event was folded into
     by the workload window (`INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV`), or 0. A
     duplicate is written with `notified=False`: nothing was sent for it, and
     the recap must not count it as an alert.
@@ -908,16 +910,26 @@ def _workload_dedup_seconds() -> int:
 
 
 def _recent_delivered_event(cluster: str, namespace: str, workload: str, window_seconds: int) -> Optional[int]:
-    """The newest delivered ledger row for this workload inside the window, or None.
+    """The newest admitted ledger row for this workload inside the window, or None.
 
-    Delivered means `notified = 1` with no `delivery_error` and
-    `duplicate_of = 0`: a watcher event row the inject route answered
-    "injected" and whose session the agent is working. A row the ceiling
-    suppressed, the severity gate filtered, or the window already folded does
-    not anchor a window of its own — otherwise a workload whose first event was
-    refused would silence its second. Non-watcher rows (`OutOfBandChange`,
-    `ControllerStall`) share `intercepted_events` and are excluded so a drift
-    or stall record never silences a pod Warning event.
+    Admitted means the inject route answered "injected" and started the
+    triage turn: (`notified = 1` or `delivery_error != ''`) with
+    `duplicate_of = 0`. The `delivery_error != ''` form is a row
+    :func:`mark_delivery_failed` corrected because the chat post failed — and
+    the chat post is the only thing that failed; `trigger_agent_troubleshooter`
+    goes on to create the gateway session and run the turn, so the agent is
+    working that incident whether or not chat heard of it. An install with no
+    chat platform reaches that branch on every admitted row, within seconds of
+    the insert, so a window keyed on `notified` alone had nothing to anchor on
+    exactly where it was wanted.
+
+    A row the ceiling suppressed, the severity gate filtered, the window
+    already folded (`duplicate_of > 0`), or whose gateway session creation
+    aborted (`duplicate_of = TRIAGE_ABORTED_SENTINEL`) does not anchor a
+    window of its own — otherwise a workload whose first event was refused or
+    never started a turn would silence its second. Non-watcher rows
+    (`OutOfBandChange`, `ControllerStall`) share `intercepted_events` and are
+    excluded so a drift or stall record never silences a pod Warning event.
 
     Keyed on cluster, namespace and the cleaned workload name rather than on
     the reason: kubelet reports one failing pod under several reasons as it
@@ -938,7 +950,7 @@ def _recent_delivered_event(cluster: str, namespace: str, workload: str, window_
             row = conn.execute(
                 "SELECT id FROM intercepted_events "
                 "WHERE cluster = ? AND namespace = ? AND workload = ? "
-                "AND notified = 1 AND delivery_error = '' AND duplicate_of = 0 "
+                "AND (notified = 1 OR delivery_error != '') AND duplicate_of = 0 "
                 "AND reason NOT IN (?, ?) "
                 "AND created_at >= datetime('now', ?) "
                 "ORDER BY id DESC LIMIT 1",
@@ -955,6 +967,35 @@ def _recent_delivered_event(cluster: str, namespace: str, workload: str, window_
         logger.error(f"Workload window lookup failed for {namespace}/{workload}: {exc}")
         return None
     return int(row[0]) if row else None
+
+
+# Sentinel stored in `duplicate_of` when an admitted row's gateway session
+# creation fails before the triage turn starts. Negative so `duplicate_of > 0`
+# (a workload-folded duplicate) stays distinct for the daily recap, while
+# `duplicate_of = 0` in `_recent_delivered_event` stops the aborted row from
+# anchoring the workload window.
+TRIAGE_ABORTED_SENTINEL = -1
+
+
+def mark_triage_aborted(event_row_id: Optional[int]) -> None:
+    """Release the workload window anchor when a triage session failed to start.
+
+    `notified` and `delivery_error` still record whether chat saw the initial
+    alert so the daily recap reports the row honestly, while setting
+    `duplicate_of = TRIAGE_ABORTED_SENTINEL` prevents a turn that never ran
+    from silencing the next sibling replica inside `workloadDedupSeconds`.
+    """
+    if not event_row_id:
+        return
+    try:
+        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE intercepted_events SET duplicate_of = ? WHERE id = ?",
+                    (TRIAGE_ABORTED_SENTINEL, int(event_row_id)),
+                )
+    except Exception as exc:
+        logger.error(f"Failed to mark triage aborted for ledger row {event_row_id}: {exc}")
 
 
 def mark_delivery_failed(event_row_id: Optional[int], detail: str) -> None:
@@ -2613,6 +2654,7 @@ def trigger_agent_troubleshooter(
     #    own agent; see _build_agent_query.
     session_created = _create_gateway_session(api_url, session_id, headers)
     if not session_created:
+        mark_triage_aborted(event_row_id)
         logger.error(f"Aborting troubleshooting trigger: session creation failed for {session_id}")
         return
 
