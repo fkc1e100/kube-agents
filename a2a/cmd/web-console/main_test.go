@@ -725,23 +725,57 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rule := range []string{"grid-template-rows: minmax(0, 1fr);", "min-height: 0;"} {
-		if !strings.Contains(string(page), rule) {
-			t.Errorf("index.html is missing %q", rule)
-		}
-	}
-	// The banner keeps its height and main takes the rest; the activity list
-	// and the identity box share the sidebar, each scrolling inside it.
+	// Each grid's one row is bounded by the window, and every column, pane
+	// and list down to the scrolling element has min-height: 0, so a long
+	// feed or transcript scrolls inside its pane instead of pushing either
+	// message box off the bottom of the page. The rail, top bar and banner
+	// keep their height.
 	for selector, rules := range map[string][]string{
-		".insights":        {"flex-shrink: 0;"},
-		".sidebar-content": {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
-		".identity":        {"flex: 0 1 auto;", "min-height: 0;", "max-height: 45%;", "overflow-y: auto;"},
+		".app":         {"min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
+		".rail":        {"min-height: 0;"},
+		".rail-scroll": {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".workspace":   {"min-height: 0;"},
+		".topbar":      {"flex-shrink: 0;"},
+		".insights":    {"flex-shrink: 0;"},
+		".panes":       {"flex: 1;", "min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
+		".centre":      {"min-height: 0;"},
+		".view":        {"min-height: 0;"},
+		".feed":        {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".chat-stream": {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".side-pane":   {"min-height: 0;"},
+		".side-body":   {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".about":       {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".composer":    {"flex-shrink: 0;"},
 	} {
 		block := cssBlock(t, string(page), selector)
 		for _, rule := range rules {
 			if !strings.Contains(block, rule) {
 				t.Errorf("%s is missing %q", selector, rule)
 			}
+		}
+	}
+}
+
+func TestPageNeverAsksForNotificationsOnLoad(t *testing.T) {
+	page, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The one permission request sits in the handler of the rail button.
+	if n := strings.Count(string(page), "Notification.requestPermission("); n != 1 {
+		t.Fatalf("index.html requests notification permission %d times, want once", n)
+	}
+	toggle := string(page)[strings.Index(string(page), "async function toggleNotifications()"):]
+	toggle = toggle[:strings.Index(toggle, "\n    }\n")]
+	if !strings.Contains(toggle, "Notification.requestPermission(") {
+		t.Errorf("the permission request is not inside toggleNotifications")
+	}
+	if !strings.Contains(string(page), `$("btn-notify").addEventListener("click", toggleNotifications)`) {
+		t.Errorf("toggleNotifications is not bound to the button's click")
+	}
+	for _, call := range []string{"toggleNotifications();", "toggleNotifications()\n"} {
+		if strings.Contains(string(page), call) {
+			t.Errorf("toggleNotifications is called outside a click handler")
 		}
 	}
 }
