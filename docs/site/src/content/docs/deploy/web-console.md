@@ -2,7 +2,7 @@
 title: Web Console
 description: A browser chat page for the Platform Agent on installs with no chat platform, reached through kubectl port-forward.
 sidebar:
-  order: 8
+  order: 9
 ---
 
 The web console is a chat page for the Platform Agent that runs inside the cluster. It is for installs where Slack or Google Chat is not set up yet — an evaluation cluster, a workshop seat, a demo — so you can talk to the agent from a browser. It is off by default.
@@ -11,7 +11,7 @@ The web console is a chat page for the Platform Agent that runs inside the clust
 
 Each browser tab opens its own agent session. Messages you type go to the Platform Agent as turns in that session, the same way a chat platform delivers them, and the agent's reply comes back to the page. A turn that calls tools can take several minutes; the console waits up to five minutes for a reply. When the agent proposes a change, it opens a pull request, as it does from any other chat surface.
 
-The side panel lists the agent's recent sessions by title, including the triage sessions the event watcher opens. It shows titles and timestamps only; you cannot open or post into a session the console did not create.
+The side panel lists the agent's recent sessions by title, including the triage sessions the event watcher opens. Each entry shows the session's title, its source, its message count and when it was last active, but no message content. You cannot open or post into a session the console did not create.
 
 ## How it is reached
 
@@ -34,16 +34,16 @@ helm install kube-agents charts/kube-agents \
   --set platformAgent.harness.location=YOUR_LOCATION
 ```
 
-Once the `kube-agents-web-console` Deployment is ready, forward its port and open the page:
+The console's Deployment and Service are named `<release>-web-console`, so `kube-agents-web-console` for the release above. Once the Deployment is ready, forward its port and open the page:
 
 ```bash
 kubectl port-forward -n kube-agents svc/kube-agents-web-console 8080:8080
 ```
 
-Then open `http://localhost:8080`.
+Then open `http://localhost:8080`. The `8080:8080` assumes the default `webConsole.service.port`.
 
 ## What to expect when something is wrong
 
-The badge in the header shows whether the console can reach the agent. It reads "Agent unreachable" while the agent pod is starting. It reads "No agent API key" when the console started without one, and in that state every turn fails. A failed turn shows the agent's own error message in the chat. The console does not fall back to answering from the model directly, so a reply in the page always came from the Platform Agent.
+The badge in the header shows whether the console can reach the agent. It reads "Agent unreachable" while the agent pod is starting. It reads "No agent API key" when the console started without one, and in that state every turn fails. A failed turn shows its error in the chat, including the agent's own message when the agent returned one. The console does not fall back to answering from the model directly, so a reply in the page always came from the Platform Agent.
 
 If you send a second message before the first has been answered, the console refuses it. Wait for the reply, then send again.
