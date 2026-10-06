@@ -86,6 +86,9 @@ const (
 	// whether or not the browser is still there. When it fires, the console
 	// closes the stream and Hermes interrupts the run.
 	streamTurnCeiling = 15 * time.Minute
+	// streamWriteGrace is how long past the ceiling the page's response may
+	// stay open, so the final error event can still be written.
+	streamWriteGrace = 30 * time.Second
 
 	statusSending = "Sending your message to the agent"
 	statusStarted = "The agent started working"
@@ -157,6 +160,9 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	out := &sseWriter{w: w, rc: http.NewResponseController(w), page: r.Context()}
+	// The server's WriteTimeout fits /api/chat's turnTimeout. A stream may
+	// run to the ceiling, so this response gets a later write deadline.
+	_ = out.rc.SetWriteDeadline(time.Now().Add(s.streamCeiling + streamWriteGrace))
 	out.send(eventStatus, statusEvent{Text: statusSending})
 
 	resp, err := s.openTurnStream(ctx, sid, msg)

@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -338,6 +339,42 @@ func TestChatStreamKeepsReadingAfterTheBrowserLeaves(t *testing.T) {
 	fake.mu.Unlock()
 	if end != "finished" {
 		t.Errorf("the agent's stream ended %q, want it read to the end", end)
+	}
+}
+
+// The server's WriteTimeout is sized for /api/chat. A streamed turn that
+// runs longer must still reach the page.
+func TestChatStreamOutlastsTheServerWriteTimeout(t *testing.T) {
+	fake, s := setupServer(t)
+	console := httptest.NewUnstartedServer(s.routes())
+	console.Config.WriteTimeout = 200 * time.Millisecond
+	console.Start()
+	t.Cleanup(console.Close)
+	sid := sessionIDPrefix + strings.Repeat("d", 32)
+	fake.seed(sid, "api_server", "Web console")
+	gate := make(chan struct{})
+	fake.mu.Lock()
+	fake.stream = "event: run.started\ndata: {}\n\n"
+	fake.streamGate, fake.streamTail = gate, gatedTail
+	fake.mu.Unlock()
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		close(gate)
+	}()
+
+	req, _ := http.NewRequest(http.MethodPost, console.URL+"/api/chat/stream",
+		strings.NewReader(`{"message":"hi","session_id":"`+sid+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(consoleHeader, consoleHeaderValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	events := readRelay(t, string(body))
+	if last := events[len(events)-1]; last.name != eventReply {
+		t.Errorf("final event = %+v, want the reply", last)
 	}
 }
 
