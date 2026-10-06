@@ -195,13 +195,13 @@ func TestChatStreamRecreatesAMissingSession(t *testing.T) {
 
 func TestChatStreamRepliesIntoAnAgentSession(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-x", "api_server", "Triage k8s-evt-x")
-	fake.seed("slack-1", "slack", "Triage k8s-evt-x")
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
+	fake.seed("slack-1", "slack", "Triage k8s-evt-0000000a")
 	fake.mu.Lock()
 	fake.stream = hermesTurnStream
 	fake.mu.Unlock()
-	events := readRelay(t, serve(h, streamReq(`{"message":"hi","session_id":"k8s-evt-x"}`)).Body.String())
-	if last := events[len(events)-1]; last.name != eventReply || last.data["session_id"] != "k8s-evt-x" {
+	events := readRelay(t, serve(h, streamReq(`{"message":"hi","session_id":"k8s-evt-0000000a"}`)).Body.String())
+	if last := events[len(events)-1]; last.name != eventReply || last.data["session_id"] != "k8s-evt-0000000a" {
 		t.Errorf("final event = %+v", last)
 	}
 	if rec := serve(h, streamReq(`{"message":"hi","session_id":"slack-1"}`)); rec.Code != http.StatusForbidden {
@@ -212,7 +212,7 @@ func TestChatStreamRepliesIntoAnAgentSession(t *testing.T) {
 	fake.mu.Lock()
 	fake.streamCode = http.StatusNotFound
 	fake.mu.Unlock()
-	events = readRelay(t, serve(h, streamReq(`{"message":"hi","session_id":"k8s-evt-x"}`)).Body.String())
+	events = readRelay(t, serve(h, streamReq(`{"message":"hi","session_id":"k8s-evt-0000000a"}`)).Body.String())
 	if last := events[len(events)-1]; last.name != eventError || last.data["error"] != "session_not_found" {
 		t.Errorf("final event = %+v, want session_not_found", last)
 	}
@@ -231,7 +231,7 @@ func TestChatStreamKeepsTheChatGuards(t *testing.T) {
 	if rec := serve(h, streamReq(`{"message":"hi","session_id":"web-console-ABC"}`)); rec.Code != http.StatusBadRequest {
 		t.Errorf("malformed console session: status %d, want 400", rec.Code)
 	}
-	if rec := serve(h, streamReq(`{"message":"hi","session_id":"k8s-evt-abc"}`)); rec.Code != http.StatusNotFound {
+	if rec := serve(h, streamReq(`{"message":"hi","session_id":"k8s-evt-00000abc"}`)); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown agent session: status %d, want 404", rec.Code)
 	}
 	big := `{"message":"` + strings.Repeat("a", maxRequestBodyBytes+1) + `"}`

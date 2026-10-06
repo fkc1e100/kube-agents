@@ -51,11 +51,10 @@ const (
 	// this console's. Slack and Google Chat sessions carry their own source.
 	sourceAPIServer = "api_server"
 
-	// The title prefixes session_kv_server.py gives the sessions it opens:
-	// "Triage <session id>", where an event watcher session ID starts with
-	// k8s-evt- and a scheduled check's with cron-.
-	titlePrefixEventTriage = "Triage k8s-evt-"
-	titlePrefixScheduled   = "Triage cron-"
+	// titlePrefix is what session_kv_server.py's _create_gateway_session puts
+	// before the session ID in the title of every session it opens: the
+	// title is exactly "Triage <session id>".
+	titlePrefix = "Triage "
 
 	// summaryTimeout bounds the summaries one session list request computes.
 	// A session not summarized in time is listed without one and tried again
@@ -88,20 +87,30 @@ var (
 	// and refuses anything that could change the upstream path.
 	transcriptIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
+	// The session IDs session_kv_server.py mints. create_session makes an
+	// event triage ID from eight hex digits of a UUID. _cron_report_session_id
+	// makes a scheduled check's ID from a slug of the profile and job (lower
+	// case, [a-z0-9_-], at most 80 characters) and the UTC day.
+	eventTriageIDPattern = regexp.MustCompile(`^k8s-evt-[0-9a-f]{8}$`)
+	scheduledIDPattern   = regexp.MustCompile(`^cron-[a-z0-9_-]{1,80}-[0-9]{8}$`)
+
 	// cardTitlePattern finds the card title an event triage prompt spells
 	// out ("- `title`: `Triage ns/Kind/name (Reason) on cluster`"; see
 	// _agent_query in session_kv_server.py). Every triage prompt opens with
 	// the same sentence, so that title is the line that tells posts apart.
 	cardTitlePattern = regexp.MustCompile("(?m)^- `title`: `([^`\n]+)`")
 
-	// summaryKinds are the kinds the list reads content for.
-	summaryKinds = map[string]bool{kindEventTriage: true, kindScheduled: true, kindConsole: true}
+	// summaryKinds are the kinds a channel reads content for.
+	summaryKinds = map[string]bool{kindEventTriage: true, kindScheduled: true}
 )
 
 // classifySession sorts a session into the list's groups. The console's own
 // IDs come first, then any session whose source is not the gateway API (a
 // chat platform), so a Slack session can never be read as event triage
-// because of its title. An empty source is unknown and lands in Other.
+// because of its title. An empty source is unknown and lands in Other. An
+// event triage or scheduled session needs both an ID in the shape
+// session_kv_server.py mints and the exact title it gives that ID, so a
+// session whose title only starts like one is Other.
 func classifySession(id, source, title string) string {
 	switch {
 	case sessionIDPattern.MatchString(id):
@@ -110,9 +119,11 @@ func classifySession(id, source, title string) string {
 		return kindOther
 	case source != sourceAPIServer:
 		return kindChat
-	case strings.HasPrefix(title, titlePrefixEventTriage):
+	case title != titlePrefix+id:
+		return kindOther
+	case eventTriageIDPattern.MatchString(id):
 		return kindEventTriage
-	case strings.HasPrefix(title, titlePrefixScheduled):
+	case scheduledIDPattern.MatchString(id):
 		return kindScheduled
 	default:
 		return kindOther
