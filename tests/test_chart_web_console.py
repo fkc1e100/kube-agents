@@ -119,6 +119,11 @@ class WebConsoleChartTest(unittest.TestCase):
         self.assertNotIn("ALLOWED_HOSTS", self.template)
         self.assertFalse((CHART_DIR / "values-poc.yaml").exists(), "values-poc.yaml bypasses install.sh")
 
+    def test_latest_tag_is_pulled_every_time(self) -> None:
+        # A node that cached `latest` never picks up a new build under IfNotPresent.
+        self.assertIn('(ternary "Always" "IfNotPresent" (eq $tag "latest"))', self.template)
+        self.assertEqual(yaml.safe_load(VALUES.read_text())["webConsole"]["image"]["pullPolicy"], "")
+
     def test_image_inventory_renders_the_console(self) -> None:
         self.assertRegex(
             (REPO_ROOT / "hack" / "check-image-inventory.sh").read_text(),
