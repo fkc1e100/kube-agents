@@ -277,11 +277,16 @@ spec:
 ```
 
 A human still reviews and merges the pull request, and nothing is written to the live cluster. The
-branch is `platform-agent/incident-<cluster>-<namespace>-<workload>`, keyed to the workload. Every
-incident on a workload whose pull request is still open, including the new session the event watcher
-starts each time its window lapses on an unfixed fault, revises that pull request rather than opening
-another. After it merges or closes, the next incident opens a new one. The second card's result, the pull
-request URL, is posted to the same chat thread as the report.
+branch is `platform-agent/incident-<cluster>-<namespace>-<workload>`, keyed to the workload, so a
+second incident on a workload revises its open pull request rather than opening another. The event
+watcher's own window lapses on a fault nobody has fixed yet (FailedScheduling repeats on a five-minute
+back-off), and each lapse would be a new incident. So before it starts a session, Session KV asks the
+forge whether the workload's branch has a pull request that is open, or merged or closed in the last
+ten minutes, the time a merged fix takes to sync and roll out. If one does, the event is written to the
+ledger as a duplicate of the workload's last admitted event, answered to the watcher as filtered, and
+starts no session. The lookup is bounded at five seconds; a slow or failed forge admits the event as
+before. After that grace period, the next incident opens a new pull request. The second card's result,
+the pull request URL, is posted to the same chat thread as the report.
 
 The setting has limits. Drift reports from `drift-detector` are not covered; they still wait for a
 reply. A human `apply` reply on a report whose pull request is already open does not know the
