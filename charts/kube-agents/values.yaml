@@ -1086,21 +1086,20 @@ plugins:
       thresholdCount: 1
       thresholdWindowSeconds: 300
 
-# In-cluster zero-configuration POC Web Console.
-# Provides a responsive, Google Cloud-styled web chat interface and live incident
-# feed connected directly to Hermes (:8642) and Session KV (:8699), eliminating
-# external chat platform dependencies for proof-of-concept evaluations.
+# Web console: a browser chat page for the Platform Agent, for installs with no
+# Slack or Google Chat configured. It talks to the Hermes gateway on the agent
+# Service with the agent's API_SERVER_KEY, which stays in the pod. It is
+# reachable only through `kubectl port-forward`: the Service is always
+# ClusterIP and a NetworkPolicy refuses ingress from every other pod. See
+# docs/site/src/content/docs/deploy/web-console.md.
 webConsole:
   enabled: false
-  replicaCount: 1
   image:
     repository: ghcr.io/gke-labs/kube-agents/web-console
-    tag: "" # defaults to Chart.appVersion
+    tag: "" # defaults to platformAgent.deployment.image.tag, then Chart.appVersion
     pullPolicy: IfNotPresent
   service:
-    type: ClusterIP
     port: 8080
-    nodePort: null
   resources:
     limits:
       cpu: 200m
