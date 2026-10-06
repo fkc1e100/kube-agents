@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -86,13 +87,24 @@ INCIDENT_TRIAGE_OPEN_PR_ON = "true"
 # Cluster Agent, whose persona forbids `submit-suggestion`, so the pull request
 # is a second card for this profile, queued behind the triage card.
 INCIDENT_PR_ASSIGNEE = "platform"
-# The branch the incident's pull request is opened on. One incident is one
-# session id, and `submit-suggestion prepare` picks up the open pull request
-# for a branch that already has one, so keying the branch on the session is
-# what makes a second run for the same incident revise its pull request
-# rather than open another. submit-suggestion's own naming convention is
+# The branch the incident's pull request is opened on, keyed on the workload
+# (cluster, namespace, workload name). `submit-suggestion prepare` picks up the
+# open pull request for a branch that already has one, so every incident for a
+# workload whose fix is still waiting for review revises that one pull request
+# instead of opening another. Keying it on the session id did not: the event
+# watcher starts a new session each time its rolling window lapses on a fault
+# nobody has fixed yet (FailedScheduling repeats on the scheduler's 5-minute
+# back-off), and a lab left unattended for an hour collected ten pull requests
+# per broken workload. Once the pull request merges or closes, prepare clears
+# the spent branch and the next incident opens a fresh one.
+# submit-suggestion's own naming convention is
 # `platform-agent/<change_type>-<target_id>`.
 INCIDENT_PR_BRANCH_PREFIX = "platform-agent/incident-"
+# Git allows long ref names but forges and UIs truncate them; keep enough room
+# for `<cluster>-<namespace>-<workload>` (40 + 63 + 63 chars) plus the 8-char
+# disambiguating digest of the raw components.
+INCIDENT_BRANCH_KEY_MAX_LEN = 180
+INCIDENT_BRANCH_DIGEST_LEN = 8
 # Characters a session id may carry that a branch name should not. Session ids
 # come from the watcher and are already narrow; this keeps the branch to one
 # lowercase path segment whatever a future producer sends.
@@ -1797,18 +1809,41 @@ def _incident_triage_opens_pull_request() -> bool:
 
 
 def _incident_branch(session_id: str, payload: Dict[str, Any]) -> str:
-    """The branch an incident's pull request is opened on, one per incident.
+    """The branch an incident's pull request is opened on, one per workload.
 
-    The session id is the incident's identity: the watcher deduplicates a
-    workload's events into one inject, and the inject is one session. Without
-    one (a hand-built payload), the incident's own coordinates stand in, which
-    are stable across a retry of the same event.
+    Keyed on the cluster, namespace and cleaned workload name, so sibling
+    replicas, the reasons one pod moves through, and the fresh session the
+    watcher starts each time its window lapses on an unfixed fault all land on
+    the same branch, and so on the same open pull request. Without a workload
+    name (a hand-built payload) the session id stands in, and without that the
+    event's own coordinates.
+
+    A short SHA-256 digest of the NUL-separated raw components is always
+    appended so boundary shifts (`prod` + `payments-api` vs `prod-payments` +
+    `api`), punctuation normalization (`api.v2` vs `api-v2`), and truncation
+    at `INCIDENT_BRANCH_KEY_MAX_LEN` cannot collide two distinct workloads onto
+    one branch.
     """
-    key = session_id or "-".join(
-        str(payload.get(field) or "")
-        for field in ("cluster", "namespace", "kind_of_object", "name", "reason")
-    )
+    kind = str(payload.get("kind_of_object") or payload.get("kindOfObject") or TRIAGE_DEFAULT_KIND)
+    workload = clean_workload_name(kind, str(payload.get("name") or ""))
+    if workload:
+        cluster = str(payload.get("cluster") or os.environ.get("GKE_CLUSTER_NAME", TRIAGE_FALLBACK_CLUSTER))
+        namespace = str(payload.get("namespace") or TRIAGE_DEFAULT_NAMESPACE)
+        parts = (cluster, namespace, workload)
+    elif session_id:
+        parts = (session_id,)
+    else:
+        parts = tuple(
+            str(payload.get(field) or "")
+            for field in ("cluster", "namespace", "kind_of_object", "name", "reason")
+        )
+    key = "-".join(parts)
+    digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()[:INCIDENT_BRANCH_DIGEST_LEN]
     slug = _INCIDENT_BRANCH_UNSAFE_RE.sub("-", key.lower()).strip("-")
+    max_prefix = INCIDENT_BRANCH_KEY_MAX_LEN - INCIDENT_BRANCH_DIGEST_LEN - 1
+    if len(slug) > max_prefix:
+        slug = slug[:max_prefix].rstrip("-")
+    slug = f"{slug}-{digest}" if slug else digest
     return f"{INCIDENT_PR_BRANCH_PREFIX}{slug}"
 
 
@@ -1844,9 +1879,15 @@ def _triage_pr_task_body(payload: Dict[str, Any], session_id: str) -> str:
         f"`done`), if the report says no manifest change is warranted, or if its 'What to do' section proposes no fix, open nothing and "
         f"complete this card saying so.\n"
         f"3. **Open the Pull Request** for the option marked '✅ Recommended', or for the single 'Proposed fix' when there "
-        f"is only one, with the **submit-suggestion** skill, on the branch `{branch}`. Use that branch name exactly. It "
-        f"is keyed to this incident, so if a Pull Request for it is already open, `prepare` hands that one back and you "
-        f"revise it rather than opening a second.\n"
+        f"is only one, with the **submit-suggestion** skill, on the branch `{branch}`. Use that branch name exactly. "
+        f"Before running `prepare`, check `kanban_list(status='in_progress')`: if another Pull Request card for `{branch}` is "
+        f"already `in_progress`, complete this card without touching the workspace so the two cards do not race on the same "
+        f"checkout directory. If `prepare` refuses because an earlier unfinished run left unpublished revisions in the working "
+        f"copy and no other card is `in_progress` on `{branch}`, re-run `prepare --force` to start cleanly. The branch "
+        f"is keyed to this workload, so if a Pull Request for it is already open (an earlier incident on the same "
+        f"workload that nobody has merged yet), `prepare` hands that one back and you revise it rather than opening a "
+        f"second. If that open Pull Request already makes the recommended change, push nothing: complete this card "
+        f"with its URL and say it is still waiting for review.\n"
         f"4. **Never change the live cluster directly** — no `kubectl apply`, `patch`, `scale`, `edit` or `delete`, and no "
         f"write outside the Pull Request.\n"
         f"5. **Finish with `kanban_complete(result=..., summary=...)`.** `result` gives the Pull Request URL, the option it "

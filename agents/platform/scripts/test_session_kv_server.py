@@ -2635,7 +2635,16 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
 
     def test_the_pull_request_card_names_the_branch_and_forbids_cluster_writes(self):
         body = session_kv_server._triage_pr_task_body(self.PAYLOAD, self.SESSION)
-        self.assertIn("`platform-agent/incident-evt-prod-us-oom-42`", body)
+        expected_branch = session_kv_server._incident_branch(self.SESSION, self.PAYLOAD)
+        self.assertIn(f"`{expected_branch}`", body)
+        self.assertTrue(
+            expected_branch.startswith("platform-agent/incident-prod-us-central1-test-ns-test-pod-"),
+            expected_branch,
+        )
+        self.assertIn("keyed to this workload", body)
+        self.assertIn("kanban_list(status='in_progress')", body)
+        self.assertIn("prepare --force", body)
+        self.assertIn("push nothing", body)
         self.assertIn("**submit-suggestion**", body)
         self.assertIn("`kanban_show` this card's parent", body)
         self.assertIn("If the parent card has no report (`result` is empty or its `status` is not `done`)", body)
@@ -2645,11 +2654,67 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
     def test_the_branch_is_stable_and_one_safe_segment(self):
         first = session_kv_server._incident_branch(self.SESSION, self.PAYLOAD)
         self.assertEqual(first, session_kv_server._incident_branch(self.SESSION, self.PAYLOAD))
-        self.assertEqual(first, "platform-agent/incident-evt-prod-us-oom-42")
-        fallback = session_kv_server._incident_branch("", self.PAYLOAD)
-        self.assertEqual(fallback, "platform-agent/incident-prod-us-central1-test-ns-pod-test-pod-oomkilled")
+        self.assertRegex(
+            first,
+            r"^platform-agent/incident-prod-us-central1-test-ns-test-pod-[0-9a-f]{8}$",
+        )
+        nameless = dict(self.PAYLOAD, name="")
+        self.assertRegex(
+            session_kv_server._incident_branch(self.SESSION, nameless),
+            r"^platform-agent/incident-evt-prod-us-oom-42-[0-9a-f]{8}$",
+        )
+        self.assertRegex(
+            session_kv_server._incident_branch("", nameless),
+            r"^platform-agent/incident-prod-us-central1-test-ns-pod--oomkilled-[0-9a-f]{8}$",
+        )
         hostile = session_kv_server._incident_branch("../`x` y\n", {})
         self.assertRegex(hostile.removeprefix("platform-agent/incident-"), r"^[a-z0-9-]+$")
+
+    def test_the_branch_does_not_collide_across_boundary_shifts_or_punctuation(self):
+        # `prod` + `payments-api` and `prod-payments` + `api` join to the same
+        # hyphen-separated text, as do `api.v2` and `api-v2` after unsafe-char
+        # normalization. The trailing component digest keeps them distinct.
+        shift_a = dict(self.PAYLOAD, namespace="prod", name="payments-api", kind_of_object="Deployment")
+        shift_b = dict(self.PAYLOAD, namespace="prod-payments", name="api", kind_of_object="Deployment")
+        self.assertNotEqual(
+            session_kv_server._incident_branch("s1", shift_a),
+            session_kv_server._incident_branch("s1", shift_b),
+        )
+        dot_name = dict(self.PAYLOAD, name="api.v2", kind_of_object="CronJob")
+        dash_name = dict(self.PAYLOAD, name="api-v2", kind_of_object="CronJob")
+        self.assertNotEqual(
+            session_kv_server._incident_branch("s1", dot_name),
+            session_kv_server._incident_branch("s1", dash_name),
+        )
+
+    def test_every_incident_on_one_workload_shares_the_branch(self):
+        # The watcher opens a new session each time its window lapses on an
+        # unfixed fault, and sibling replicas carry their own pod names. All of
+        # them must land on one branch, so they revise one open pull request.
+        replica_a = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-hn9mm", reason="FailedScheduling")
+        replica_b = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-zxg5p", reason="FailedScheduling")
+        branches = {
+            session_kv_server._incident_branch("k8s-evt-aaaa1111", replica_a),
+            session_kv_server._incident_branch("k8s-evt-bbbb2222", replica_b),
+            session_kv_server._incident_branch("k8s-evt-cccc3333", dict(replica_a, reason="BackOff")),
+        }
+        self.assertEqual(len(branches), 1)
+        (shared_branch,) = branches
+        self.assertRegex(
+            shared_branch,
+            r"^platform-agent/incident-prod-us-central1-test-ns-auth-service-[0-9a-f]{8}$",
+        )
+        other = dict(replica_a, name="checkout-gateway-66d545794c-f9dd5")
+        self.assertNotIn(session_kv_server._incident_branch("k8s-evt-aaaa1111", other), branches)
+
+    def test_a_long_key_is_cut_with_a_digest(self):
+        long_a = dict(self.PAYLOAD, name="w" * 200 + "a", kind_of_object="Deployment")
+        long_b = dict(self.PAYLOAD, name="w" * 200 + "b", kind_of_object="Deployment")
+        a = session_kv_server._incident_branch("", long_a).removeprefix("platform-agent/incident-")
+        b = session_kv_server._incident_branch("", long_b).removeprefix("platform-agent/incident-")
+        self.assertLessEqual(len(a), session_kv_server.INCIDENT_BRANCH_KEY_MAX_LEN)
+        self.assertNotEqual(a, b)
+        self.assertRegex(a, r"^[a-z0-9-]+$")
 
     def test_drift_records_ignore_the_setting(self):
         drift = {"kind": session_kv_server.INJECT_KIND_DRIFT, "summary": "s"}

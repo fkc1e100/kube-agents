@@ -277,8 +277,10 @@ spec:
 ```
 
 A human still reviews and merges the pull request, and nothing is written to the live cluster. The
-branch is `platform-agent/incident-<session>`, keyed to the incident. A retried event therefore
-revises the open pull request rather than opening a second one. The second card's result, the pull
+branch is `platform-agent/incident-<cluster>-<namespace>-<workload>-<digest>`, keyed to the workload. Every
+incident on a workload whose pull request is still open, including the new session the event watcher
+starts each time its window lapses on an unfixed fault, revises that pull request rather than opening
+another. After it merges or closes, the next incident opens a new one. The second card's result, the pull
 request URL, is posted to the same chat thread as the report.
 
 The setting has limits. Drift reports from `drift-detector` are not covered; they still wait for a
