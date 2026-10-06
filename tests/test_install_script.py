@@ -8331,6 +8331,7 @@ class DomainScopedFlagsTest(unittest.TestCase):
     TOGGLES = {
         "--enable-gvisor": "PARAM_ENABLE_GVISOR",
         "--enable-hermes-dashboard": "PARAM_ENABLE_WEBUI",
+        "--enable-web-console": "PARAM_ENABLE_WEB_CONSOLE",
         "--enable-gke-backup-plan": "PARAM_ENABLE_GKE_BACKUP_PLAN",
         "--enable-pubsub-platform": "PARAM_ENABLE_PUBSUB_PLATFORM",
         "--enable-stockout-investigator": "PARAM_ENABLE_STOCKOUT_INVESTIGATOR",
@@ -10088,6 +10089,7 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         "--enable-stockout-investigator",
         "--enable-drift-detector",
         "--enable-hermes-dashboard",
+        "--enable-web-console",
         "--litellm-redaction",
         "--scoped-sa-pool-enabled",
     ]
