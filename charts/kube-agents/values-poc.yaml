@@ -1,8 +1,6 @@
-# Helm values preset for rapid customer Proof of Concept (POC) environments.
-# Enables the in-cluster zero-configuration Web Console so operators can interact
-# with Kube-Agents directly via browser without setting up Slack, Teams, or Google Chat.
+# Values overlay for an evaluation install with no chat platform: turns on the
+# web console, a browser chat page for the Platform Agent.
 #
-# Usage:
 #   helm install kube-agents charts/kube-agents \
 #     --namespace kube-agents --create-namespace \
 #     -f charts/kube-agents/values-poc.yaml \
@@ -10,20 +8,12 @@
 #     --set platformAgent.harness.clusterName=YOUR_CLUSTER \
 #     --set platformAgent.harness.location=YOUR_LOCATION
 #
-# Access:
+# Then reach it through a port-forward, the only way in:
+#
 #   kubectl port-forward -n kube-agents svc/kube-agents-web-console 8080:8080
-#   Open http://localhost:8080
+#   open http://localhost:8080
+#
+# See docs/site/src/content/docs/deploy/web-console.md.
 
 webConsole:
   enabled: true
-  replicaCount: 1
-  service:
-    type: ClusterIP
-    port: 8080
-  resources:
-    limits:
-      cpu: 200m
-      memory: 128Mi
-    requests:
-      cpu: 50m
-      memory: 32Mi
