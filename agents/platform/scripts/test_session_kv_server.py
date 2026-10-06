@@ -1022,6 +1022,170 @@ class TestWorkloadWindow(unittest.TestCase):
         self.assertEqual(mock_trigger.call_count, 1)
 
 
+
+class TestPullRequestInReview(unittest.TestCase):
+    """An unfixed fault starts no new incident while its agent pull request is in review.
+
+    The watcher's rolling window lapses on a fault nobody has merged a fix for
+    yet, and FailedScheduling repeats on a back-off longer than the workload
+    window, so each lapse used to become a new session, a new diagnosis and a
+    new pull request. With `openPullRequest` on, the inject route asks the
+    forge whether the workload's branch has a pull request open (or ended
+    within the grace period) and, if so, folds the event into the workload's
+    last admitted row.
+    """
+
+    _inject = TestWorkloadWindow._inject
+    _rows = TestWorkloadWindow._rows
+    _age = TestWorkloadWindow._age
+
+    def setUp(self):
+        TestWorkloadWindow.setUp(self)
+        os.environ[session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV] = "true"
+
+    def tearDown(self):
+        os.environ.pop(session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV, None)
+        TestWorkloadWindow.tearDown(self)
+
+    def _anchor(self, session_id, name):
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", return_value=""):
+            first = self._inject(session_id, name=name)
+        self.assertEqual(first.json()["status"], "injected")
+        return first.json()
+
+    def test_proposal_in_review(self):
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 10, 6, 21, 0, tzinfo=timezone.utc)
+        grace = session_kv_server.INCIDENT_PR_REVIEW_GRACE_SECONDS
+
+        def stamp(seconds_ago):
+            return (now - timedelta(seconds=seconds_ago)).isoformat().replace("+00:00", "Z")
+
+        self.assertTrue(session_kv_server._proposal_in_review({"state": "open"}, now))
+        self.assertTrue(session_kv_server._proposal_in_review({"state": "merged", "closed": stamp(grace // 2)}, now))
+        self.assertTrue(session_kv_server._proposal_in_review({"state": "closed", "updated": stamp(60)}, now))
+        self.assertFalse(session_kv_server._proposal_in_review({"state": "merged", "closed": stamp(grace * 2)}, now))
+        self.assertFalse(session_kv_server._proposal_in_review({"state": "closed"}, now))
+        self.assertFalse(session_kv_server._proposal_in_review({"state": "merged", "closed": "not-a-time"}, now))
+
+    def test_lookup_reads_every_managed_forge_and_skips_ended_proposals(self):
+        calls = []
+
+        def call(verb, payload, repo):
+            calls.append((verb, payload, repo))
+            if repo == "down/repo":
+                raise RuntimeError("forge unavailable")
+            return {"proposals": [
+                {"state": "merged", "closed": "2020-01-01T00:00:00Z", "url": "old"},
+                {"state": "open", "url": "http://gitea/demo/repo/pulls/9"},
+            ]}
+
+        fake_forge = MagicMock(call=call)
+        repos = [{"repo": "down/repo"}, {"repo": ""}, {"repo": "gitea.local/demo/repo"}]
+        with patch.dict(sys.modules, {"forge": fake_forge}), \
+                patch("gitops_workspace.get_managed_forge_repos", return_value=repos):
+            url = session_kv_server._lookup_incident_pull_request("platform-agent/incident-x")
+        self.assertEqual(url, "http://gitea/demo/repo/pulls/9")
+        self.assertEqual([c[2] for c in calls], ["down/repo", "gitea.local/demo/repo"])
+        self.assertEqual(calls[0][1], {
+            "source": "platform-agent/incident-x", "state": "all",
+            "limit": session_kv_server.INCIDENT_PR_LOOKUP_LIMIT,
+        })
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_lapsed_window_with_a_pull_request_in_review_is_folded(self, mock_trigger):
+        self._anchor("k8s-evt-pr-1", "pr-api-7d9f8b6c4-aaaaa")
+        anchor_id = self._rows("pr-api")[0][0]
+        self._age(anchor_id, 900)
+        url = "http://gitea/demo/repo/pulls/7"
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", return_value=url) as lookup:
+            second = self._inject("k8s-evt-pr-2", name="pr-api-7d9f8b6c4-aaaaa", reason="FailedScheduling")
+        self.assertEqual(second.json()["status"], "filtered")
+        self.assertEqual(second.json().get("duplicate_of"), str(anchor_id))
+        expected_branch = session_kv_server._incident_branch(
+            "", {"cluster": "fleet-a", "namespace": "prod-payments", "kind_of_object": "Pod", "name": "pr-api-7d9f8b6c4-aaaaa"}
+        )
+        lookup.assert_called_once_with(expected_branch)
+        self.assertEqual(mock_trigger.call_count, 1)
+        self.assertEqual([row[2] for row in self._rows("pr-api")], [0, anchor_id])
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_an_old_watcher_is_answered_suppressed(self, mock_trigger):
+        self._anchor("k8s-evt-pro-1", "pro-api-7d9f8b6c4-aaaaa")
+        self._age(self._rows("pro-api")[0][0], 900)
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", return_value="u"):
+            second = self._inject("k8s-evt-pro-2", features=None, name="pro-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(second.json()["status"], "suppressed")
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_no_pull_request_in_review_is_a_new_incident(self, mock_trigger):
+        self._anchor("k8s-evt-prn-1", "prn-api-7d9f8b6c4-aaaaa")
+        self._age(self._rows("prn-api")[0][0], 900)
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", return_value=""):
+            second = self._inject("k8s-evt-prn-2", name="prn-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_slow_forge_admits_the_event(self, mock_trigger):
+        self._anchor("k8s-evt-prs-1", "prs-api-7d9f8b6c4-aaaaa")
+        self._age(self._rows("prs-api")[0][0], 900)
+
+        def slow(branch):
+            time.sleep(0.5)
+            return "late"
+
+        with patch.object(session_kv_server, "INCIDENT_PR_LOOKUP_TIMEOUT_S", 0.05), \
+                patch.object(session_kv_server, "_lookup_incident_pull_request", side_effect=slow):
+            second = self._inject("k8s-evt-prs-2", name="prs-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_failing_forge_admits_the_event(self, mock_trigger):
+        self._anchor("k8s-evt-prf-1", "prf-api-7d9f8b6c4-aaaaa")
+        self._age(self._rows("prf-api")[0][0], 900)
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", side_effect=RuntimeError("down")):
+            second = self._inject("k8s-evt-prf-2", name="prf-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_without_an_anchor_row_the_event_is_admitted(self, mock_trigger):
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", return_value="u") as lookup:
+            first = self._inject("k8s-evt-pra-1", name="pra-api-7d9f8b6c4-aaaaa")
+        lookup.assert_not_called()
+        self.assertEqual(first.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_busy_lookup_pool_admits_the_event_without_queueing(self, mock_trigger):
+        import threading
+
+        self._anchor("k8s-evt-prb-1", "prb-api-7d9f8b6c4-aaaaa")
+        self._age(self._rows("prb-api")[0][0], 900)
+        exhausted = threading.BoundedSemaphore(1)
+        exhausted.acquire(blocking=False)
+        with patch.object(session_kv_server, "_INCIDENT_PR_LOOKUP_SEMAPHORE", exhausted), \
+                patch.object(session_kv_server, "_lookup_incident_pull_request", return_value="u") as lookup:
+            second = self._inject("k8s-evt-prb-2", name="prb-api-7d9f8b6c4-aaaaa")
+        lookup.assert_not_called()
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_with_the_opt_in_off_the_forge_is_not_asked(self, mock_trigger):
+        os.environ.pop(session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV, None)
+        with patch.object(session_kv_server, "_lookup_incident_pull_request", return_value="u") as lookup:
+            self._inject("k8s-evt-pro-off-1", name="proff-api-7d9f8b6c4-aaaaa")
+            self._age(self._rows("proff-api")[0][0], 900)
+            second = self._inject("k8s-evt-pro-off-2", name="proff-api-7d9f8b6c4-aaaaa")
+        lookup.assert_not_called()
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+
 class TestDeliveryFailureIsWrittenBack(unittest.TestCase):
     """`notified` is an intent when it is written and an observation afterwards.
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import hmac
 import json
@@ -105,6 +106,35 @@ INCIDENT_PR_BRANCH_PREFIX = "platform-agent/incident-"
 # disambiguating digest of the raw components.
 INCIDENT_BRANCH_KEY_MAX_LEN = 180
 INCIDENT_BRANCH_DIGEST_LEN = 8
+# With `openPullRequest` on, an event for a workload whose incident branch
+# carries an agent pull request still in review starts no new incident: it is
+# recorded as a duplicate of the workload's last admitted row, as the workload
+# window does, and the watcher is answered "filtered". Without this the
+# watcher's rolling window lapses on a fault nobody has fixed yet and each
+# lapse is a fresh triage session, every five minutes for as long as the pull
+# request waits (a workload window of a few minutes does not cover a fault that
+# repeats on a 5-minute back-off, as FailedScheduling does).
+# "In review" is open, or merged or closed within the grace period
+# below: a merged fix takes ArgoCD's sync and a rollout to reach the pods, and
+# the failing pods keep reporting until it does.
+INCIDENT_PR_REVIEW_GRACE_SECONDS = 600
+# How far back the fold looks for the admitted row it records the event as a
+# duplicate of. An open pull request implies one exists; this only bounds the
+# query. With no row found the event is admitted as before.
+INCIDENT_PR_ANCHOR_SECONDS = 7 * 24 * 3600
+# The lookup crosses to the sandbox and the forge. The watcher gives the
+# inject call 10 s (injector.go), so the lookup gets less than that, and a
+# slower or failed lookup admits the event as if the check were not there.
+INCIDENT_PR_LOOKUP_TIMEOUT_S = 5
+# Proposals read per branch. The forge's list order is its own, so more than
+# one: a merged pull request listed ahead of the open one that replaced it on
+# the same branch must not hide it.
+INCIDENT_PR_LOOKUP_LIMIT = 5
+INCIDENT_PR_LOOKUP_WORKERS = 2
+_INCIDENT_PR_LOOKUP_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=INCIDENT_PR_LOOKUP_WORKERS, thread_name_prefix="incident-pr-lookup"
+)
+_INCIDENT_PR_LOOKUP_SEMAPHORE = threading.BoundedSemaphore(INCIDENT_PR_LOOKUP_WORKERS)
 # Characters a session id may carry that a branch name should not. Session ids
 # come from the watcher and are already narrow; this keeps the branch to one
 # lowercase path segment whatever a future producer sends.
@@ -1845,6 +1875,85 @@ def _incident_branch(session_id: str, payload: Dict[str, Any]) -> str:
         slug = slug[:max_prefix].rstrip("-")
     slug = f"{slug}-{digest}" if slug else digest
     return f"{INCIDENT_PR_BRANCH_PREFIX}{slug}"
+
+
+def _parse_forge_time(value: str) -> Optional[datetime]:
+    """A forge timestamp (ISO 8601, `Z` or offset) as an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _proposal_in_review(proposal: Dict[str, Any], now: datetime) -> bool:
+    """Open, or merged or closed within `INCIDENT_PR_REVIEW_GRACE_SECONDS` of `now`."""
+    if proposal.get("state") == "open":
+        return True
+    ended = _parse_forge_time(str(proposal.get("closed") or proposal.get("updated") or ""))
+    return ended is not None and (now - ended).total_seconds() <= INCIDENT_PR_REVIEW_GRACE_SECONDS
+
+
+def _lookup_incident_pull_request(branch: str) -> str:
+    """The URL of a proposal on `branch` that is still in review, or ''."""
+    import forge  # the agent pod's forge view; imported here so tests and drift need no broker
+    from gitops_workspace import get_managed_forge_repos
+
+    now = datetime.now(timezone.utc)
+    for entry in get_managed_forge_repos():
+        repo = entry.get("repo") or ""
+        if not repo:
+            continue
+        try:
+            answer = forge.call(
+                "proposal-list", {"source": branch, "state": "all", "limit": INCIDENT_PR_LOOKUP_LIMIT}, repo
+            )
+        except Exception as exc:
+            logger.warning(f"Open pull request lookup for {branch} on {repo} failed: {exc}")
+            continue
+        for proposal in answer.get("proposals") or []:
+            if _proposal_in_review(proposal, now):
+                return str(proposal.get("url") or f"{repo}:{branch}")
+    return ""
+
+
+def _incident_pull_request_in_review(payload: Dict[str, Any], workload: str) -> str:
+    """The agent pull request already in review for this event's workload, or ''.
+
+    Only with `openPullRequest` on and a workload name to key the branch on.
+    Bounded by `INCIDENT_PR_LOOKUP_TIMEOUT_S` and `_INCIDENT_PR_LOOKUP_SEMAPHORE`;
+    when all lookup workers are already blocked on a slow forge or when a call
+    times out or fails, it answers '' so the event is admitted without queueing
+    unboundedly.
+    """
+    if not workload or not _incident_triage_opens_pull_request():
+        return ""
+    branch = _incident_branch("", payload)
+    if not _INCIDENT_PR_LOOKUP_SEMAPHORE.acquire(blocking=False):
+        logger.warning(f"Open pull request lookup pool busy for {branch}; admitting the event")
+        return ""
+
+    def _run() -> str:
+        try:
+            return _lookup_incident_pull_request(branch)
+        finally:
+            _INCIDENT_PR_LOOKUP_SEMAPHORE.release()
+
+    try:
+        future = _INCIDENT_PR_LOOKUP_POOL.submit(_run)
+    except Exception:
+        _INCIDENT_PR_LOOKUP_SEMAPHORE.release()
+        raise
+    try:
+        return future.result(timeout=INCIDENT_PR_LOOKUP_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        logger.warning(f"Open pull request lookup for {branch} took over {INCIDENT_PR_LOOKUP_TIMEOUT_S}s; admitting the event")
+    except Exception as exc:
+        logger.warning(f"Open pull request lookup for {branch} failed: {exc}; admitting the event")
+    return ""
 
 
 def _triage_pr_task_body(payload: Dict[str, Any], session_id: str) -> str:
@@ -4006,8 +4115,20 @@ def inject_message(
     # already paid for. Checked before the ledger write so the row carries
     # the verdict, and before the quota so the claim is skipped.
     duplicate_of = None
+    pull_request_in_review = ""
+    if not suppressed:
+        duplicate_of = _recent_delivered_event(event_cluster, namespace, clean_name, _workload_dedup_seconds())
+    if not suppressed and duplicate_of is None and _incident_triage_opens_pull_request():
+        # Past the window, the workload may still have a fix waiting for review
+        # (INCIDENT_PR_REVIEW_GRACE_SECONDS). Check the local ledger for an
+        # anchor row first so a brand-new workload pays no forge round trip.
+        anchor_id = _recent_delivered_event(event_cluster, namespace, clean_name, INCIDENT_PR_ANCHOR_SECONDS)
+        if anchor_id is not None:
+            pull_request_in_review = _incident_pull_request_in_review(payload, clean_name)
+            if pull_request_in_review:
+                duplicate_of = anchor_id
     with _INJECT_ADMISSION_LOCK:
-        if not suppressed:
+        if not suppressed and duplicate_of is None:
             duplicate_of = _recent_delivered_event(event_cluster, namespace, clean_name, _workload_dedup_seconds())
         if not suppressed and duplicate_of is None:
             allowed, suppressed_today = _claim_alert_quota(severity_label)
@@ -4039,9 +4160,14 @@ def inject_message(
         # duplicate and past it is a second incident for a fix that is already
         # in review. "filtered" keeps the entry for the watcher's own window.
         # Same skew rule as below: only a watcher that claimed the status.
+        because = (
+            f"pull request {pull_request_in_review} is still in review"
+            if pull_request_in_review
+            else f"workload window {_workload_dedup_seconds()}s"
+        )
         logger.info(
             f"Folded {severity_label} event {event_reason} for {namespace}/{clean_name} "
-            f"into ledger row {duplicate_of} (workload window {_workload_dedup_seconds()}s); no triage session"
+            f"into ledger row {duplicate_of} ({because}); no triage session"
         )
         if "policy-filtered" not in _watcher_features(x_watcher_features):
             return {"status": "suppressed", "duplicate_of": str(duplicate_of)}
