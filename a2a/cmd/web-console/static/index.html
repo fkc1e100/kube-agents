@@ -57,8 +57,8 @@
       gap: 12px;
     }
 
-    .gcp-logo {
-      height: 24px;
+    .brand-logo {
+      height: 28px;
       width: auto;
     }
 
@@ -115,10 +115,15 @@
     .badge-grey .badge-dot { background: var(--text-muted); }
 
     /* Main Container */
+    /* min-height: 0 on main, its single row, and both columns keeps the
+       session list from growing the row past the window, which pushed the
+       message box off the bottom of the page. */
     main {
       flex: 1;
+      min-height: 0;
       display: grid;
       grid-template-columns: 1fr 380px;
+      grid-template-rows: minmax(0, 1fr);
       overflow: hidden;
     }
 
@@ -129,6 +134,7 @@
       background: var(--bg-surface);
       border-right: 1px solid var(--border-color);
       height: 100%;
+      min-height: 0;
       position: relative;
     }
 
@@ -353,6 +359,7 @@
       display: flex;
       flex-direction: column;
       height: 100%;
+      min-height: 0;
     }
 
     .sidebar-header {
@@ -454,8 +461,15 @@
 <body>
   <header>
     <div class="brand">
-      <svg class="gcp-logo" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" fill="#4285F4"/>
+      <!-- Google Kubernetes Engine product icon, from cloud.google.com/icons. -->
+      <svg class="brand-logo" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Google Kubernetes Engine">
+        <polygon fill="#4285f4" fill-rule="evenodd" points="14.68 13.06 19.23 15.69 19.23 16.68 14.29 13.83 14.68 13.06"/>
+        <polygon fill="#669df6" fill-rule="evenodd" points="9.98 13.65 4.77 16.66 4.45 15.86 9.53 12.92 9.98 13.65"/>
+        <rect fill="#aecbfa" x="11.55" y="3.29" width="0.86" height="5.78"/>
+        <path fill="#aecbfa" fill-rule="evenodd" d="M3.25,7V17L12,22l8.74-5V7L12,2Zm15.63,8.89L12,19.78,5.12,15.89V8.11L12,4.22l6.87,3.89v7.78Z"/>
+        <polygon fill="#aecbfa" fill-rule="evenodd" points="11.98 11.5 15.96 9.21 11.98 6.91 8.01 9.21 11.98 11.5"/>
+        <polygon fill="#669df6" fill-rule="evenodd" points="11.52 12.3 7.66 10.01 7.66 14.6 11.52 16.89 11.52 12.3"/>
+        <polygon fill="#4285f4" fill-rule="evenodd" points="12.48 12.3 12.48 16.89 16.34 14.6 16.34 10.01 12.48 12.3"/>
       </svg>
       <div class="brand-title">
         Kube-Agents Console
