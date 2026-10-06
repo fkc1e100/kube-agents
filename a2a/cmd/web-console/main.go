@@ -122,6 +122,16 @@ const (
 	messagesTimeout      = 10 * time.Second
 	sessionLookupTimeout = 10 * time.Second
 
+	// agentBusyWindow is how recently an agent session must have been
+	// active for an unanswered newest message to count as a turn in
+	// progress. Older than this, the turn is taken to have died, and a
+	// reply is let through.
+	agentBusyWindow = 10 * time.Minute
+	// agentBusyPageLimit is how many of the newest messages the busy check
+	// reads.
+	agentBusyPageLimit = 5
+	agentBusyDetail    = "The agent is still working on this thread; try again in a minute."
+
 	// maxRequestBodyBytes bounds a chat request. A turn is a typed message,
 	// and the container's memory limit is 128Mi.
 	maxRequestBodyBytes = 64 << 10
@@ -669,7 +679,39 @@ func (s *server) allowAgentSessionReply(w http.ResponseWriter, parent context.Co
 			"The console posts only into its own sessions, event triage and scheduled checks.")
 		return false
 	}
+	busy, failure := s.agentSessionBusy(ctx, sid, sess, time.Now())
+	if failure != nil {
+		writeError(w, failure.status, failure.code, failure.message)
+		return false
+	}
+	if busy {
+		writeError(w, http.StatusConflict, "agent_busy", agentBusyDetail)
+		return false
+	}
 	return true
+}
+
+// agentSessionBusy guesses whether another writer has a turn running on an
+// agent session: the event watcher's own triage turn, a reply from the chat
+// thread the alert went to, or a kanban card's wake. Hermes does not
+// serialize turns on one session and does not say which sessions have a run
+// in flight, so the guess is this: the newest message is not an assistant
+// reply with text, and the session was active within agentBusyWindow. A
+// session with no messages yet is not busy.
+func (s *server) agentSessionBusy(ctx context.Context, sid string, sess hermesSession, now time.Time) (bool, *upstreamFailure) {
+	if sess.LastActive == nil || now.Sub(time.Unix(0, int64(*sess.LastActive*float64(time.Second)))) > agentBusyWindow {
+		return false, nil
+	}
+	newest, failure := s.fetchMessagesPage(ctx, fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=0",
+		url.PathEscape(sid), agentBusyPageLimit))
+	if failure != nil {
+		return false, failure
+	}
+	if len(newest) == 0 {
+		return false, nil
+	}
+	last := newest[len(newest)-1]
+	return !(last.Role == roleAssistant && hasText(last)), nil
 }
 
 // turnFailure maps a failed turn to the status and error body the page

@@ -276,11 +276,12 @@ func summaryLine(text string) string {
 }
 
 // hermesSession is the part of Hermes' GET /api/sessions/{id} the transcript
-// check reads: {"object": "hermes.session", "session": {...}}.
+// and reply checks read: {"object": "hermes.session", "session": {...}}.
 type hermesSession struct {
-	ID     string `json:"id"`
-	Source string `json:"source"`
-	Title  string `json:"title"`
+	ID         string   `json:"id"`
+	Source     string   `json:"source"`
+	Title      string   `json:"title"`
+	LastActive *float64 `json:"last_active"`
 }
 
 type transcriptResponse struct {

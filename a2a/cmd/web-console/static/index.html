@@ -1861,6 +1861,13 @@
       try { return JSON.parse(text); } catch (e) { return { detail: text.trim() || resp.statusText }; }
     }
 
+    // The text a refused turn shows. Another writer's turn running on an
+    // agent session is not a failure, so it reads as plain advice.
+    function failureText(status, data) {
+      if (status === 409 && data.error === "agent_busy") return data.detail;
+      return `Request failed (HTTP ${status}): ${data.detail || data.error || "no detail"}`;
+    }
+
     // The turn without a live status, for a console older than the stream
     // route.
     async function runTurnPlain(body) {
@@ -1872,7 +1879,7 @@
         });
         const data = await readBody(resp);
         if (resp.ok) return { reply: data.reply || "" };
-        return { error: `Request failed (HTTP ${resp.status}): ${data.detail || data.error || "no detail"}` };
+        return { error: failureText(resp.status, data) };
       } catch (err) {
         return { error: "Could not reach the web console. Is the port-forward still running? " + err.message };
       }
@@ -1901,8 +1908,7 @@
         return runTurnPlain(body);
       }
       if (!resp.ok || !(resp.headers.get("Content-Type") || "").startsWith("text/event-stream")) {
-        const data = await readBody(resp);
-        return { error: `Request failed (HTTP ${resp.status}): ${data.detail || data.error || "no detail"}` };
+        return { error: failureText(resp.status, await readBody(resp)) };
       }
       let result = null;
       try {

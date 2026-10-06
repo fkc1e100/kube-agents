@@ -824,3 +824,49 @@ func cssBlock(t *testing.T, page, selector string) string {
 	end := strings.Index(page[start:], "}")
 	return page[start : start+end]
 }
+
+func TestReplyIntoABusyAgentSessionIsRefused(t *testing.T) {
+	recent := float64(time.Now().Add(-time.Minute).Unix())
+	stale := float64(time.Now().Add(-agentBusyWindow - time.Minute).Unix())
+	for _, tc := range []struct {
+		name       string
+		lastActive float64
+		rows       [][2]any // role, content
+		want       int
+	}{
+		{"unanswered user row", recent, [][2]any{{"user", "Pod crashlooping"}}, http.StatusConflict},
+		{"mid-turn tool row", recent, [][2]any{{"user", "x"}, {"assistant", nil}, {"tool", "pods"}}, http.StatusConflict},
+		{"answered", recent, [][2]any{{"user", "x"}, {"assistant", "Filed card t_1."}}, http.StatusOK},
+		{"unanswered but stale", stale, [][2]any{{"user", "x"}}, http.StatusOK},
+		{"no messages yet", recent, nil, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, h := setup(t)
+			sid := "k8s-evt-0000000a"
+			fake.seed(sid, "api_server", "Triage "+sid)
+			fake.mu.Lock()
+			fake.seeded[sid]["last_active"] = tc.lastActive
+			for _, r := range tc.rows {
+				fake.post(sid, r[0].(string), r[1])
+			}
+			fake.mu.Unlock()
+			for _, req := range []*http.Request{
+				chatReq(`{"message":"hi","session_id":"` + sid + `"}`),
+				streamReq(`{"message":"hi","session_id":"` + sid + `"}`),
+			} {
+				rec := serve(h, req)
+				if rec.Code != tc.want {
+					t.Fatalf("%s: status %d, want %d: %s", req.URL.Path, rec.Code, tc.want, rec.Body.String())
+				}
+				if tc.want == http.StatusConflict {
+					if got := decode[errorResponse](t, rec); got.Error != "agent_busy" || got.Detail != agentBusyDetail {
+						t.Errorf("busy body = %+v", got)
+					}
+				}
+			}
+			if _, chats := fake.state(); tc.want == http.StatusConflict && len(chats) != 0 {
+				t.Errorf("a busy session still got a turn: %v", chats)
+			}
+		})
+	}
+}
