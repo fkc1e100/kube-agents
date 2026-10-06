@@ -379,9 +379,9 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // recentSession is the subset of a Hermes session row the page shows.
-// Hermes' message preview is left out on purpose. Kind and Summary are added
-// here: a summary is read only for the kinds summaryKinds lists, so a Slack or
-// Google Chat session shows its title and nothing else.
+// Hermes' message preview is left out on purpose. Kind is added here. Summary
+// is set only on channel posts (channels.go), for the kinds summaryKinds
+// lists, so a Slack or Google Chat session shows its title and nothing else.
 type recentSession struct {
 	ID           string          `json:"id"`
 	Title        string          `json:"title"`
@@ -402,7 +402,6 @@ func (s *server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure.status, failure.code, failure.message)
 		return
 	}
-	s.attachSummaries(r.Context(), sessions)
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 

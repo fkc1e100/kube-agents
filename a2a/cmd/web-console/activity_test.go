@@ -29,18 +29,54 @@ func TestClassifySession(t *testing.T) {
 		id, source, title, want string
 	}{
 		{"k8s-evt-be3abad3", "api_server", "Triage k8s-evt-be3abad3", kindEventTriage},
-		{"cron-policy-sweep", "api_server", "Triage cron-policy-sweep", kindScheduled},
+		{"cron-policy-sweep-20261006", "api_server", "Triage cron-policy-sweep-20261006", kindScheduled},
 		{console, "api_server", "Web console aaaa", kindConsole},
 		{"20260101_x", "slack", "Why is web-7 crashlooping?", kindChat},
 		{"20260101_y", "google_chat", "Deploy status", kindChat},
 		// A chat session cannot become event triage by its title.
 		{"20260101_z", "slack", "Triage k8s-evt-123", kindChat},
 		{"api_123", "api_server", "Triage and resolve acme/toolkit#42", kindOther},
-		{"orphan", "", "Triage k8s-evt-1", kindOther},
+		{"orphan", "", "Triage k8s-evt-00000001", kindOther},
+		// A title that only starts like the watcher's, or names another ID,
+		// is not event triage or a scheduled check.
+		{"k8s-evt-be3abad3", "api_server", "Triage k8s-evt-be3abad3 and more", kindOther},
+		{"k8s-evt-be3abad3", "api_server", "Triage k8s-evt-00000001", kindOther},
+		{"api_456", "api_server", "Triage k8s-evt-be3abad3", kindOther},
+		{"api_789", "api_server", "Triage cron-policy-sweep-20261006", kindOther},
+		// The ID must have the shape session_kv_server.py mints.
+		{"k8s-evt-123", "api_server", "Triage k8s-evt-123", kindOther},
+		{"k8s-evt-BE3ABAD3", "api_server", "Triage k8s-evt-BE3ABAD3", kindOther},
+		{"cron-policy-sweep", "api_server", "Triage cron-policy-sweep", kindOther},
+		{"cron-Policy-20261006", "api_server", "Triage cron-Policy-20261006", kindOther},
+		{"cron-platform_policy-20261006", "api_server", "Triage cron-platform_policy-20261006", kindScheduled},
 	} {
 		if got := classifySession(tc.id, tc.source, tc.title); got != tc.want {
 			t.Errorf("classifySession(%q, %q, %q) = %q, want %q", tc.id, tc.source, tc.title, got, tc.want)
 		}
+	}
+}
+
+func TestSpoofedTitlesGetNoContentAndNoReplies(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("api_456", "api_server", "Triage k8s-evt-be3abad3")
+	fake.seed("k8s-evt-0000000c", "api_server", "Triage k8s-evt-0000000c: injected")
+	fake.mu.Lock()
+	fake.post("api_456", "user", "private")
+	fake.mu.Unlock()
+	for _, sid := range []string{"api_456", "k8s-evt-0000000c"} {
+		if rec := serve(h, transcriptReq(sid)); rec.Code != http.StatusForbidden {
+			t.Errorf("transcript of %s: status %d, want 403", sid, rec.Code)
+		}
+		if rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`)); rec.Code != http.StatusForbidden {
+			t.Errorf("reply into %s: status %d, want 403", sid, rec.Code)
+		}
+	}
+	rec := serve(h, channelReq("alerts"))
+	if strings.Contains(rec.Body.String(), "api_456") || strings.Contains(rec.Body.String(), "k8s-evt-0000000c") {
+		t.Errorf("a spoofed session reached # alerts: %s", rec.Body.String())
+	}
+	if n := fake.gets("api_456"); n != 0 {
+		t.Errorf("the console read a spoofed session %d times", n)
 	}
 }
 
@@ -85,15 +121,12 @@ func byID(list recentList) map[string]recentSession {
 	return out
 }
 
-func TestRecentSessionsSummarizesClusterSessionsOnly(t *testing.T) {
+func TestRecentSessionsListKindsWithoutReadingContent(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-1", "api_server", "Triage k8s-evt-1")
+	fake.seed("k8s-evt-00000001", "api_server", "Triage k8s-evt-00000001")
 	fake.seed("slack-1", "slack", "Why is web-7 crashlooping?")
 	fake.mu.Lock()
-	fake.post("k8s-evt-1", "user", "A Kubernetes Warning event needs triage on GKE cluster 'c1'.\nMore detail")
-	fake.post("k8s-evt-1", "assistant", nil)
-	fake.post("k8s-evt-1", "assistant", "Filed card t_1 to cluster-c1.\nIt will report in the thread.")
-	fake.post("k8s-evt-1", "tool", "ok")
+	fake.post("k8s-evt-00000001", "user", "A Kubernetes Warning event needs triage.")
 	fake.post("slack-1", "user", "private question")
 	fake.post("slack-1", "assistant", "private answer")
 	fake.mu.Unlock()
@@ -102,57 +135,57 @@ func TestRecentSessionsSummarizesClusterSessionsOnly(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), "private") {
-		t.Errorf("a chat session's messages reached the list: %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), "private") || strings.Contains(rec.Body.String(), `"summary"`) {
+		t.Errorf("the recent list carried message content: %s", rec.Body.String())
 	}
 	got := byID(decode[recentList](t, rec))
-	evt := got["k8s-evt-1"]
-	if evt.Kind != kindEventTriage || evt.Summary == nil {
-		t.Fatalf("event triage row = %+v, want kind and summary", evt)
+	if got["k8s-evt-00000001"].Kind != kindEventTriage || got["slack-1"].Kind != kindChat {
+		t.Errorf("kinds = %+v", got)
 	}
-	if evt.Summary.Subject != "A Kubernetes Warning event needs triage on GKE cluster 'c1'." ||
-		evt.Summary.Latest != "Filed card t_1 to cluster-c1." {
-		t.Errorf("summary = %+v", *evt.Summary)
-	}
-	if chat := got["slack-1"]; chat.Kind != kindChat || chat.Summary != nil {
-		t.Errorf("chat row = %+v, want kind chat and no summary", chat)
-	}
-	if n := fake.gets("slack-1"); n != 0 {
-		t.Errorf("the console read a chat session's messages %d times", n)
+	if fake.gets("slack-1")+fake.gets("k8s-evt-00000001") != 0 {
+		t.Errorf("the recent list read session messages")
 	}
 }
 
 func TestSummariesAreCachedPerMessageCount(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("cron-sweep", "api_server", "Triage cron-sweep")
+	fake.seed("cron-sweep-20261006", "api_server", "Triage cron-sweep-20261006")
 	fake.mu.Lock()
-	fake.post("cron-sweep", "user", "Run the policy sweep")
-	fake.post("cron-sweep", "assistant", "No violations.")
+	fake.post("cron-sweep-20261006", "user", "Run the policy sweep")
+	fake.post("cron-sweep-20261006", "assistant", "No violations.")
 	fake.mu.Unlock()
 
-	serve(h, recentReq())
-	first := fake.gets("cron-sweep")
+	serve(h, channelReq("scheduled"))
+	first := fake.gets("cron-sweep-20261006")
 	if first == 0 {
 		t.Fatal("the first list did not read the session")
 	}
-	got := byID(decode[recentList](t, serve(h, recentReq())))
-	if n := fake.gets("cron-sweep"); n != first {
+	got := postsByID(decode[channelList](t, serve(h, channelReq("scheduled"))))
+	if n := fake.gets("cron-sweep-20261006"); n != first {
 		t.Errorf("a refresh with no new messages read Hermes again: %d reads, want %d", n, first)
 	}
-	if s := got["cron-sweep"].Summary; s == nil || s.Latest != "No violations." {
+	if s := got["cron-sweep-20261006"].Summary; s == nil || s.Latest != "No violations." {
 		t.Errorf("cached summary = %+v", s)
 	}
 
 	fake.mu.Lock()
-	fake.post("cron-sweep", "assistant", "One violation found.")
+	fake.post("cron-sweep-20261006", "assistant", "One violation found.")
 	fake.mu.Unlock()
-	got = byID(decode[recentList](t, serve(h, recentReq())))
-	if n := fake.gets("cron-sweep"); n == first {
+	got = postsByID(decode[channelList](t, serve(h, channelReq("scheduled"))))
+	if n := fake.gets("cron-sweep-20261006"); n == first {
 		t.Errorf("a new message did not refresh the summary")
 	}
-	if s := got["cron-sweep"].Summary; s == nil || s.Latest != "One violation found." {
+	if s := got["cron-sweep-20261006"].Summary; s == nil || s.Latest != "One violation found." {
 		t.Errorf("refreshed summary = %+v", s)
 	}
+}
+
+func postsByID(list channelList) map[string]recentSession {
+	out := map[string]recentSession{}
+	for _, p := range list.Posts {
+		out[p.ID] = p
+	}
+	return out
 }
 
 func transcriptReq(sid string) *http.Request {
@@ -161,18 +194,18 @@ func transcriptReq(sid string) *http.Request {
 
 func TestTranscriptOpensClusterAndConsoleSessions(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-1", "api_server", "Triage k8s-evt-1")
-	fake.seed("cron-sweep", "api_server", "Triage cron-sweep")
+	fake.seed("k8s-evt-00000001", "api_server", "Triage k8s-evt-00000001")
+	fake.seed("cron-sweep-20261006", "api_server", "Triage cron-sweep-20261006")
 	fake.mu.Lock()
-	fake.post("k8s-evt-1", "user", "triage this")
-	fake.post("k8s-evt-1", "assistant", nil)
-	fake.post("k8s-evt-1", "tool", "pod list")
-	lastEvt := fake.post("k8s-evt-1", "assistant", "filed a card")
-	fake.post("cron-sweep", "user", "sweep")
+	fake.post("k8s-evt-00000001", "user", "triage this")
+	fake.post("k8s-evt-00000001", "assistant", nil)
+	fake.post("k8s-evt-00000001", "tool", "pod list")
+	lastEvt := fake.post("k8s-evt-00000001", "assistant", "filed a card")
+	fake.post("cron-sweep-20261006", "user", "sweep")
 	fake.mu.Unlock()
 	turn := decode[chatResponse](t, serve(h, chatReq(`{"message":"check pods"}`)))
 
-	evt := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-1")))
+	evt := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-00000001")))
 	if evt.Kind != kindEventTriage || len(evt.Messages) != 2 ||
 		evt.Messages[0].Content != "triage this" || evt.Messages[1].Content != "filed a card" {
 		t.Errorf("event triage transcript = %+v, want the two text rows oldest first", evt)
@@ -180,7 +213,7 @@ func TestTranscriptOpensClusterAndConsoleSessions(t *testing.T) {
 	if evt.LatestID != lastEvt {
 		t.Errorf("latest_id = %d, want %d", evt.LatestID, lastEvt)
 	}
-	if got := serve(h, transcriptReq("cron-sweep")); got.Code != http.StatusOK {
+	if got := serve(h, transcriptReq("cron-sweep-20261006")); got.Code != http.StatusOK {
 		t.Errorf("scheduled transcript: status %d", got.Code)
 	}
 	mine := decode[transcriptResponse](t, serve(h, transcriptReq(turn.SessionID)))
@@ -191,14 +224,14 @@ func TestTranscriptOpensClusterAndConsoleSessions(t *testing.T) {
 
 func TestTranscriptKeepsTheNewestRows(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-long", "api_server", "Triage k8s-evt-long")
+	fake.seed("k8s-evt-0000106e", "api_server", "Triage k8s-evt-0000106e")
 	fake.mu.Lock()
 	var last int64
 	for i := 0; i < transcriptMaxRows+30; i++ {
-		last = fake.post("k8s-evt-long", "assistant", "row")
+		last = fake.post("k8s-evt-0000106e", "assistant", "row")
 	}
 	fake.mu.Unlock()
-	got := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-long")))
+	got := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-0000106e")))
 	if len(got.Messages) != transcriptMaxRows || got.Messages[len(got.Messages)-1].ID != last {
 		t.Errorf("transcript holds %d rows ending at %d, want %d ending at %d",
 			len(got.Messages), got.Messages[len(got.Messages)-1].ID, transcriptMaxRows, last)
@@ -207,7 +240,7 @@ func TestTranscriptKeepsTheNewestRows(t *testing.T) {
 
 func TestTranscriptRefusesChatAndOtherSessions(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("slack-1", "slack", "Triage k8s-evt-9")
+	fake.seed("slack-1", "slack", "Triage k8s-evt-00000009")
 	fake.seed("api_42", "api_server", "Triage and resolve acme/toolkit#42")
 	fake.mu.Lock()
 	fake.post("slack-1", "user", "private question")
@@ -236,7 +269,7 @@ func TestTranscriptRefusesABadID(t *testing.T) {
 	if fake.lastQuery != "" {
 		t.Errorf("a refused ID reached Hermes")
 	}
-	if rec := serve(h, transcriptReq("k8s-evt-missing")); rec.Code != http.StatusNotFound {
+	if rec := serve(h, transcriptReq("k8s-evt-0000beef")); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown session: status %d, want 404", rec.Code)
 	}
 }

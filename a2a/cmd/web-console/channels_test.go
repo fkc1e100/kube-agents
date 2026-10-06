@@ -35,15 +35,15 @@ func channelReq(name string) *http.Request {
 
 func TestChannelsListTheirOwnKindOnly(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-1", "api_server", "Triage k8s-evt-1")
-	fake.seed("cron-sweep", "api_server", "Triage cron-sweep")
-	fake.seed("slack-1", "slack", "Triage k8s-evt-2")
+	fake.seed("k8s-evt-00000001", "api_server", "Triage k8s-evt-00000001")
+	fake.seed("cron-sweep-20261006", "api_server", "Triage cron-sweep-20261006")
+	fake.seed("slack-1", "slack", "Triage k8s-evt-00000002")
 	fake.mu.Lock()
-	fake.post("k8s-evt-1", "user", "Pod web-7 is crashlooping.\nDetail")
-	fake.post("k8s-evt-1", "assistant", "Filed card t_1.")
-	fake.post("k8s-evt-1", "user", "[kanban] card completed")
-	fake.post("k8s-evt-1", "assistant", nil)
-	fake.post("k8s-evt-1", "assistant", "Fixed: the image tag was wrong.")
+	fake.post("k8s-evt-00000001", "user", "Pod web-7 is crashlooping.\nDetail")
+	fake.post("k8s-evt-00000001", "assistant", "Filed card t_1.")
+	fake.post("k8s-evt-00000001", "user", "[kanban] card completed")
+	fake.post("k8s-evt-00000001", "assistant", nil)
+	fake.post("k8s-evt-00000001", "assistant", "Fixed: the image tag was wrong.")
 	fake.post("slack-1", "user", "private question")
 	fake.mu.Unlock()
 
@@ -65,7 +65,7 @@ func TestChannelsListTheirOwnKindOnly(t *testing.T) {
 	if _, has := posts["slack-1"]; has || got.Channel != "alerts" {
 		t.Fatalf("alerts = %+v, want no chat session", got)
 	}
-	sum := posts["k8s-evt-1"].Summary
+	sum := posts["k8s-evt-00000001"].Summary
 	if sum == nil || sum.Latest != "Fixed: the image tag was wrong." || sum.Replies != 2 {
 		t.Errorf("summary = %+v, want the newest reply and a count of 2", sum)
 	}
@@ -80,15 +80,15 @@ func TestChannelsListTheirOwnKindOnly(t *testing.T) {
 	}
 
 	sched := decode[channelList](t, serve(h, channelReq("scheduled")))
-	if len(sched.Posts) != 1 || sched.Posts[0].ID != "cron-sweep" || sched.Posts[0].Kind != kindScheduled {
-		t.Errorf("scheduled = %+v, want only cron-sweep", sched)
+	if len(sched.Posts) != 1 || sched.Posts[0].ID != "cron-sweep-20261006" || sched.Posts[0].Kind != kindScheduled {
+		t.Errorf("scheduled = %+v, want only cron-sweep-20261006", sched)
 	}
 }
 
 func TestChannelsCapThePosts(t *testing.T) {
 	fake, h := setup(t)
 	for i := range channelPostsLimit + 5 {
-		id := fmt.Sprintf("k8s-evt-%d", i)
+		id := fmt.Sprintf("k8s-evt-%08x", i)
 		fake.seed(id, "api_server", "Triage "+id)
 	}
 	got := decode[channelList](t, serve(h, channelReq("alerts")))
@@ -115,18 +115,18 @@ func TestChannelReportsAnUnreachableGateway(t *testing.T) {
 
 func TestSummaryCacheKeepsOtherListsUnderTheCap(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-1", "api_server", "Triage k8s-evt-1")
-	fake.seed("cron-sweep", "api_server", "Triage cron-sweep")
+	fake.seed("k8s-evt-00000001", "api_server", "Triage k8s-evt-00000001")
+	fake.seed("cron-sweep-20261006", "api_server", "Triage cron-sweep-20261006")
 	fake.mu.Lock()
-	fake.post("cron-sweep", "user", "Run the policy sweep")
-	fake.post("cron-sweep", "assistant", "No violations.")
+	fake.post("cron-sweep-20261006", "user", "Run the policy sweep")
+	fake.post("cron-sweep-20261006", "assistant", "No violations.")
 	fake.mu.Unlock()
 
 	serve(h, channelReq("scheduled"))
-	reads := fake.gets("cron-sweep")
+	reads := fake.gets("cron-sweep-20261006")
 	serve(h, channelReq("alerts"))
 	serve(h, channelReq("scheduled"))
-	if n := fake.gets("cron-sweep"); n != reads {
+	if n := fake.gets("cron-sweep-20261006"); n != reads {
 		t.Errorf("listing another channel evicted the cached summary: %d reads, want %d", n, reads)
 	}
 }

@@ -110,7 +110,7 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sessions":
 		f.mu.Lock()
 		f.lastListQuery = r.URL.RawQuery
-		data := []map[string]any{{"id": "k8s-evt-abc", "title": "Triage k8s-evt-abc", "source": "api_server", "preview": "secret text"}}
+		data := []map[string]any{{"id": "k8s-evt-00000abc", "title": "Triage k8s-evt-00000abc", "source": "api_server", "preview": "secret text"}}
 		for id := range f.sessions {
 			row := map[string]any{"id": id, "title": "Web console", "source": "api_server", "message_count": len(f.messages[id])}
 			for k, v := range f.seeded[id] {
@@ -359,9 +359,9 @@ func TestChatRefusesForeignSessionIDs(t *testing.T) {
 
 func TestChatRepliesIntoAnAgentSession(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-x", "api_server", "Triage k8s-evt-x")
-	fake.seed("cron-daily", "api_server", "Triage cron-daily")
-	for _, sid := range []string{"k8s-evt-x", "cron-daily"} {
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
+	fake.seed("cron-daily-report-20261006", "api_server", "Triage cron-daily-report-20261006")
+	for _, sid := range []string{"k8s-evt-0000000a", "cron-daily-report-20261006"} {
 		rec := serve(h, chatReq(`{"message":"is it fixed?","session_id":"`+sid+`"}`))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", sid, rec.Code, rec.Body.String())
@@ -377,12 +377,12 @@ func TestChatRepliesIntoAnAgentSession(t *testing.T) {
 
 func TestChatRefusesChatPlatformAndUnknownSessions(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("slack-thread-1", "slack", "Triage k8s-evt-y")
+	fake.seed("slack-thread-1", "slack", "Triage k8s-evt-0000000b")
 	fake.seed("api-other", "api_server", "Something else")
 	cases := map[string]int{
 		"slack-thread-1": http.StatusForbidden,
 		"api-other":      http.StatusForbidden,
-		"k8s-evt-gone":   http.StatusNotFound,
+		"k8s-evt-0000dead":   http.StatusNotFound,
 	}
 	for sid, want := range cases {
 		rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
@@ -400,17 +400,17 @@ func TestChatRefusesChatPlatformAndUnknownSessions(t *testing.T) {
 
 func TestChatDoesNotRecreateAnAgentSession(t *testing.T) {
 	fake, h := setup(t)
-	fake.seed("k8s-evt-x", "api_server", "Triage k8s-evt-x")
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
 	// The session vanishes between the lookup and the turn, as when the
 	// agent pod is replaced mid-request: the lookup still sees it.
 	fake.mu.Lock()
 	fake.chatCode = http.StatusNotFound
 	fake.mu.Unlock()
-	rec := serve(h, chatReq(`{"message":"hi","session_id":"k8s-evt-x"}`))
+	rec := serve(h, chatReq(`{"message":"hi","session_id":"k8s-evt-0000000a"}`))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if got := decode[errorResponse](t, rec); got.Error != "session_not_found" || got.SessionID != "k8s-evt-x" {
+	if got := decode[errorResponse](t, rec); got.Error != "session_not_found" || got.SessionID != "k8s-evt-0000000a" {
 		t.Errorf("error body = %+v", got)
 	}
 	if fake.createCount() != 0 {
@@ -517,7 +517,7 @@ func TestNonLoopbackHostIsRefused(t *testing.T) {
 	for _, path := range []string{
 		"/", "/api/status", "/api/sessions/recent", "/api/insights",
 		"/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages",
-		"/api/sessions/k8s-evt-abc/transcript", "/api/channels/alerts/posts",
+		"/api/sessions/k8s-evt-00000abc/transcript", "/api/channels/alerts/posts",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:8080"+path, nil)
 		if rec := serve(h, req); rec.Code != http.StatusForbidden {
@@ -571,7 +571,7 @@ func TestRecentSessionsOmitsPreviewsAndMarksConsoleSessions(t *testing.T) {
 	for _, s := range got.Sessions {
 		marked[s.ID] = s.Console
 	}
-	if !marked[mine.SessionID] || marked["k8s-evt-abc"] {
+	if !marked[mine.SessionID] || marked["k8s-evt-00000abc"] {
 		t.Errorf("console flags wrong: %v", marked)
 	}
 }
@@ -669,7 +669,7 @@ func TestMessagesPagesBackPastALongTurnToTheMark(t *testing.T) {
 
 func TestMessagesRefusesForeignSessionIDs(t *testing.T) {
 	fake, h := setup(t)
-	for _, sid := range []string{"k8s-evt-abc", sessionIDPrefix + "xyz", sessionIDPrefix + strings.Repeat("A", 32)} {
+	for _, sid := range []string{"k8s-evt-00000abc", sessionIDPrefix + "xyz", sessionIDPrefix + strings.Repeat("A", 32)} {
 		if rec := serve(h, messagesReq(sid, "")); rec.Code != http.StatusBadRequest {
 			t.Errorf("session %q: status %d, want 400", sid, rec.Code)
 		}
