@@ -1100,6 +1100,16 @@ webConsole:
     pullPolicy: "" # defaults to Always for the latest tag, IfNotPresent otherwise
   service:
     port: 8080
+  # The agent's Google identity, shown in the console's identity box. The
+  # console holds no credentials to read IAM, so these are recorded at
+  # install: the Terraform composition fills them from the kube-agents-iam
+  # module. A role granted later is not shown until the next install.
+  agentIdentity:
+    # The Google service account the agent's KSA maps to through Workload
+    # Identity.
+    gcpServiceAccount: ""
+    # Project-level IAM roles granted to that service account.
+    roles: []
   resources:
     limits:
       cpu: 200m

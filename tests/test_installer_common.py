@@ -2367,9 +2367,9 @@ class InstallDefaultsFileTest(unittest.TestCase):
         self.assertEqual(proc.stdout.strip(), "autopilot")
 
     def test_the_chart_carries_the_same_per_provider_models(self):
-        """charts/kube-agents/templates/litellm.yaml keeps its own copy of the
-        per-provider default models for a hand-driven Helm install, because a
-        chart cannot source this file. The copy is allowed only while it is
+        """charts/kube-agents/templates/_helpers.tpl (kube-agents.litellmModel)
+        keeps its own copy of the per-provider default models for a
+        hand-driven Helm install, because a chart cannot source this file. The copy is allowed only while it is
         equal, and this is what makes that true."""
         proc = subprocess.run(
             ["bash", "-c",
@@ -2380,9 +2380,9 @@ class InstallDefaultsFileTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         defaults = dict(line.split("=", 1) for line in proc.stdout.split())
-        chart = (_REPO_ROOT / "charts" / "kube-agents" / "templates" / "litellm.yaml").read_text()
+        chart = (_REPO_ROOT / "charts" / "kube-agents" / "templates" / "_helpers.tpl").read_text()
         table = re.search(r'\$defaultModels := dict (.*?) \}\}', chart)
-        self.assertIsNotNone(table, "litellm.yaml no longer declares $defaultModels")
+        self.assertIsNotNone(table, "_helpers.tpl no longer declares $defaultModels")
         chart_models = dict(re.findall(r'"(\w+)" "([^"]+)"', table.group(1)))
         self.assertEqual(chart_models, defaults)
 

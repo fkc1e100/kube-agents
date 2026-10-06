@@ -13,6 +13,14 @@ port cannot be reached through a rebinding DNS name in the operator's browser.
 
 One replica on purpose: a port-forward lands on one pod, and the console keeps
 which sessions have a turn in flight in memory.
+
+The metrics banner reads LiteLLM's Prometheus counters from every replica. The
+headless Service below gives the console their pod IPs through DNS, so it needs
+no Kubernetes API access. litellm-policy (this chart's copy, and the
+operator's) admits every pod in the namespace on 8080, and the console's own
+NetworkPolicy governs ingress only, so the fetch is allowed both ways. The
+model and the agent identity are passed in as env at install; the console has
+no credentials to read IAM.
 */ -}}
 {{- if .Values.webConsole.enabled }}
 {{- if not .Values.platformAgent.enabled }}
@@ -23,6 +31,8 @@ which sessions have a turn in flight in memory.
 {{- /* Same tag resolution as the plugin images: an install pinned to an agent image of one commit gets the console of that commit. */ -}}
 {{- $tag := .Values.webConsole.image.tag | default .Values.platformAgent.deployment.image.tag | default .Chart.AppVersion }}
 {{- $repo := include "kube-agents.imageRepository" (dict "repository" .Values.webConsole.image.repository "registry" (include "kube-agents.imageRegistry" .)) }}
+{{- $identity := .Values.webConsole.agentIdentity | default dict }}
+{{- $peersName := printf "%s-web-console-litellm-peers" .Release.Name }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -77,6 +87,20 @@ spec:
               value: {{ .Values.platformAgent.harness.projectId | default "" | quote }}
             - name: LOCATION
               value: {{ .Values.platformAgent.harness.location | default "" | quote }}
+            {{- if .Values.litellm.enabled }}
+            - name: MODEL_NAME
+              value: {{ include "kube-agents.litellmModel" . | quote }}
+            - name: MODEL_PROVIDER
+              value: {{ .Values.litellm.modelProvider | quote }}
+            - name: LITELLM_PEERS_HOST
+              value: {{ printf "%s.%s.svc.cluster.local" $peersName .Release.Namespace | quote }}
+            {{- end }}
+            - name: AGENT_KSA
+              value: {{ .Values.platformAgent.security.serviceAccountName | default "" | quote }}
+            - name: AGENT_GSA
+              value: {{ $identity.gcpServiceAccount | default "" | quote }}
+            - name: AGENT_ROLES
+              value: {{ join "," ($identity.roles | default list) | quote }}
             - name: API_SERVER_KEY
               valueFrom:
                 secretKeyRef:
@@ -136,4 +160,27 @@ spec:
   policyTypes:
     - Ingress
   ingress: []
+{{- if .Values.litellm.enabled }}
+---
+{{- /* Headless: DNS answers with one A record per ready LiteLLM pod, which is
+       how the console finds every replica to read. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $peersName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: web-console
+    app.kubernetes.io/component: web-console
+    {{- include "kube-agents.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app: litellm
+{{- end }}
 {{- end }}
