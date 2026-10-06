@@ -488,7 +488,7 @@
               <span class="source-tag">web-console</span>
             </div>
             <div class="message-bubble">
-              <p>Messages you send here go to the Platform Agent as turns in a session of their own. Each browser tab gets a new session.</p>
+              <p>Messages you send here go to the agent as turns in a session of their own. Each browser tab gets a new session.</p>
               <p>A turn that calls tools can take a few minutes. The agent proposes changes as pull requests for you to review.</p>
             </div>
           </div>
@@ -497,7 +497,7 @@
 
       <div class="chat-input-bar">
         <textarea class="input-box" id="prompt-input" rows="1"
-          placeholder="Ask the Platform Agent a question or describe an incident"></textarea>
+          placeholder="Ask the agent a question or describe an incident"></textarea>
         <button type="button" class="btn-send" id="btn-send">Send</button>
       </div>
     </section>
@@ -597,6 +597,16 @@
       let replyAt = -1;
       messages.forEach((m, i) => { if (i > turnAt && m.role === "assistant" && same(m.content, reply)) replyAt = i; });
       if (turnAt >= 0) showUpdates(messages.slice(0, turnAt));
+      // Hermes does not serialize turns on one session, so a card's wake can
+      // run during this turn and land inside its range. A user row other than
+      // the typed message starts such a wake; its agent replies are shown.
+      if (turnAt >= 0 && replyAt > turnAt) {
+        let inWake = false;
+        messages.slice(turnAt + 1, replyAt).forEach(m => {
+          if (m.role === "user") inWake = true;
+          else if (inWake && m.id > lastSeenId) appendMessage("agent", m.content, "update");
+        });
+      }
       if (replyAt >= 0) {
         advanceMark(messages[replyAt].id);
         showUpdates(messages.slice(replyAt + 1));
@@ -650,7 +660,7 @@
         <div class="avatar ${isAgent ? "avatar-agent" : "avatar-user"}">${isAgent ? "A" : "Y"}</div>
         <div class="message-content">
           <div class="message-header">
-            <span class="message-author">${isAgent ? "Platform Agent" : "You"}</span>
+            <span class="message-author">${isAgent ? "Agent" : "You"}</span>
             ${tag ? `<span class="source-tag">${escapeHtml(tag)}</span>` : ""}
             <span class="message-time">${timeStr}</span>
           </div>
