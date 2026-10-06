@@ -112,11 +112,20 @@ func TestChatStreamRelaysStatusAndReply(t *testing.T) {
 	}
 	events := readRelay(t, rec.Body.String())
 	var statuses []string
+	var steps []string
+	var deltas []string
 	for _, e := range events[:len(events)-1] {
-		if e.name != eventStatus {
-			t.Fatalf("event %q before the reply, want only status events", e.name)
+		switch e.name {
+		case eventStatus:
+			statuses = append(statuses, e.data["text"].(string))
+		case eventStep:
+			detail, _ := e.data["detail"].(string)
+			steps = append(steps, e.data["id"].(string)+":"+e.data["kind"].(string)+":"+e.data["state"].(string)+":"+e.data["title"].(string)+":"+detail)
+		case eventDelta:
+			deltas = append(deltas, e.data["text"].(string))
+		default:
+			t.Fatalf("unexpected event %q before the reply", e.name)
 		}
-		statuses = append(statuses, e.data["text"].(string))
 	}
 	want := []string{
 		statusSending,
@@ -128,6 +137,17 @@ func TestChatStreamRelaysStatusAndReply(t *testing.T) {
 	}
 	if strings.Join(statuses, "|") != strings.Join(want, "|") {
 		t.Errorf("status lines =\n%q\nwant\n%q", statuses, want)
+	}
+	wantSteps := []string{
+		"think#1:thinking:done:Thinking:The user wants pod health. I should list pods first.",
+		"kubectl_get#1:tool:running:Running kubectl_get:pods -n kubeagents-system",
+		"kubectl_get#1:tool:done:Finished kubectl_get:pods -n kubeagents-system",
+	}
+	if strings.Join(steps, "|") != strings.Join(wantSteps, "|") {
+		t.Errorf("steps =\n%q\nwant\n%q", steps, wantSteps)
+	}
+	if strings.Join(deltas, "") != "All pods " {
+		t.Errorf("deltas = %q, want %q", deltas, []string{"All ", "pods "})
 	}
 	last := events[len(events)-1]
 	if last.name != eventReply || last.data["reply"] != "All pods are healthy." || !sessionIDPattern.MatchString(last.data["session_id"].(string)) {
@@ -444,5 +464,55 @@ func TestEchoesReply(t *testing.T) {
 		if got := echoesReply(tc.thought, tc.written); got != tc.want {
 			t.Errorf("echoesReply(%q, %q) = %v, want %v", tc.thought, tc.written, got, tc.want)
 		}
+	}
+}
+
+func TestChatStreamStepPairingAndCap(t *testing.T) {
+	fake, h := setup(t)
+	var b strings.Builder
+	b.WriteString("event: run.started\ndata: {}\n\n")
+	// Two concurrent calls to the same tool finish in FIFO order; the second fails.
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_get\", \"preview\": \"pods\"}\n\n")
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_get\", \"preview\": \"nodes\"}\n\n")
+	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_get\", \"preview\": \"secret-output\"}\n\n")
+	b.WriteString("event: tool.failed\ndata: {\"tool_name\": \"kubectl_get\", \"error\": \"forbidden\"}\n\n")
+	// Push past maxStepsPerTurn; updates to already-started steps still go through.
+	for i := 0; i < maxStepsPerTurn+5; i++ {
+		b.WriteString("event: tool.progress\ndata: {\"tool_name\": \"_thinking\", \"delta\": \"step\"}\n\n")
+	}
+	b.WriteString("event: assistant.completed\ndata: {\"content\": \"done\"}\n\nevent: done\ndata: {}\n\n")
+	fake.mu.Lock()
+	fake.stream = b.String()
+	fake.mu.Unlock()
+
+	rec := serve(h, streamReq(`{"message":"check"}`))
+	if strings.Contains(rec.Body.String(), "secret-output") {
+		t.Fatalf("completed tool preview leaked: %s", rec.Body.String())
+	}
+	events := readRelay(t, rec.Body.String())
+	seenIDs := map[string]bool{}
+	var updates []string
+	for _, e := range events {
+		if e.name != eventStep {
+			continue
+		}
+		id := e.data["id"].(string)
+		seenIDs[id] = true
+		if strings.HasPrefix(id, "kubectl_get#") {
+			detail, _ := e.data["detail"].(string)
+			updates = append(updates, id+":"+e.data["state"].(string)+":"+detail)
+		}
+	}
+	wantUpdates := []string{
+		"kubectl_get#1:running:pods",
+		"kubectl_get#2:running:nodes",
+		"kubectl_get#1:done:pods",
+		"kubectl_get#2:failed:nodes",
+	}
+	if strings.Join(updates, "|") != strings.Join(wantUpdates, "|") {
+		t.Errorf("tool step updates = %q, want %q", updates, wantUpdates)
+	}
+	if len(seenIDs) != maxStepsPerTurn {
+		t.Errorf("distinct step IDs = %d, want cap %d", len(seenIDs), maxStepsPerTurn)
 	}
 }

@@ -541,7 +541,7 @@
     .message-bubble p { margin-bottom: 8px; }
     .message-bubble p:last-child { margin-bottom: 0; }
 
-    /* The one-line live status of a running turn. */
+    /* The one-line live status of a running turn, plus its steps timeline. */
     .status-line {
       font-size: 13px;
       color: var(--text-secondary);
@@ -553,6 +553,116 @@
 
     .status-line.status-in { animation: status-in 0.25s ease-out; }
     @keyframes status-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+    .turn-steps,
+    .turn-steps-summary {
+      margin: 6px 0 8px;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-page);
+      padding: 6px 10px;
+      font-size: 12.5px;
+    }
+
+    .turn-steps-summary > summary {
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-weight: 500;
+      user-select: none;
+    }
+
+    .turn-steps-summary[open] > summary {
+      margin-bottom: 6px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .step-row {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      padding: 2px 0;
+      line-height: 1.4;
+    }
+
+    .step-icon {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      flex-shrink: 0;
+      width: 14px;
+      text-align: center;
+    }
+
+    .step-icon.running { color: var(--gcp-blue); animation: pulse 1s ease-in-out infinite; }
+    .step-icon.done { color: var(--green-text); }
+    .step-icon.failed { color: var(--red-text); }
+
+    .step-title { font-weight: 500; color: var(--text-primary); flex-shrink: 0; }
+    .step-detail {
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+
+    .turn-stream { margin-top: 6px; }
+
+    /* Compact cards for event_watcher, scheduler, and kanban messages. */
+    .msg-card {
+      border: 1px solid var(--border-color);
+      border-left: 3px solid var(--gcp-blue);
+      border-radius: 6px;
+      background: var(--bg-page);
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .msg-card-alert { border-left-color: #ea4335; }
+    .msg-card-cron { border-left-color: #9334e6; }
+    .msg-card-kanban { border-left-color: #34a853; background: #f6fbf8; }
+
+    .msg-card-title { font-weight: 700; font-size: 13.5px; color: var(--text-primary); }
+    .msg-card-meta { font-size: 11.5px; color: var(--text-secondary); }
+    .msg-card-foot { font-size: 11px; color: var(--text-muted); }
+
+    .msg-card-grid {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 3px 10px;
+      font-size: 12.5px;
+    }
+
+    .msg-card-grid dt { color: var(--text-secondary); font-weight: 500; }
+    .msg-card-grid dd { min-width: 0; word-break: break-word; }
+
+    .prompt-details {
+      margin-top: 4px;
+      font-size: 12px;
+    }
+
+    .prompt-details > summary {
+      cursor: pointer;
+      color: var(--gcp-blue);
+      font-weight: 500;
+      user-select: none;
+    }
+
+    .prompt-raw {
+      margin-top: 6px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      max-height: 260px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
 
     .composer {
       padding: 12px 20px;
@@ -1071,9 +1181,10 @@
 
     // Shows an agent message on its thread: in the centre pane when that
     // thread is on screen, and as an unread dot in the rail when it is not.
-    function deliver(t, text, tag) {
+    function deliver(t, text, tag, msg, meta) {
       if (onScreen(t.id)) {
-        appendMessage("agent", text, tag);
+        const author = (msg && msg.author) || "agent";
+        appendMessage(author, text, tag, msg && msg.timestamp, msg && msg.card, meta);
       } else {
         t.unread = true;
         saveThreads();
@@ -1093,13 +1204,13 @@
       }
     }
 
-    // Shows each agent message above the mark once, then moves the mark past
-    // it. User-role rows (the thread's own turns, and the wake that delivers
-    // a card's result) only move the mark.
+    // Shows each agent or kanban message above the mark once, then moves the
+    // mark past it. User-role rows from the thread's own turns only move the mark.
     function showUpdates(t, messages) {
       (messages || []).forEach(m => {
         if (m.id <= t.mark) return;
-        if (m.role === "assistant") deliver(t, m.content, "update");
+        if (m.author === "kanban") deliver(t, m.content, "Specialist report", m);
+        else if (m.role === "assistant") deliver(t, m.content, "update", m);
         advanceMark(t, m.id);
       });
     }
@@ -1148,8 +1259,12 @@
       if (turnAt >= 0 && replyAt > turnAt) {
         let inWake = false;
         messages.slice(turnAt + 1, replyAt).forEach(m => {
-          if (m.role === "user") inWake = true;
-          else if (inWake && m.id > t.mark) deliver(t, m.content, "update");
+          if (m.role === "user") {
+            inWake = true;
+            if (m.author === "kanban" && m.id > t.mark) deliver(t, m.content, "Specialist report", m);
+          } else if (inWake && m.id > t.mark) {
+            deliver(t, m.content, "update", m);
+          }
         });
       }
       if (replyAt >= 0) {
@@ -1169,20 +1284,86 @@
       clearStream();
       const messages = (transcript && transcript.messages) || [];
       if (!t.title) {
-        const first = messages.find(m => m.role === "user");
+        const first = messages.find(m => m.role === "user" && (!m.author || m.author === "user"));
         if (first) t.title = threadTitle(first.content);
       }
-      messages.forEach(m => appendMessage(m.role === "user" ? "user" : "agent", m.content, "", m.timestamp));
+      messages.forEach(m => {
+        const role = m.author || (m.role === "user" ? "user" : "agent");
+        appendMessage(role, m.content, "", m.timestamp, m.card);
+      });
       if (transcript) advanceMark(t, transcript.latest_id);
       saveThreads();
       threadsChanged();
+    }
+
+    // Starts tracking a session's in-flight turn.
+    function startInflight(id, text) {
+      const now = nowSeconds();
+      inflight[id] = {
+        text,
+        status: STATUS_SENDING,
+        startedAt: now,
+        lastEventAt: now,
+        steps: [],
+        deltaText: ""
+      };
+      return inflight[id];
     }
 
     // Records a status line for a session's running turn.
     function setStatus(id, text) {
       if (!inflight[id]) return;
       inflight[id].status = text;
+      inflight[id].lastEventAt = nowSeconds();
       statusChanged(id);
+    }
+
+    // Records or updates a structured step (thinking or tool call) on a turn.
+    function addStep(id, step) {
+      const turn = inflight[id];
+      if (!turn || !step || !step.id) return;
+      if (!Array.isArray(turn.steps)) turn.steps = [];
+      const existing = turn.steps.find(s => s.id === step.id);
+      if (existing) {
+        existing.state = step.state || existing.state;
+        existing.title = step.title || existing.title;
+        if (step.detail) existing.detail = step.detail;
+      } else {
+        turn.steps.push({
+          id: step.id,
+          kind: step.kind || "tool",
+          title: step.title || step.id,
+          detail: step.detail || "",
+          state: step.state || "running"
+        });
+      }
+      turn.lastEventAt = nowSeconds();
+      statusChanged(id);
+    }
+
+    // Appends a streamed reply chunk to a running turn.
+    function appendDelta(id, text) {
+      const turn = inflight[id];
+      if (!turn || !text) return;
+      turn.deltaText = (turn.deltaText || "") + text;
+      turn.lastEventAt = nowSeconds();
+      statusChanged(id);
+    }
+
+    // Formats a running turn's status line with an elapsed timer, switching
+    // to "Waiting for the model" after 3s without an event between steps.
+    function formatStatusWithTimer(turn, now) {
+      if (!turn) return "Working on it…";
+      const t = typeof now === "number" ? now : nowSeconds();
+      const started = typeof turn.startedAt === "number" ? turn.startedAt : t;
+      const last = typeof turn.lastEventAt === "number" ? turn.lastEventAt : started;
+      const elapsed = Math.max(0, Math.floor(t - started));
+      const idle = t - last;
+      let base = turn.status || "Working on it…";
+      if (idle >= 3 && !turn.deltaText && (base === "The agent started working" || base.startsWith("Finished "))) {
+        base = "Waiting for the model";
+      }
+      return `${base} · ${elapsed} s`;
     }
 
     // Reads a server-sent event stream from a fetch body. Frames end with a
@@ -1359,36 +1540,116 @@
       return html;
     }
 
+    function renderStepsHtml(steps) {
+      if (!Array.isArray(steps) || steps.length === 0) return "";
+      return steps.map(s => {
+        const state = s.state || "running";
+        const icon = state === "done" ? "\u2713" : (state === "failed" ? "\u2717" : "\u25cf");
+        const detail = s.detail ? `<span class="step-detail" title="${escapeHtml(s.detail)}">${escapeHtml(s.detail)}</span>` : "";
+        return `<div class="step-row"><span class="step-icon ${escapeHtml(state)}">${icon}</span><span class="step-title">${escapeHtml(s.title || s.id)}</span>${detail}</div>`;
+      }).join("");
+    }
+
+    function renderStepsSummaryHtml(meta) {
+      if (!meta || !Array.isArray(meta.steps) || meta.steps.length === 0) return "";
+      const n = meta.steps.length;
+      const secs = Math.max(1, Math.round(meta.elapsed || 1));
+      return `<details class="turn-steps-summary"><summary>Worked for ${secs} s &middot; ${n} ${n === 1 ? "step" : "steps"}</summary>${renderStepsHtml(meta.steps)}</details>`;
+    }
+
+    function renderAuthorBody(role, text, card, meta) {
+      if (role === "event_watcher") {
+        const subject = (card && card.subject) || threadTitle(text);
+        const rows = [];
+        if (card && card.resource) rows.push(`<dt>Resource</dt><dd><code>${escapeHtml(card.resource)}</code></dd>`);
+        if (card && card.reason) rows.push(`<dt>Reason</dt><dd><code>${escapeHtml(card.reason)}</code></dd>`);
+        if (card && card.warning) rows.push(`<dt>Message</dt><dd>${escapeHtml(card.warning)}</dd>`);
+        const grid = rows.length ? `<dl class="msg-card-grid">${rows.join("")}</dl>` : "";
+        return `<div class="msg-card msg-card-alert">
+          <div class="msg-card-title">${escapeHtml(subject)}</div>
+          ${grid}
+          <details class="prompt-details"><summary>Show routing prompt</summary><div class="prompt-raw">${renderMarkdown(text)}</div></details>
+        </div>`;
+      }
+      if (role === "scheduler") {
+        const subject = (card && card.subject) || threadTitle(text);
+        return `<div class="msg-card msg-card-cron">
+          <div class="msg-card-title">${escapeHtml(subject)}</div>
+          <details class="prompt-details"><summary>Show scheduled prompt</summary><div class="prompt-raw">${renderMarkdown(text)}</div></details>
+        </div>`;
+      }
+      if (role === "kanban") {
+        const taskId = (card && card.task_id) || "task";
+        const status = (card && card.status) || "completed";
+        const title = (card && card.title) ? `<div class="msg-card-title">${escapeHtml(card.title)}</div>` : "";
+        const body = (card && card.summary) ? renderMarkdown(card.summary) : renderMarkdown(text);
+        return `<div class="msg-card msg-card-kanban">
+          <div class="msg-card-meta">Task <code>${escapeHtml(taskId)}</code> &middot; ${escapeHtml(status)}</div>
+          ${title}
+          <div class="msg-card-summary">${body}</div>
+          <div class="msg-card-foot">Summary from kanban task ${escapeHtml(taskId)}</div>
+        </div>`;
+      }
+      if (role === "user" && text && text.length > 1500) {
+        const preview = escapeHtml(text.slice(0, 300).trim()) + "\u2026";
+        return `<p>${preview}</p><details class="prompt-details"><summary>Show full message (${escapeHtml(formatCount(text.length))} chars)</summary><div class="prompt-raw">${renderMarkdown(text)}</div></details>`;
+      }
+      return renderStepsSummaryHtml(meta) + renderMarkdown(text);
+    }
+
     // Builds one message row. at is the message's epoch seconds; a message
     // typed or received now leaves it out.
-    function messageRow(role, text, tag, at) {
+    function messageRow(role, text, tag, at, card, meta) {
       const row = document.createElement("div");
       row.className = "message-row";
-      const isAgent = role === "agent";
+      let avatarClass = "avatar-user";
+      let avatarChar = "Y";
+      let authorName = "You";
+      let tagLabel = tag || "";
+      if (role === "agent") {
+        avatarClass = "avatar-agent";
+        avatarChar = "A";
+        authorName = "Agent";
+      } else if (role === "event_watcher") {
+        avatarClass = "avatar-alert";
+        avatarChar = "!";
+        authorName = "Event watcher";
+        tagLabel = tagLabel || "alert";
+      } else if (role === "scheduler") {
+        avatarClass = "avatar-cron";
+        avatarChar = "\u21bb";
+        authorName = "Scheduler";
+        tagLabel = tagLabel || "scheduled";
+      } else if (role === "kanban") {
+        avatarClass = "avatar-agent";
+        avatarChar = "K";
+        authorName = (card && card.assignee) || "Specialist agent";
+        tagLabel = tagLabel || "Specialist report";
+      }
       const when = typeof at === "number" ? new Date(at * 1000) : new Date();
       const timeStr = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       row.innerHTML = `
-        <div class="avatar ${isAgent ? "avatar-agent" : "avatar-user"}">${isAgent ? "A" : "Y"}</div>
+        <div class="avatar ${avatarClass}">${escapeHtml(avatarChar)}</div>
         <div class="message-content">
           <div class="message-header">
-            <span class="message-author">${isAgent ? "Agent" : "You"}</span>
-            ${tag ? `<span class="source-tag">${escapeHtml(tag)}</span>` : ""}
+            <span class="message-author">${escapeHtml(authorName)}</span>
+            ${tagLabel ? `<span class="source-tag">${escapeHtml(tagLabel)}</span>` : ""}
             <span class="message-time">${escapeHtml(timeStr)}</span>
           </div>
-          <div class="message-bubble">${renderMarkdown(text)}</div>
+          <div class="message-bubble">${renderAuthorBody(role, text, card, meta)}</div>
         </div>`;
       return row;
     }
 
-    function appendTo(container, role, text, tag, at) {
-      const row = messageRow(role, text, tag, at);
+    function appendTo(container, role, text, tag, at, card, meta) {
+      const row = messageRow(role, text, tag, at, card, meta);
       container.appendChild(row);
       container.scrollTop = container.scrollHeight;
       return row;
     }
 
-    function appendMessage(role, text, tag, at) {
-      return appendTo($("chat-stream"), role, text, tag, at);
+    function appendMessage(role, text, tag, at, card, meta) {
+      return appendTo($("chat-stream"), role, text, tag, at, card, meta);
     }
 
     function clearStream() {
@@ -1405,19 +1666,29 @@
       return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
     }
 
-    // The working row of a running turn, with its one status line, in the
-    // pane that started the turn: "centre" or "side".
+    // The working row of a running turn, with its one status line, steps
+    // timeline, and live delta stream, in the pane that started the turn.
     const pending = { centre: null, side: null };
+    const lastTurnMeta = {};
 
     function showPending(where, id) {
       removePending(where);
       const container = where === "side" ? $("side-body") : $("chat-stream");
       const row = appendTo(container, "agent", "", "working");
+      const bubble = row.querySelector(".message-bubble");
       const line = document.createElement("div");
       line.className = "status-line";
-      line.innerText = (inflight[id] && inflight[id].status) || "Working on it…";
-      row.querySelector(".message-bubble").appendChild(line);
-      pending[where] = { row, line, id };
+      const stepsEl = document.createElement("div");
+      stepsEl.className = "turn-steps";
+      stepsEl.hidden = true;
+      const streamEl = document.createElement("div");
+      streamEl.className = "turn-stream";
+      streamEl.hidden = true;
+      bubble.appendChild(line);
+      bubble.appendChild(stepsEl);
+      bubble.appendChild(streamEl);
+      pending[where] = { row, line, stepsEl, streamEl, id, lastStatus: "", lastStepsSig: "", lastDelta: "" };
+      statusChanged(id);
     }
 
     function removePending(where) {
@@ -1425,15 +1696,37 @@
       pending[where] = null;
     }
 
-    // Replaces a status line's text, restarting its fade-in.
+    // Updates the live status line, steps block, and streaming reply text.
     function statusChanged(id) {
+      const turn = inflight[id];
+      if (!turn) return;
       Object.values(pending).forEach(p => {
         if (!p || p.id !== id) return;
-        p.line.innerText = inflight[id].status;
-        p.line.classList.remove("status-in");
-        void p.line.offsetWidth;
-        p.line.classList.add("status-in");
+        p.line.innerText = formatStatusWithTimer(turn);
+        if (turn.status !== p.lastStatus) {
+          p.lastStatus = turn.status;
+          p.line.classList.remove("status-in");
+          void p.line.offsetWidth;
+          p.line.classList.add("status-in");
+        }
+        const steps = turn.steps || [];
+        const sig = JSON.stringify(steps);
+        if (sig !== p.lastStepsSig) {
+          p.lastStepsSig = sig;
+          p.stepsEl.hidden = steps.length === 0;
+          p.stepsEl.innerHTML = renderStepsHtml(steps);
+        }
+        const delta = turn.deltaText || "";
+        if (delta !== p.lastDelta) {
+          p.lastDelta = delta;
+          p.streamEl.hidden = !delta;
+          p.streamEl.innerHTML = renderMarkdown(delta);
+        }
       });
+    }
+
+    function tickInflight() {
+      Object.keys(inflight).forEach(id => statusChanged(id));
     }
 
     function updateComposer() {
@@ -1739,10 +2032,16 @@
       pending.side = null;
       const messages = data.messages || [];
       if (messages.length === 0) body.appendChild(messageRow("agent", "This session has no messages with text yet.", "empty"));
-      messages.forEach(m => body.appendChild(messageRow(m.role === "user" ? "user" : "agent", m.content, "", m.timestamp)));
+      let lastAgentIdx = -1;
+      messages.forEach((m, i) => { if ((m.author || m.role) !== "user" && m.role === "assistant") lastAgentIdx = i; });
+      messages.forEach((m, i) => {
+        const role = m.author || (m.role === "user" ? "user" : "agent");
+        const meta = (i === lastAgentIdx && lastTurnMeta[id]) ? lastTurnMeta[id] : null;
+        body.appendChild(messageRow(role, m.content, "", m.timestamp, m.card, meta));
+      });
       const turn = inflight[id];
       if (turn) {
-        const users = messages.filter(m => m.role === "user");
+        const users = messages.filter(m => m.role === "user" && (!m.author || m.author === "user"));
         const last = users.length ? users[users.length - 1].content : "";
         if ((last || "").trim() !== turn.text.trim()) body.appendChild(messageRow("user", turn.text));
         showPending("side", id);
@@ -1764,19 +2063,23 @@
       if (!text) return;
       input.value = "";
       const id = pane.id;
-      inflight[id] = { text, status: STATUS_SENDING };
+      const turn = startInflight(id, text);
       appendTo($("side-body"), "user", text);
       showPending("side", id);
       updateSideComposer();
 
       const outcome = await runTurn(id, text);
+      const meta = (turn.steps && turn.steps.length > 0)
+        ? { steps: turn.steps.slice(), elapsed: Math.max(1, Math.round(nowSeconds() - turn.startedAt)) }
+        : null;
+      if (meta && outcome.error === undefined) lastTurnMeta[id] = meta;
       delete inflight[id];
       if (pending.side && pending.side.id === id) removePending("side");
       if (pane.mode === "post" && pane.id === id) {
         if (outcome.error !== undefined) {
           appendTo($("side-body"), "agent", outcome.error, "error");
         } else if (!(await refreshPane(true))) {
-          appendTo($("side-body"), "agent", outcome.reply || "(The agent returned an empty reply.)");
+          appendTo($("side-body"), "agent", outcome.reply || "(The agent returned an empty reply.)", "", undefined, undefined, meta);
         }
       }
       updateSideComposer();
@@ -1855,7 +2158,7 @@
       }
       const turn = inflight[id];
       if (turn) {
-        const shown = ((result.data && result.data.messages) || []).filter(m => m.role === "user");
+        const shown = ((result.data && result.data.messages) || []).filter(m => m.role === "user" && (!m.author || m.author === "user"));
         const last = shown.length ? shown[shown.length - 1].content : "";
         if ((last || "").trim() !== turn.text.trim()) appendMessage("user", turn.text);
         showPending("centre", id);
@@ -1931,6 +2234,8 @@
       try {
         await readSSE(resp.body, (name, data) => {
           if (name === "status" && typeof data.text === "string") setStatus(id, data.text);
+          else if (name === "step" && data && typeof data.id === "string") addStep(id, data);
+          else if (name === "delta" && data && typeof data.text === "string") appendDelta(id, data.text);
           else if (name === "reply") result = { reply: data.reply || "" };
           else if (name === "error") result = { error: `Request failed: ${data.detail || data.error || "no detail"}` };
         });
@@ -1959,18 +2264,21 @@
       if (!t.title) t.title = threadTitle(text);
       t.started = true;
       t.updated = nowSeconds();
-      inflight[t.id] = { text, status: STATUS_SENDING };
+      const turn = startInflight(t.id, text);
       saveThreads();
       appendMessage("user", text);
       showPending("centre", t.id);
       threadsChanged();
 
       const outcome = await runTurn(t.id, text);
+      const meta = (turn.steps && turn.steps.length > 0)
+        ? { steps: turn.steps.slice(), elapsed: Math.max(1, Math.round(nowSeconds() - turn.startedAt)) }
+        : null;
       delete inflight[t.id];
       if (pending.centre && pending.centre.id === t.id) removePending("centre");
       if (findThread(t.id)) {
         if (outcome.error === undefined) {
-          deliver(t, outcome.reply || "(The agent returned an empty reply.)");
+          deliver(t, outcome.reply || "(The agent returned an empty reply.)", "", null, meta);
           await settleAfterReply(t, text, outcome.reply);
         } else if (onScreen(t.id)) {
           appendMessage("agent", outcome.error, "error");
@@ -2174,6 +2482,7 @@
     setInterval(fetchInsights, INSIGHTS_POLL_MS);
     setInterval(pollAll, MESSAGES_POLL_MS);
     setInterval(pollPane, PANE_POLL_MS);
+    setInterval(tickInflight, 1000);
   </script>
 </body>
 </html>

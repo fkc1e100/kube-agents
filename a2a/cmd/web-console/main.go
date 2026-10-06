@@ -445,14 +445,32 @@ func (s *server) listSessions(ctx context.Context, path string) ([]recentSession
 	return sessions, nil
 }
 
+// messageCard carries the fields the page lifts out of an automated prompt
+// (event watcher, scheduler, or kanban task notification) so the thread can
+// show a compact card instead of a raw routing template.
+type messageCard struct {
+	Subject  string `json:"subject,omitempty"`
+	Resource string `json:"resource,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Warning  string `json:"warning,omitempty"`
+	TaskID   string `json:"task_id,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Assignee string `json:"assignee,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Summary  string `json:"summary,omitempty"`
+}
+
 // sessionMessage is one user or assistant message from a poll of the page's
-// own session. ID is Hermes' message row ID, which increases in insertion
-// order.
+// own session or a session transcript. ID is Hermes' message row ID, which
+// increases in insertion order. Author names who wrote the row ("user",
+// "agent", "event_watcher", "scheduler", or "kanban").
 type sessionMessage struct {
-	ID        int64    `json:"id"`
-	Role      string   `json:"role"`
-	Content   string   `json:"content"`
-	Timestamp *float64 `json:"timestamp,omitempty"`
+	ID        int64        `json:"id"`
+	Role      string       `json:"role"`
+	Author    string       `json:"author,omitempty"`
+	Content   string       `json:"content"`
+	Timestamp *float64     `json:"timestamp,omitempty"`
+	Card      *messageCard `json:"card,omitempty"`
 }
 
 type sessionMessagesResponse struct {
@@ -496,7 +514,7 @@ func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 		if m.ID <= after || !hasText(m) {
 			continue
 		}
-		out.Messages = append(out.Messages, sessionMessage{ID: m.ID, Role: m.Role, Content: *m.Content, Timestamp: m.Timestamp})
+		out.Messages = append(out.Messages, s.buildSessionMessage(kindConsole, false, m))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
