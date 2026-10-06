@@ -70,6 +70,11 @@ const (
 	// summaryMaxRunes bounds the subject and latest lines.
 	summaryMaxRunes = 140
 	ellipsis        = "…"
+	// summaryCacheMaxEntries bounds the summary cache. Past it, entries for
+	// sessions the current request did not list are dropped. The recent list
+	// and the two channels list different sessions, so a smaller cap would
+	// evict one list's entries on every refresh of another.
+	summaryCacheMaxEntries = 500
 
 	// transcriptMaxRows is how many text rows a transcript returns, newest
 	// kept, oldest first.
@@ -82,6 +87,12 @@ var (
 	// covers the IDs the event watcher, the scheduler and this console mint,
 	// and refuses anything that could change the upstream path.
 	transcriptIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
+
+	// cardTitlePattern finds the card title an event triage prompt spells
+	// out ("- `title`: `Triage ns/Kind/name (Reason) on cluster`"; see
+	// _agent_query in session_kv_server.py). Every triage prompt opens with
+	// the same sentence, so that title is the line that tells posts apart.
+	cardTitlePattern = regexp.MustCompile("(?m)^- `title`: `([^`\n]+)`")
 
 	// summaryKinds are the kinds the list reads content for.
 	summaryKinds = map[string]bool{kindEventTriage: true, kindScheduled: true, kindConsole: true}
@@ -109,9 +120,14 @@ func classifySession(id, source, title string) string {
 }
 
 // sessionSummary is the list row's subject and latest-reply lines.
+//
+// Replies counts the assistant rows with text among the session's newest
+// messagesPageLimit messages, so it is exact for a short session and a floor
+// for a long one.
 type sessionSummary struct {
 	Subject string `json:"subject"`
 	Latest  string `json:"latest"`
+	Replies int    `json:"replies"`
 }
 
 type summaryEntry struct {
@@ -128,7 +144,8 @@ type summaryCache struct {
 
 // attachSummaries fills Summary on the sessions whose kind summaryKinds
 // lists, from the cache where the message count still matches and from
-// Hermes otherwise. Sessions no longer listed are dropped from the cache.
+// Hermes otherwise. Once the cache holds more than summaryCacheMaxEntries,
+// entries for sessions this call did not list are dropped.
 func (s *server) attachSummaries(parent context.Context, sessions []recentSession) {
 	ctx, cancel := context.WithTimeout(parent, summaryTimeout)
 	defer cancel()
@@ -153,9 +170,11 @@ func (s *server) attachSummaries(parent context.Context, sessions []recentSessio
 		}
 		jobs = append(jobs, job{index: i, count: *sess.MessageCount})
 	}
-	for id := range s.summaries.entries {
-		if !listed[id] {
-			delete(s.summaries.entries, id)
+	if len(s.summaries.entries) > summaryCacheMaxEntries {
+		for id := range s.summaries.entries {
+			if !listed[id] {
+				delete(s.summaries.entries, id)
+			}
 		}
 	}
 	s.summaries.mu.Unlock()
@@ -198,7 +217,7 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 	}
 	for _, m := range first {
 		if m.Role == roleUser && hasText(m) {
-			out.Subject = summaryLine(*m.Content)
+			out.Subject = summarySubject(*m.Content)
 			break
 		}
 	}
@@ -208,12 +227,24 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 		return out, false
 	}
 	for i := len(latest) - 1; i >= 0; i-- {
-		if latest[i].Role == roleAssistant && hasText(latest[i]) {
-			out.Latest = summaryLine(*latest[i].Content)
-			break
+		if latest[i].Role != roleAssistant || !hasText(latest[i]) {
+			continue
 		}
+		if out.Replies == 0 {
+			out.Latest = summaryLine(*latest[i].Content)
+		}
+		out.Replies++
 	}
 	return out, true
+}
+
+// summarySubject is the card title a triage prompt names, or else the first
+// line of the message.
+func summarySubject(text string) string {
+	if m := cardTitlePattern.FindStringSubmatch(text); m != nil {
+		return summaryLine(m[1])
+	}
+	return summaryLine(text)
 }
 
 // summaryLine is the first non-blank line of a message, cut to
