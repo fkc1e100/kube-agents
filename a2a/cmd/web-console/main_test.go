@@ -556,3 +556,18 @@ func TestEveryResponseForbidsFraming(t *testing.T) {
 		}
 	}
 }
+
+// The page's grid row must not grow with the session list. When it did, a
+// long list pushed the message box below the window with no way to scroll to
+// it.
+func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
+	page, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{"grid-template-rows: minmax(0, 1fr);", "min-height: 0;"} {
+		if !strings.Contains(string(page), rule) {
+			t.Errorf("index.html is missing %q", rule)
+		}
+	}
+}
