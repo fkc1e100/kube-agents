@@ -78,22 +78,11 @@
         gap: 8px;
       }
 
-      .cluster-pill {
-        font-size: 11.5px;
-        font-weight: 500;
-        background: var(--gcp-blue-light);
-        color: var(--gcp-blue);
-        padding: 3px 8px;
-        border-radius: 12px;
-        margin-left: 8px;
-        font-family: var(--font-mono);
-      }
-
-      .header-actions {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
 
       .badge {
         display: inline-flex;
@@ -425,89 +414,282 @@
         transition: box-shadow 0.15s ease;
       }
 
-      .session-card:hover {
-        box-shadow: 0 1px 4px rgba(60, 64, 67, 0.12);
-      }
+    .sidebar-content {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
 
-      .session-top {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-      }
+    /* Recent activity: compact rows grouped by kind. */
+    .activity-group {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
 
-      .session-title {
-        font-size: 13px;
-        font-weight: 700;
-        color: var(--text-primary);
-      }
+    .group-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      padding: 4px 6px;
+    }
 
-      .session-meta {
-        display: flex;
-        justify-content: space-between;
-        font-size: 10.5px;
-        color: var(--text-muted);
-      }
+    .group-count {
+      font-family: var(--font-mono);
+      font-weight: 500;
+      background: var(--border-subtle);
+      border-radius: 8px;
+      padding: 1px 7px;
+    }
 
-      .empty-state {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        height: 180px;
-        color: var(--text-muted);
-        text-align: center;
-        gap: 8px;
-        font-size: 13px;
-      }
-    </style>
-  </head>
-  <body>
-    <header>
-      <div class="brand">
-        <!-- Google Kubernetes Engine product icon, from cloud.google.com/icons. -->
-        <svg
-          class="brand-logo"
-          viewBox="0 0 24 24"
-          xmlns="http://www.w3.org/2000/svg"
-          role="img"
-          aria-label="Google Kubernetes Engine"
-        >
-          <polygon
-            fill="#4285f4"
-            fill-rule="evenodd"
-            points="14.68 13.06 19.23 15.69 19.23 16.68 14.29 13.83 14.68 13.06"
-          />
-          <polygon
-            fill="#669df6"
-            fill-rule="evenodd"
-            points="9.98 13.65 4.77 16.66 4.45 15.86 9.53 12.92 9.98 13.65"
-          />
-          <rect fill="#aecbfa" x="11.55" y="3.29" width="0.86" height="5.78" />
-          <path
-            fill="#aecbfa"
-            fill-rule="evenodd"
-            d="M3.25,7V17L12,22l8.74-5V7L12,2Zm15.63,8.89L12,19.78,5.12,15.89V8.11L12,4.22l6.87,3.89v7.78Z"
-          />
-          <polygon
-            fill="#aecbfa"
-            fill-rule="evenodd"
-            points="11.98 11.5 15.96 9.21 11.98 6.91 8.01 9.21 11.98 11.5"
-          />
-          <polygon
-            fill="#669df6"
-            fill-rule="evenodd"
-            points="11.52 12.3 7.66 10.01 7.66 14.6 11.52 16.89 11.52 12.3"
-          />
-          <polygon
-            fill="#4285f4"
-            fill-rule="evenodd"
-            points="12.48 12.3 12.48 16.89 16.34 14.6 16.34 10.01 12.48 12.3"
-          />
-        </svg>
-        <div class="brand-title">
-          Kube-Agents Console
-          <span class="cluster-pill" id="cluster-tag" hidden></span>
-        </div>
+    .activity-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      width: 100%;
+      text-align: left;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 7px 9px;
+      font-family: var(--font-sans);
+      color: var(--text-primary);
+    }
+
+    .activity-row.openable { cursor: pointer; }
+    .activity-row.openable:hover { border-color: #aecbfa; background: var(--gcp-blue-light); }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-top: 5px;
+      flex-shrink: 0;
+    }
+
+    .dot-current { background: var(--gcp-blue); }
+    .dot-active { background: var(--green-text); }
+    .dot-idle { background: var(--text-muted); }
+
+    .row-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .row-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .row-subject, .row-latest {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row-subject { font-size: 12.5px; font-weight: 500; }
+    .row-latest { font-size: 11.5px; color: var(--text-secondary); }
+    .row-time { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+    .chevron { color: var(--text-muted); font-size: 16px; line-height: 1; margin-top: 1px; }
+
+    /* Agent identity, under the activity list. It shrinks and scrolls
+       inside the sidebar rather than pushing the list away. */
+    .identity {
+      flex: 0 1 auto;
+      min-height: 0;
+      max-height: 45%;
+      overflow-y: auto;
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-color);
+      padding: 12px 16px;
+      font-size: 12px;
+    }
+
+    .identity-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 8px;
+    }
+
+    .identity dt {
+      color: var(--text-muted);
+      font-size: 11px;
+      margin-top: 6px;
+    }
+
+    .identity dd {
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+      word-break: break-all;
+    }
+
+    .role-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 3px;
+    }
+
+    .role-chip {
+      background: var(--gcp-blue-light);
+      color: var(--gcp-blue);
+      border-radius: 10px;
+      padding: 2px 8px;
+      font-size: 11px;
+    }
+
+    .identity-caption {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Metrics banner, below the header. */
+    .insights {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border-color);
+      flex-shrink: 0;
+    }
+
+    .tile {
+      padding: 9px 20px;
+      border-right: 1px solid var(--border-subtle);
+      min-width: 0;
+    }
+
+    .tile:last-child { border-right: none; }
+
+    .tile-label {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .tile-value {
+      font-size: 16px;
+      font-weight: 500;
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tile-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tile-sub.warn { color: var(--amber-text); }
+
+    /* Read-only transcript, over the chat column. */
+    .transcript-panel {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      background: var(--bg-surface);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .transcript-panel[hidden] { display: none; }
+
+    .transcript-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border-color);
+      flex-shrink: 0;
+    }
+
+    .transcript-title {
+      font-size: 14px;
+      font-weight: 700;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .transcript-note { font-size: 11px; color: var(--text-muted); }
+
+    .btn-close {
+      background: var(--bg-page);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-family: var(--font-sans);
+      font-size: 12.5px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+
+    .transcript-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 180px;
+      color: var(--text-muted);
+      text-align: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .empty-icon {
+      font-size: 28px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <!-- Google Kubernetes Engine product icon, from cloud.google.com/icons. -->
+      <svg class="brand-logo" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Google Kubernetes Engine">
+        <polygon fill="#4285f4" fill-rule="evenodd" points="14.68 13.06 19.23 15.69 19.23 16.68 14.29 13.83 14.68 13.06"/>
+        <polygon fill="#669df6" fill-rule="evenodd" points="9.98 13.65 4.77 16.66 4.45 15.86 9.53 12.92 9.98 13.65"/>
+        <rect fill="#aecbfa" x="11.55" y="3.29" width="0.86" height="5.78"/>
+        <path fill="#aecbfa" fill-rule="evenodd" d="M3.25,7V17L12,22l8.74-5V7L12,2Zm15.63,8.89L12,19.78,5.12,15.89V8.11L12,4.22l6.87,3.89v7.78Z"/>
+        <polygon fill="#aecbfa" fill-rule="evenodd" points="11.98 11.5 15.96 9.21 11.98 6.91 8.01 9.21 11.98 11.5"/>
+        <polygon fill="#669df6" fill-rule="evenodd" points="11.52 12.3 7.66 10.01 7.66 14.6 11.52 16.89 11.52 12.3"/>
+        <polygon fill="#4285f4" fill-rule="evenodd" points="12.48 12.3 12.48 16.89 16.34 14.6 16.34 10.01 12.48 12.3"/>
+      </svg>
+      <div class="brand-title">
+        Kube-Agents Console
       </div>
       <div class="header-actions">
         <div class="badge badge-grey" id="agent-badge" title="">
@@ -517,38 +699,37 @@
       </div>
     </header>
 
-    <main>
-      <section class="chat-section">
-        <div class="prompt-chips-bar">
-          <button
-            type="button"
-            class="chip"
-            data-prompt="Audit cluster health and identify any failing pods"
-          >
-            Cluster health
-          </button>
-          <button
-            type="button"
-            class="chip"
-            data-prompt="Summarise the recent Kubernetes warning events on this cluster"
-          >
-            Recent warnings
-          </button>
-          <button
-            type="button"
-            class="chip"
-            data-prompt="Check GitOps configuration drift against live workloads"
-          >
-            GitOps drift
-          </button>
-          <button
-            type="button"
-            class="chip"
-            data-prompt="Review cluster security posture, RBAC, and workload isolation"
-          >
-            Security and RBAC
-          </button>
-        </div>
+  <section class="insights" aria-label="Agent metrics">
+    <div class="tile">
+      <div class="tile-label">Model</div>
+      <div class="tile-value" id="ins-model">&hellip;</div>
+      <div class="tile-sub" id="ins-provider"></div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Tokens</div>
+      <div class="tile-value" id="ins-tokens">&hellip;</div>
+      <div class="tile-sub" id="ins-tokens-split"></div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Estimated cost</div>
+      <div class="tile-value" id="ins-cost">&hellip;</div>
+      <div class="tile-sub" id="ins-usage-note"></div>
+    </div>
+    <div class="tile">
+      <div class="tile-label">Cluster</div>
+      <div class="tile-value" id="ins-cluster">&hellip;</div>
+      <div class="tile-sub" id="ins-project"></div>
+    </div>
+  </section>
+
+  <main>
+    <section class="chat-section">
+      <div class="prompt-chips-bar">
+        <button type="button" class="chip" data-prompt="Audit cluster health and identify any failing pods">Cluster health</button>
+        <button type="button" class="chip" data-prompt="Summarise the recent Kubernetes warning events on this cluster">Recent warnings</button>
+        <button type="button" class="chip" data-prompt="Check GitOps configuration drift against live workloads">GitOps drift</button>
+        <button type="button" class="chip" data-prompt="Review cluster security posture, RBAC, and workload isolation">Security and RBAC</button>
+      </div>
 
         <div class="chat-stream" id="chat-stream">
           <div class="message-row">
@@ -572,54 +753,77 @@
           </div>
         </div>
 
-        <div class="chat-input-bar">
-          <textarea
-            class="input-box"
-            id="prompt-input"
-            rows="1"
-            placeholder="Ask the agent a question or describe an incident"
-          ></textarea>
-          <button type="button" class="btn-send" id="btn-send">Send</button>
+      <div class="chat-input-bar">
+        <textarea class="input-box" id="prompt-input" rows="1"
+          placeholder="Ask the agent a question or describe an incident"></textarea>
+        <button type="button" class="btn-send" id="btn-send">Send</button>
+      </div>
+
+      <div class="transcript-panel" id="transcript-panel" hidden role="dialog" aria-labelledby="transcript-title">
+        <div class="transcript-head">
+          <div>
+            <div class="transcript-title" id="transcript-title"></div>
+            <div class="transcript-note">Read only. Press Escape to close.</div>
+          </div>
+          <button type="button" class="btn-close" id="transcript-close">Close</button>
         </div>
+        <div class="transcript-body" id="transcript-body"></div>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Recent activity</span>
+        <span class="source-tag" id="last-refresh">Loading&hellip;</span>
+      </div>
+      <div class="sidebar-content" id="sidebar-list">
+        <div class="empty-state"><div>Loading sessions&hellip;</div></div>
+      </div>
+      <section class="identity" aria-label="Agent identity">
+        <div class="identity-title">Agent identity</div>
+        <dl>
+          <dt>Kubernetes service account</dt>
+          <dd id="id-ksa">&hellip;</dd>
+          <dt>Google Cloud service account (Workload Identity)</dt>
+          <dd id="id-gsa">&hellip;</dd>
+          <dt>Project IAM roles</dt>
+          <dd class="role-chips" id="id-roles"></dd>
+        </dl>
+        <p class="identity-caption">Recorded at install. Changes made later in IAM are not shown here.</p>
       </section>
+    </aside>
+  </main>
 
-      <aside class="sidebar">
-        <div class="sidebar-header">
-          <span class="sidebar-title">Recent agent sessions</span>
-          <span class="source-tag" id="last-refresh">Loading&hellip;</span>
-        </div>
-        <div class="sidebar-content" id="sidebar-list">
-          <div class="empty-state"><div>Loading sessions&hellip;</div></div>
-        </div>
-      </aside>
-    </main>
-
-    <script>
-      const CONSOLE_HEADER = "X-Kube-Agents-Console";
-      const SESSION_KEY = "kube-agents-web-console-session";
-      const STATUS_POLL_MS = 15000;
-      const SESSIONS_POLL_MS = 15000;
-      // Results of work the agent delegated to a kanban card arrive later, as
-      // new messages on this tab's session. MARK_KEY holds the highest message
-      // ID this tab has accounted for, so a reload does not repeat them.
-      const MESSAGES_POLL_MS = 10000;
-      const MARK_KEY = "kube-agents-web-console-mark";
+  <script>
+    const CONSOLE_HEADER = "X-Kube-Agents-Console";
+    const SESSION_KEY = "kube-agents-web-console-session";
+    const STATUS_POLL_MS = 15000;
+    const SESSIONS_POLL_MS = 15000;
+    // Results of work the agent delegated to a kanban card arrive later, as
+    // new messages on this tab's session. MARK_KEY holds the highest message
+    // ID this tab has accounted for, so a reload does not repeat them.
+    const MESSAGES_POLL_MS = 10000;
+    const MARK_KEY = "kube-agents-web-console-mark";
+    const INSIGHTS_POLL_MS = 30000;
+    // A session active within this window shows a green dot.
+    const ACTIVE_WINDOW_S = 15 * 60;
+    // The list's groups, in order, keyed by the kind the server assigns.
+    const KIND_GROUPS = [
+      ["event_triage", "Event triage"],
+      ["scheduled", "Scheduled checks"],
+      ["console", "Your console sessions"],
+      ["chat", "Chat"],
+      ["other", "Other"]
+    ];
+    // What a click on a row of each kind does. Chat and Other rows are not
+    // clickable: the server refuses their transcripts.
+    const OPEN_ACTION = { event_triage: "transcript", scheduled: "transcript", console: "resume" };
 
       let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
       let turnInFlight = false;
       let pollInFlight = false;
       let markKnown = sessionStorage.getItem(MARK_KEY) !== null;
       let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
-      let unsettledTurn = null;
-
-      function newSessionId() {
-        const bytes = new Uint8Array(16);
-        crypto.getRandomValues(bytes);
-        return (
-          "web-console-" +
-          Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
-        );
-      }
 
       function advanceMark(id) {
         if (typeof id !== "number" || id <= lastSeenId) return;
@@ -628,20 +832,32 @@
         sessionStorage.setItem(MARK_KEY, String(lastSeenId));
       }
 
-      function initNewSession(id) {
-        currentSessionId = id;
-        sessionStorage.setItem(SESSION_KEY, currentSessionId);
-        lastSeenId = 0;
-        markKnown = true;
-        sessionStorage.setItem(MARK_KEY, "0");
-        unsettledTurn = null;
-      }
+    // Shows each agent message above the mark once, then moves the mark past
+    // it. User-role rows (this tab's own turns, and the wake that delivers a
+    // card's result) only move the mark.
+    function showUpdates(messages) {
+      (messages || []).forEach(m => {
+        if (m.id <= lastSeenId) return;
+        if (m.role === "assistant") appendMessage("agent", m.content, "update");
+        advanceMark(m.id);
+      });
+    }
 
-      function resetMark() {
-        lastSeenId = 0;
-        markKnown = false;
-        unsettledTurn = null;
-        sessionStorage.removeItem(MARK_KEY);
+    // Periodic poll between turns. On a tab that has no mark yet (a reload
+    // of an older session), the first poll only sets the mark.
+    async function pollMessages() {
+      if (!currentSessionId || turnInFlight || pollInFlight) return;
+      pollInFlight = true;
+      const polled = currentSessionId;
+      try {
+        const data = await fetchNewMessages();
+        // The tab resumed another session while this poll was out; its
+        // answer belongs to the old session's marks.
+        if (!data || polled !== currentSessionId) return;
+        if (markKnown) showUpdates(data.messages);
+        advanceMark(data.latest_id);
+      } finally {
+        pollInFlight = false;
       }
 
       // Returns {latest_id, messages} for this tab's session, or null.
@@ -671,199 +887,77 @@
         });
       }
 
-      // Periodic poll between turns. On a tab that has no mark yet (a reload
-      // of an older session), the first poll only sets the mark. When a turn's
-      // post-turn reads both failed, the first successful poll settles that
-      // turn by content instead of replaying its reply as an update.
-      async function pollMessages() {
-        if (!currentSessionId || turnInFlight || pollInFlight) return;
-        pollInFlight = true;
-        try {
-          const data = await fetchNewMessages();
-          if (!data) return;
-          if (unsettledTurn) {
-            const u = unsettledTurn;
-            unsettledTurn = null;
-            applySettleData(data, u.typed, u.reply, u.beforeId, u.replyId);
-            return;
-          }
-          if (markKnown) showUpdates(data.messages);
-          advanceMark(data.latest_id);
-        } finally {
-          pollInFlight = false;
+    // Makes a console session this tab's session: the next turn continues
+    // it, and the poll picks up after its newest message, so nothing already
+    // rendered from its transcript is shown twice.
+    function adoptSession(sessionId, latestId) {
+      currentSessionId = sessionId;
+      sessionStorage.setItem(SESSION_KEY, sessionId);
+      resetMark();
+      advanceMark(latestId);
+    }
+
+    function escapeHtml(text) {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+      return String(text).replace(/[&<>"']/g, m => map[m]);
+    }
+
+    function relativeTime(seconds) {
+      if (typeof seconds !== "number") return "";
+      const ago = Math.max(0, Date.now() / 1000 - seconds);
+      if (ago < 60) return "just now";
+      if (ago < 3600) return `${Math.floor(ago / 60)} min ago`;
+      if (ago < 86400) return `${Math.floor(ago / 3600)} h ago`;
+      return `${Math.floor(ago / 86400)} d ago`;
+    }
+
+    function formatCount(n) {
+      if (typeof n !== "number") return "0";
+      if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+      if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+      if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+      return String(n);
+    }
+
+    function formatUSD(v) {
+      if (typeof v !== "number" || v <= 0) return "$0.00";
+      if (v < 0.01) return "< $0.01";
+      return `$${v.toFixed(2)}`;
+    }
+
+    // Inline formatting for text outside code fences.
+    function renderInline(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+      html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      return html.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join("");
+    }
+
+    // Splits on ``` fences first, so code keeps its blank lines and is never
+    // run through the inline rules; the info string after the opening fence
+    // (```yaml) is dropped rather than rendered as the first line.
+    function renderMarkdown(text) {
+      if (!text) return "";
+      const parts = text.split(/```/);
+      let html = "";
+      parts.forEach((part, i) => {
+        if (i % 2 === 1) {
+          const body = part.replace(/^[^\n]*\n/, "");
+          html += `<pre><code>${escapeHtml(body.replace(/\n$/, ""))}</code></pre>`;
+        } else if (part.trim()) {
+          html += renderInline(part.trim());
         }
       }
 
-      function applySettleData(data, typed, reply, beforeId, replyId) {
-        const messages = data.messages || [];
-        const same = (a, b) => (a || "").trim() === (b || "").trim();
-        let turnAt = -1;
-        messages.forEach((m, i) => {
-          if (
-            m.role === "user" &&
-            same(m.content, typed) &&
-            (!beforeId || m.id > beforeId)
-          )
-            turnAt = i;
-        });
-        if (turnAt < 0 && typeof beforeId === "number" && beforeId > 0) {
-          turnAt = messages.findIndex(
-            (m) => m.id > beforeId && m.role === "user",
-          );
-        }
-        let replyAt = -1;
-        if (typeof replyId === "number" && replyId > 0) {
-          replyAt = messages.findIndex(
-            (m, i) =>
-              i > turnAt &&
-              m.id === replyId &&
-              m.role === "assistant" &&
-              same(m.content, reply),
-          );
-        }
-        if (replyAt < 0) {
-          messages.forEach((m, i) => {
-            if (i > turnAt && m.role === "assistant" && same(m.content, reply))
-              replyAt = i;
-          });
-        }
-        if (replyAt < 0 && typeof replyId === "number" && replyId > 0) {
-          replyAt = messages.findIndex(
-            (m, i) => i > turnAt && m.id === replyId,
-          );
-        }
-        if (turnAt >= 0) showUpdates(messages.slice(0, turnAt));
-        // Hermes does not serialize turns on one session, so a card's wake can
-        // run during this turn and land inside its range. A user row other than
-        // the typed message starts such a wake; its agent reply is shown and
-        // ends the wake so later assistant rows of the typed turn are not shown.
-        if (turnAt >= 0 && replyAt > turnAt) {
-          let inWake = false;
-          messages.slice(turnAt + 1, replyAt).forEach((m) => {
-            if (m.role === "user") {
-              inWake = true;
-            } else if (inWake && m.role === "assistant" && m.id > lastSeenId) {
-              appendMessage("agent", m.content, "update");
-              inWake = false;
-            }
-          });
-        }
-        if (replyAt >= 0) {
-          advanceMark(messages[replyAt].id);
-          showUpdates(messages.slice(replyAt + 1));
-        } else if (typeof replyId === "number" && replyId > 0) {
-          advanceMark(replyId);
-        }
-        advanceMark(data.latest_id);
-      }
-
-      // Runs once a turn's reply is on screen. The session holds three runs of
-      // messages above the mark: results that landed before this turn started
-      // (shown), the turn itself from the typed message to its reply (already
-      // on screen, so only marked), and results that landed after the reply
-      // (shown). When the follow-up fetch fails, replyId moves the mark past
-      // the reply if present; when neither read supplied an ID, unsettledTurn
-      // holds the turn so the next poll settles by content instead of replaying.
-      async function settleAfterReply(typed, reply, beforeId, replyId) {
-        const data = await fetchNewMessages();
-        if (!data) {
-          if (typeof replyId === "number" && replyId > 0) {
-            advanceMark(replyId);
-            unsettledTurn = null;
-          } else {
-            unsettledTurn = { typed, reply, beforeId, replyId };
-          }
-          return;
-        }
-        unsettledTurn = null;
-        applySettleData(data, typed, reply, beforeId, replyId);
-      }
-
-      function escapeHtml(text) {
-        const map = {
-          "&": "&amp;",
-          "<": "&lt;",
-          ">": "&gt;",
-          '"': "&quot;",
-          "'": "&#039;",
-        };
-        return String(text).replace(/[&<>"']/g, (m) => map[m]);
-      }
-
-      function formatEpoch(seconds) {
-        if (typeof seconds !== "number") return "";
-        return new Date(seconds * 1000).toLocaleString([], {
-          month: "short",
-          day: "numeric",
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-      }
-
-      // Inline formatting for text outside code fences. Matches equal-length
-      // backtick delimiter runs so double-backtick spans can quote a backtick.
-      function renderInline(text) {
-        let html = escapeHtml(text);
-        html = html.replace(/(`+)((?:(?!\1)[^\n])+)\1/g, (_, ticks, inner) => {
-          const code =
-            inner.length >= 2 &&
-            inner.startsWith(" ") &&
-            inner.endsWith(" ") &&
-            inner.trim().length > 0
-              ? inner.slice(1, -1)
-              : inner;
-          return `<code>${code}</code>`;
-        });
-        html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-        return html
-          .split(/\n{2,}/)
-          .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
-          .join("");
-      }
-
-      // Splits on line-opening backtick fences (three or more backticks,
-      // optionally indented inside a list item) first, so code keeps its blank
-      // lines and is never run through the inline rules; mid-line backticks
-      // stay in the surrounding prose, and the info string after the opening
-      // fence (```yaml) is dropped rather than rendered as the first line.
-      function renderMarkdown(text) {
-        if (!text) return "";
-        const fence =
-          /(?:^|\n)([ ]*)(`{3,})([^\n`]*)\n([\s\S]*?)(?:\n[ ]*\2+ *(?=\n|$)|$)/g;
-        let html = "";
-        let last = 0;
-        let match;
-        while ((match = fence.exec(text)) !== null) {
-          const before = text.slice(last, match.index);
-          if (before.trim()) html += renderInline(before.trim());
-          const indent = match[1].length;
-          const code = match[4]
-            .replace(/\n$/, "")
-            .split("\n")
-            .map((line) => {
-              let k = 0;
-              while (k < indent && line[k] === " ") k++;
-              return line.slice(k);
-            })
-            .join("\n");
-          html += `<pre><code>${escapeHtml(code)}</code></pre>`;
-          last = fence.lastIndex;
-        }
-        const tail = text.slice(last);
-        if (tail.trim()) html += renderInline(tail.trim());
-        return html;
-      }
-
-      function appendMessage(role, text, tag) {
-        const stream = document.getElementById("chat-stream");
-        const row = document.createElement("div");
-        row.className = "message-row";
-        const isAgent = role === "agent";
-        const timeStr = new Date().toLocaleTimeString([], {
-          hour: "2-digit",
-          minute: "2-digit",
-        });
-        row.innerHTML = `
+    // Builds one message row. at is the message's epoch seconds; a message
+    // typed or received now leaves it out.
+    function messageRow(role, text, tag, at) {
+      const row = document.createElement("div");
+      row.className = "message-row";
+      const isAgent = role === "agent";
+      const when = typeof at === "number" ? new Date(at * 1000) : new Date();
+      const timeStr = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      row.innerHTML = `
         <div class="avatar ${isAgent ? "avatar-agent" : "avatar-user"}">${isAgent ? "A" : "Y"}</div>
         <div class="message-content">
           <div class="message-header">
@@ -873,10 +967,16 @@
           </div>
           <div class="message-bubble">${renderMarkdown(text)}</div>
         </div>`;
-        stream.appendChild(row);
-        stream.scrollTop = stream.scrollHeight;
-        return row;
-      }
+      return row;
+    }
+
+    function appendMessage(role, text, tag, at) {
+      const stream = document.getElementById("chat-stream");
+      const row = messageRow(role, text, tag, at);
+      stream.appendChild(row);
+      stream.scrollTop = stream.scrollHeight;
+      return row;
+    }
 
       function setBusy(busy) {
         turnInFlight = busy;
@@ -901,9 +1001,6 @@
         if (turnInFlight) return;
         text = (text || "").trim();
         if (!text) return;
-        if (!currentSessionId) {
-          initNewSession(newSessionId());
-        }
         appendMessage("user", text);
         setBusy(true);
         const pending = appendMessage("agent", "Working on it…", "pending");
@@ -921,7 +1018,9 @@
           });
           const data = await readBody(resp);
           if (data.session_id && data.session_id !== currentSessionId) {
-            initNewSession(data.session_id);
+            currentSessionId = data.session_id;
+            sessionStorage.setItem(SESSION_KEY, currentSessionId);
+            resetMark();
           }
           pending.remove();
           if (resp.ok) {
@@ -970,55 +1069,209 @@
           `<div class="empty-state"><div>Could not load sessions.</div><div>${escapeHtml(message)}</div></div>`;
       }
 
-      async function fetchSessions() {
-        let resp, data;
-        try {
-          resp = await fetch("/api/sessions/recent");
-          data = await readBody(resp);
-        } catch (e) {
-          renderSessionsError(e.message);
-          return;
-        }
-        if (!resp.ok) {
-          renderSessionsError(data.detail || `HTTP ${resp.status}`);
-          return;
-        }
-        document.getElementById("last-refresh").innerText =
-          new Date().toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-        const list = document.getElementById("sidebar-list");
-        const sessions = data.sessions || [];
-        if (sessions.length === 0) {
-          list.innerHTML = `<div class="empty-state"><div>No agent sessions recorded yet.</div></div>`;
-          return;
-        }
-        list.innerHTML = sessions
-          .map((s) => {
-            const isCurrent = s.id === currentSessionId;
-            const kind = isCurrent
-              ? "this tab"
-              : s.console
-                ? "web console"
-                : s.source || "agent";
-            const count =
-              typeof s.message_count === "number"
-                ? `${s.message_count} messages`
-                : "";
-            return `
-          <div class="session-card">
-            <div class="session-top">
-              <div class="session-title">${escapeHtml(s.title || s.id)}</div>
-              <span class="badge ${isCurrent ? "badge-green" : "badge-grey"}">${escapeHtml(kind)}</span>
-            </div>
-            <div class="session-meta">
-              <span>${escapeHtml(count)}</span>
-              <span>${escapeHtml(formatEpoch(s.last_active || s.started_at))}</span>
-            </div>
+    async function fetchSessions() {
+      let resp, data;
+      try {
+        resp = await fetch("/api/sessions/recent");
+        data = await readBody(resp);
+      } catch (e) {
+        renderSessionsError(e.message);
+        return;
+      }
+      if (!resp.ok) {
+        renderSessionsError(data.detail || `HTTP ${resp.status}`);
+        return;
+      }
+      document.getElementById("last-refresh").innerText = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      renderActivity(data.sessions || []);
+    }
+
+    function activityRow(s) {
+      const action = OPEN_ACTION[s.kind];
+      const last = s.last_active || s.started_at;
+      let dot = "idle";
+      if (s.id === currentSessionId) dot = "current";
+      else if (typeof last === "number" && Date.now() / 1000 - last < ACTIVE_WINDOW_S) dot = "active";
+      const subject = (s.summary && s.summary.subject) || s.title || s.id;
+      const latest = s.summary && s.summary.latest;
+      const tag = action ? "button" : "div";
+      const attrs = action ? ` type="button" data-action="${action}" data-id="${escapeHtml(s.id)}"` : "";
+      const hint = s.id === currentSessionId ? "This tab's session" : (s.title || s.id);
+      return `
+        <${tag} class="activity-row${action ? " openable" : ""}"${attrs} title="${escapeHtml(hint)}">
+          <span class="status-dot dot-${dot}"></span>
+          <span class="row-main">
+            <span class="row-top">
+              <span class="row-subject">${escapeHtml(subject)}</span>
+              <span class="row-time">${escapeHtml(relativeTime(last))}</span>
+            </span>
+            ${latest ? `<span class="row-latest">${escapeHtml(latest)}</span>` : ""}
+          </span>
+          ${action ? `<span class="chevron" aria-hidden="true">&rsaquo;</span>` : ""}
+        </${tag}>`;
+    }
+
+    function renderActivity(sessions) {
+      const list = document.getElementById("sidebar-list");
+      if (sessions.length === 0) {
+        list.innerHTML = `<div class="empty-state"><div>No agent sessions recorded yet.</div></div>`;
+        return;
+      }
+      list.innerHTML = KIND_GROUPS.map(([kind, label]) => {
+        const rows = sessions.filter(s => (s.kind || "other") === kind);
+        if (rows.length === 0) return "";
+        return `
+          <div class="activity-group">
+            <div class="group-head"><span>${escapeHtml(label)}</span><span class="group-count">${rows.length}</span></div>
+            ${rows.map(activityRow).join("")}
           </div>`;
-          })
-          .join("");
+      }).join("");
+    }
+
+    async function fetchTranscript(id) {
+      try {
+        const resp = await fetch(`/api/sessions/${encodeURIComponent(id)}/transcript`);
+        const data = await readBody(resp);
+        if (!resp.ok) return { error: data.detail || data.error || `HTTP ${resp.status}` };
+        return { data };
+      } catch (e) {
+        return { error: e.message };
+      }
+    }
+
+    // Each open bumps this, so a slow response for a row clicked earlier
+    // does not replace the one clicked last.
+    let transcriptRequest = 0;
+
+    async function openTranscript(id) {
+      const request = ++transcriptRequest;
+      const panel = document.getElementById("transcript-panel");
+      const body = document.getElementById("transcript-body");
+      document.getElementById("transcript-title").innerText = "Loading transcript…";
+      body.replaceChildren();
+      panel.hidden = false;
+      document.getElementById("transcript-close").focus();
+      const result = await fetchTranscript(id);
+      if (request !== transcriptRequest || panel.hidden) return;
+      if (result.error) {
+        document.getElementById("transcript-title").innerText = "Could not load this session";
+        body.appendChild(messageRow("agent", result.error, "error"));
+        return;
+      }
+      const data = result.data;
+      document.getElementById("transcript-title").innerText = data.title || data.session_id;
+      const messages = data.messages || [];
+      if (messages.length === 0) body.appendChild(messageRow("agent", "This session has no messages with text yet.", "empty"));
+      messages.forEach(m => body.appendChild(messageRow(m.role === "user" ? "user" : "agent", m.content, "", m.timestamp)));
+      body.scrollTop = body.scrollHeight;
+    }
+
+    function closeTranscript() {
+      transcriptRequest++;
+      document.getElementById("transcript-panel").hidden = true;
+    }
+
+    // Resumes one of this console's sessions in the chat column.
+    async function resumeSession(id) {
+      if (turnInFlight) return;
+      closeTranscript();
+      const result = await fetchTranscript(id);
+      if (turnInFlight) return;
+      if (result.error) {
+        appendMessage("agent", `Could not open that session: ${result.error}`, "error");
+        return;
+      }
+      const data = result.data;
+      const stream = document.getElementById("chat-stream");
+      stream.replaceChildren();
+      appendMessage("agent", "Resumed this session. Messages you send now continue it.", "resumed");
+      (data.messages || []).forEach(m => appendMessage(m.role === "user" ? "user" : "agent", m.content, "", m.timestamp));
+      adoptSession(id, data.latest_id);
+      fetchSessions();
+    }
+
+    function setText(id, text, title) {
+      const el = document.getElementById(id);
+      el.innerText = text;
+      el.title = title || "";
+      return el;
+    }
+
+    function renderInsights(data) {
+      const model = data.model || {};
+      setText("ins-model", model.name || "Not reported", model.name);
+      setText("ins-provider", model.provider ? `via ${model.provider}` : "");
+
+      const u = data.usage || {};
+      if (!u.replicas_read) {
+        setText("ins-tokens", "Not available", u.error);
+        setText("ins-tokens-split", u.error || "", u.error);
+        setText("ins-cost", "Not available", u.error);
+        setText("ins-usage-note", "", u.error).classList.remove("warn");
+      } else {
+        setText("ins-tokens", `${formatCount(u.total_tokens)} total`);
+        setText("ins-tokens-split", `${formatCount(u.input_tokens)} in / ${formatCount(u.output_tokens)} out`);
+        setText("ins-cost", formatUSD(u.spend_usd), "Estimated by LiteLLM from its price table");
+        const partial = u.replicas_read < u.replicas_found;
+        const note = setText("ins-usage-note",
+          `Since LiteLLM last restarted · ${u.replicas_read} of ${u.replicas_found} replicas`, u.error);
+        note.classList.toggle("warn", partial);
+      }
+
+      const c = data.cluster || {};
+      setText("ins-cluster", [c.name, c.location].filter(Boolean).join(" · ") || "Not reported");
+      setText("ins-project", c.project || "");
+
+      const id = data.identity || {};
+      setText("id-ksa", id.kubernetes_service_account || "Not recorded");
+      setText("id-gsa", id.gcp_service_account || "Not recorded at install");
+      const roles = document.getElementById("id-roles");
+      roles.replaceChildren();
+      const list = id.roles || [];
+      if (list.length === 0) {
+        const none = document.createElement("span");
+        none.innerText = "Not recorded at install";
+        roles.appendChild(none);
+      }
+      list.forEach(r => {
+        const chip = document.createElement("span");
+        chip.className = "role-chip";
+        chip.innerText = r;
+        roles.appendChild(chip);
+      });
+    }
+
+    async function fetchInsights() {
+      try {
+        const resp = await fetch("/api/insights");
+        const data = await readBody(resp);
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        renderInsights(data);
+      } catch (e) {
+        setText("ins-tokens", "Not available", e.message);
+        setText("ins-cost", "Not available", e.message);
+      }
+    }
+
+    async function checkStatus() {
+      const badge = document.getElementById("agent-badge");
+      const label = document.getElementById("agent-status-text");
+      try {
+        const resp = await fetch("/api/status");
+        const data = await readBody(resp);
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        badge.title = data.agent ? data.agent.detail : "";
+        if (data.agent && data.agent.healthy) {
+          badge.className = "badge badge-green";
+          label.innerText = "Agent reachable";
+        } else {
+          badge.className = "badge badge-amber";
+          label.innerText = "Agent unreachable";
+        }
+      } catch (e) {
+        badge.className = "badge badge-red";
+        badge.title = e.message;
+        label.innerText = "Console unreachable";
       }
 
       async function checkStatus() {
@@ -1047,30 +1300,29 @@
           label.innerText = "Console unreachable";
         }
       }
+    });
+    document.querySelectorAll(".chip").forEach(chip => {
+      chip.addEventListener("click", () => submitMessage(chip.dataset.prompt));
+    });
+    document.getElementById("sidebar-list").addEventListener("click", e => {
+      const row = e.target.closest("[data-action]");
+      if (!row) return;
+      if (row.dataset.action === "resume") resumeSession(row.dataset.id);
+      else openTranscript(row.dataset.id);
+    });
+    document.getElementById("transcript-close").addEventListener("click", closeTranscript);
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape" && !document.getElementById("transcript-panel").hidden) closeTranscript();
+    });
 
-      document
-        .getElementById("btn-send")
-        .addEventListener("click", sendFromInput);
-      document
-        .getElementById("prompt-input")
-        .addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            sendFromInput();
-          }
-        });
-      document.querySelectorAll(".chip").forEach((chip) => {
-        chip.addEventListener("click", () =>
-          submitMessage(chip.dataset.prompt),
-        );
-      });
-
-      checkStatus();
-      fetchSessions();
-      setInterval(checkStatus, STATUS_POLL_MS);
-      setInterval(fetchSessions, SESSIONS_POLL_MS);
-      pollMessages();
-      setInterval(pollMessages, MESSAGES_POLL_MS);
-    </script>
-  </body>
+    checkStatus();
+    fetchSessions();
+    fetchInsights();
+    setInterval(checkStatus, STATUS_POLL_MS);
+    setInterval(fetchSessions, SESSIONS_POLL_MS);
+    setInterval(fetchInsights, INSIGHTS_POLL_MS);
+    pollMessages();
+    setInterval(pollMessages, MESSAGES_POLL_MS);
+  </script>
+</body>
 </html>

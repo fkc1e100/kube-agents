@@ -43,6 +43,13 @@ limitations under the License.
 // later as a new assistant message on the same session, after the turn's own
 // reply has been returned. The page polls GET /api/sessions/{id}/messages for
 // those, through a route limited to this console's own session IDs.
+//
+// Two read-only routes sit beside the chat. GET /api/insights (insights.go)
+// returns the model, LiteLLM's token and spend counters, the agent's identity
+// as recorded at install, and the cluster. GET /api/sessions/{id}/transcript
+// (activity.go) returns the text of an event triage, scheduled check or
+// console session, and refuses every other session, Slack and Google Chat
+// included.
 package main
 
 import (
@@ -80,6 +87,16 @@ const (
 	envClusterName  = "CLUSTER_NAME"
 	envProjectID    = "PROJECT_ID"
 	envLocation     = "LOCATION"
+	// The model, usage and identity sources the insights banner reads; see
+	// insights.go.
+	envModelName        = "MODEL_NAME"
+	envModelProvider    = "MODEL_PROVIDER"
+	envLiteLLMPeersHost = "LITELLM_PEERS_HOST"
+	envAgentKSA         = "AGENT_KSA"
+	envAgentGSA         = "AGENT_GSA"
+	envAgentRoles       = "AGENT_ROLES"
+	// agentRolesSeparator splits AGENT_ROLES, which the chart joins with it.
+	agentRolesSeparator = ","
 
 	// turnTimeout matches the in-tree callers of the same endpoint
 	// (session_kv_server.py's _start_agent_turn): a diagnostic turn that
@@ -161,6 +178,13 @@ type config struct {
 	ClusterName  string
 	ProjectID    string
 	Location     string
+
+	ModelName        string
+	ModelProvider    string
+	LiteLLMPeersHost string
+	AgentKSA         string
+	AgentGSA         string
+	AgentRoles       []string
 }
 
 func loadConfig() config {
@@ -171,8 +195,27 @@ func loadConfig() config {
 		ClusterName:  os.Getenv(envClusterName),
 		ProjectID:    os.Getenv(envProjectID),
 		Location:     os.Getenv(envLocation),
+
+		ModelName:        os.Getenv(envModelName),
+		ModelProvider:    os.Getenv(envModelProvider),
+		LiteLLMPeersHost: strings.TrimSpace(os.Getenv(envLiteLLMPeersHost)),
+		AgentKSA:         os.Getenv(envAgentKSA),
+		AgentGSA:         os.Getenv(envAgentGSA),
+		AgentRoles:       splitList(os.Getenv(envAgentRoles), agentRolesSeparator),
 	}
 	return cfg
+}
+
+// splitList splits a separated list, trimming each item and dropping empty
+// ones, so an unset variable yields an empty list.
+func splitList(raw, sep string) []string {
+	out := []string{}
+	for _, item := range strings.Split(raw, sep) {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {
@@ -182,22 +225,39 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// server holds the console's handlers and the one piece of mutable state it
-// keeps: which sessions have a turn in flight.
+// server holds the console's handlers and the mutable state it keeps: which
+// sessions have a turn in flight, the last LiteLLM usage read, and the
+// session summaries already computed.
 type server struct {
 	cfg    config
 	client *http.Client
 
 	mu       sync.Mutex
 	inflight map[string]bool
+
+	// resolver finds the LiteLLM replicas and fetchMetrics reads one of
+	// them. Tests replace both.
+	resolver     hostResolver
+	fetchMetrics metricsFetcher
+	peerPort     string
+	usage        usageCache
+
+	summaries summaryCache
 }
 
 func newServer(cfg config) *server {
-	return &server{
+	s := &server{
 		cfg:      cfg,
 		client:   &http.Client{}, // deadlines come from each request's context
 		inflight: map[string]bool{},
+		resolver: net.DefaultResolver,
+		peerPort: litellmMetricsPort,
+		summaries: summaryCache{
+			entries: map[string]summaryEntry{},
+		},
 	}
+	s.fetchMetrics = s.fetchPeerMetrics
+	return s
 }
 
 func (s *server) routes() http.Handler {
@@ -211,6 +271,8 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/status", s.requireLocalHost(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("GET /api/sessions/recent", s.requireLocalHost(http.HandlerFunc(s.handleRecentSessions)))
 	mux.Handle("GET /api/sessions/{id}/messages", s.requireLocalHost(http.HandlerFunc(s.handleSessionMessages)))
+	mux.Handle("GET /api/sessions/{id}/transcript", s.requireLocalHost(http.HandlerFunc(s.handleTranscript)))
+	mux.Handle("GET /api/insights", s.requireLocalHost(http.HandlerFunc(s.handleInsights)))
 	mux.Handle("POST /api/chat", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChat))))
 	return denyFraming(mux)
 }
@@ -306,17 +368,20 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// recentSession is the subset of a Hermes session row the page shows. The
-// message preview is left out on purpose: the list covers sessions this
-// console did not open, and their titles say enough.
+// recentSession is the subset of a Hermes session row the page shows.
+// Hermes' message preview is left out on purpose. Kind and Summary are added
+// here: a summary is read only for the kinds summaryKinds lists, so a Slack or
+// Google Chat session shows its title and nothing else.
 type recentSession struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Source       string   `json:"source"`
-	StartedAt    *float64 `json:"started_at"`
-	LastActive   *float64 `json:"last_active"`
-	MessageCount *int     `json:"message_count"`
-	Console      bool     `json:"console"`
+	ID           string          `json:"id"`
+	Title        string          `json:"title"`
+	Source       string          `json:"source"`
+	StartedAt    *float64        `json:"started_at"`
+	LastActive   *float64        `json:"last_active"`
+	MessageCount *int            `json:"message_count"`
+	Console      bool            `json:"console"`
+	Kind         string          `json:"kind"`
+	Summary      *sessionSummary `json:"summary,omitempty"`
 }
 
 func (s *server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
@@ -343,8 +408,10 @@ func (s *server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	sessions := make([]recentSession, 0, len(listed.Data))
 	for _, sess := range listed.Data {
 		sess.Console = sessionIDPattern.MatchString(sess.ID)
+		sess.Kind = classifySession(sess.ID, sess.Source, sess.Title)
 		sessions = append(sessions, sess)
 	}
+	s.attachSummaries(r.Context(), sessions)
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
@@ -386,34 +453,51 @@ func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), messagesTimeout)
 	defer cancel()
-	// Pages back from the newest message until a page reaches ?after= or the
-	// session runs out. A long turn writes many tool rows, so one page can
-	// stop short of the mark.
-	var rows []hermesMessage
-	for page := 0; page < messagesMaxPages; page++ {
-		path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=%d",
-			url.PathEscape(sid), messagesPageLimit, page*messagesPageLimit)
-		listed, failure := s.fetchMessagesPage(ctx, path)
-		if failure != nil {
-			writeError(w, failure.status, failure.code, failure.message)
-			return
-		}
-		rows = append(listed, rows...)
-		if len(listed) < messagesPageLimit || listed[0].ID <= after {
-			break
-		}
+	rows, failure := s.pageMessages(ctx, sid, after, nil)
+	if failure != nil {
+		writeError(w, failure.status, failure.code, failure.message)
+		return
 	}
 	out := sessionMessagesResponse{SessionID: sid, LatestID: after, Messages: []sessionMessage{}}
 	for _, m := range rows {
 		if m.ID > out.LatestID {
 			out.LatestID = m.ID
 		}
-		if m.ID <= after || (m.Role != roleAssistant && m.Role != roleUser) || m.Content == nil || strings.TrimSpace(*m.Content) == "" {
+		if m.ID <= after || !hasText(m) {
 			continue
 		}
 		out.Messages = append(out.Messages, sessionMessage{ID: m.ID, Role: m.Role, Content: *m.Content, Timestamp: m.Timestamp})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// pageMessages pages back from a session's newest message until a page
+// reaches after, enough reports that the rows read so far suffice, or the
+// session runs out. A long turn writes many tool rows, so one page can stop
+// short of the mark. The rows come back oldest first. A nil enough reads
+// until after or the page cap.
+func (s *server) pageMessages(ctx context.Context, sid string, after int64, enough func([]hermesMessage) bool) ([]hermesMessage, *upstreamFailure) {
+	var rows []hermesMessage
+	for page := 0; page < messagesMaxPages; page++ {
+		path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=%d",
+			url.PathEscape(sid), messagesPageLimit, page*messagesPageLimit)
+		listed, failure := s.fetchMessagesPage(ctx, path)
+		if failure != nil {
+			return nil, failure
+		}
+		rows = append(listed, rows...)
+		if len(listed) < messagesPageLimit || listed[0].ID <= after || (enough != nil && enough(rows)) {
+			break
+		}
+	}
+	return rows, nil
+}
+
+// hasText reports whether a message is a user or assistant row with text,
+// the only rows the page shows. Tool rows and tool-call-only assistant rows
+// are not.
+func hasText(m hermesMessage) bool {
+	return (m.Role == roleAssistant || m.Role == roleUser) && m.Content != nil && strings.TrimSpace(*m.Content) != ""
 }
 
 // hermesMessage is one row of Hermes' session messages list.
