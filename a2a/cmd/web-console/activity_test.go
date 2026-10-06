@@ -55,6 +55,20 @@ func TestSummaryLine(t *testing.T) {
 	}
 }
 
+func TestSummarySubjectPrefersTheTriageCardTitle(t *testing.T) {
+	prompt := "A Kubernetes Warning event needs triage on GKE cluster 'c1'. The alert is posted.\n\n" +
+		"Make exactly one `kanban_create` call:\n\n" +
+		"- `assignee`: the `cluster-*` agent\n" +
+		"- `title`: `Triage default/Pod/web-7 (BackOff) on c1`\n" +
+		"- `body`: everything below"
+	if got := summarySubject(prompt); got != "Triage default/Pod/web-7 (BackOff) on c1" {
+		t.Errorf("summarySubject = %q, want the card title", got)
+	}
+	if got := summarySubject("Run the policy sweep\nmore"); got != "Run the policy sweep" {
+		t.Errorf("summarySubject without a card title = %q, want the first line", got)
+	}
+}
+
 type recentList struct {
 	Sessions []recentSession `json:"sessions"`
 }

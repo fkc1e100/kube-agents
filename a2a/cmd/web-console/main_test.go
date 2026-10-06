@@ -46,15 +46,25 @@ type fakeHermes struct {
 	messages  map[string][]map[string]any
 	nextID    int64
 	lastQuery string
-	chats     []map[string]any
-	reply     string
-	chatDelay time.Duration
-	chatCode  int
+	// lastListQuery is the query of the latest GET /api/sessions.
+	lastListQuery string
+	chats         []map[string]any
+	reply         string
+	chatDelay     time.Duration
+	chatCode      int
 	// seeded holds sessions the console did not open, by ID, with their
 	// source and title, as the event watcher or a chat platform creates them.
 	seeded map[string]map[string]any
 	// messageGets counts GET .../messages calls per session.
 	messageGets map[string]int
+	// stream is the raw SSE body POST .../chat/stream answers with.
+	stream string
+	// streamCode, when set, is the status the stream route answers with
+	// instead of a stream.
+	streamCode int
+	streams    int
+	// creates counts POST /api/sessions calls.
+	creates int
 }
 
 func newFakeHermes() *fakeHermes {
@@ -99,11 +109,16 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sessions":
 		f.mu.Lock()
+		f.lastListQuery = r.URL.RawQuery
 		data := []map[string]any{{"id": "k8s-evt-abc", "title": "Triage k8s-evt-abc", "source": "api_server", "preview": "secret text"}}
 		for id := range f.sessions {
 			row := map[string]any{"id": id, "title": "Web console", "source": "api_server", "message_count": len(f.messages[id])}
 			for k, v := range f.seeded[id] {
 				row[k] = v
+			}
+			// Hermes filters on source when asked, as list_sessions_rich does.
+			if want := r.URL.Query().Get("source"); want != "" && row["source"] != want {
+				continue
 			}
 			data = append(data, row)
 		}
@@ -114,6 +129,7 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.creates++
 		if f.sessions[body["session_id"]] {
 			hermesError(w, http.StatusConflict, "Session already exists")
 			return
@@ -121,6 +137,27 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.sessions[body["session_id"]] = true
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "hermes.session", "session": map[string]any{"id": body["session_id"]}})
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/sessions/") && strings.HasSuffix(r.URL.Path, "/chat/stream"):
+		sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/chat/stream")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		known := f.sessions[sid]
+		f.streams++
+		stream, code, delay := f.stream, f.streamCode, f.chatDelay
+		f.mu.Unlock()
+		if !known {
+			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
+			return
+		}
+		if code != 0 {
+			hermesError(w, code, "upstream refused")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		time.Sleep(delay)
+		_, _ = w.Write([]byte(stream))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/sessions/") && strings.HasSuffix(r.URL.Path, "/chat"):
 		sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/chat")
 		var body map[string]any
@@ -200,6 +237,13 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		hermesError(w, http.StatusNotFound, "no route")
 	}
+}
+
+// createCount returns how many sessions callers asked the fake to create.
+func (f *fakeHermes) createCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.creates
 }
 
 // gets returns how many message reads a session has had.
@@ -298,7 +342,7 @@ func TestEachNewChatGetsItsOwnSession(t *testing.T) {
 
 func TestChatRefusesForeignSessionIDs(t *testing.T) {
 	fake, h := setup(t)
-	for _, sid := range []string{"k8s-evt-abc", "web-console-../../x", "web-console-ABC", "../api/sessions"} {
+	for _, sid := range []string{"web-console-../../x", "web-console-ABC", "../api/sessions"} {
 		body, _ := json.Marshal(chatRequest{Message: "hi", SessionID: sid})
 		rec := serve(h, chatReq(string(body)))
 		if rec.Code != http.StatusBadRequest {
@@ -307,6 +351,70 @@ func TestChatRefusesForeignSessionIDs(t *testing.T) {
 	}
 	if _, chats := fake.state(); len(chats) != 0 {
 		t.Errorf("a refused session still reached Hermes: %v", chats)
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("a refused session created %d sessions", fake.createCount())
+	}
+}
+
+func TestChatRepliesIntoAnAgentSession(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("k8s-evt-x", "api_server", "Triage k8s-evt-x")
+	fake.seed("cron-daily", "api_server", "Triage cron-daily")
+	for _, sid := range []string{"k8s-evt-x", "cron-daily"} {
+		rec := serve(h, chatReq(`{"message":"is it fixed?","session_id":"`+sid+`"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", sid, rec.Code, rec.Body.String())
+		}
+		if got := decode[chatResponse](t, rec); got.SessionID != sid {
+			t.Errorf("reply went to %q, want %q", got.SessionID, sid)
+		}
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("a reply into an agent session created %d sessions", fake.createCount())
+	}
+}
+
+func TestChatRefusesChatPlatformAndUnknownSessions(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("slack-thread-1", "slack", "Triage k8s-evt-y")
+	fake.seed("api-other", "api_server", "Something else")
+	cases := map[string]int{
+		"slack-thread-1": http.StatusForbidden,
+		"api-other":      http.StatusForbidden,
+		"k8s-evt-gone":   http.StatusNotFound,
+	}
+	for sid, want := range cases {
+		rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
+		if rec.Code != want {
+			t.Errorf("%s: status %d, want %d: %s", sid, rec.Code, want, rec.Body.String())
+		}
+	}
+	if _, chats := fake.state(); len(chats) != 0 {
+		t.Errorf("a refused session still reached Hermes: %v", chats)
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("a refused session created %d sessions", fake.createCount())
+	}
+}
+
+func TestChatDoesNotRecreateAnAgentSession(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("k8s-evt-x", "api_server", "Triage k8s-evt-x")
+	// The session vanishes between the lookup and the turn, as when the
+	// agent pod is replaced mid-request: the lookup still sees it.
+	fake.mu.Lock()
+	fake.chatCode = http.StatusNotFound
+	fake.mu.Unlock()
+	rec := serve(h, chatReq(`{"message":"hi","session_id":"k8s-evt-x"}`))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if got := decode[errorResponse](t, rec); got.Error != "session_not_found" || got.SessionID != "k8s-evt-x" {
+		t.Errorf("error body = %+v", got)
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("an agent session was recreated (%d creates)", fake.createCount())
 	}
 }
 
@@ -409,7 +517,7 @@ func TestNonLoopbackHostIsRefused(t *testing.T) {
 	for _, path := range []string{
 		"/", "/api/status", "/api/sessions/recent", "/api/insights",
 		"/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages",
-		"/api/sessions/k8s-evt-abc/transcript",
+		"/api/sessions/k8s-evt-abc/transcript", "/api/channels/alerts/posts",
 	} {
 		req := httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:8080"+path, nil)
 		if rec := serve(h, req); rec.Code != http.StatusForbidden {
