@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -35,11 +36,16 @@ const testKey = "test-api-key"
 // POST /api/sessions/{id}/chat takes {"message": ...}, answers 404 for an
 // unknown session and otherwise
 // {"object":"hermes.session.chat.completion","message":{"role":"assistant","content":...}};
-// errors are OpenAI-shaped {"error":{"message":...}}. Every route requires
-// the bearer key, as the agent's auth sidecar does.
+// GET /api/sessions/{id}/messages answers 404 for an unknown session and
+// otherwise {"object":"list","data":[{"id":<int>,"role":...,"content":...}]}
+// in insertion order; errors are OpenAI-shaped {"error":{"message":...}}.
+// Every route requires the bearer key, as the agent's auth sidecar does.
 type fakeHermes struct {
 	mu        sync.Mutex
 	sessions  map[string]bool
+	messages  map[string][]map[string]any
+	nextID    int64
+	lastQuery string
 	chats     []map[string]any
 	reply     string
 	chatDelay time.Duration
@@ -47,7 +53,24 @@ type fakeHermes struct {
 }
 
 func newFakeHermes() *fakeHermes {
-	return &fakeHermes{sessions: map[string]bool{}, reply: "pods are healthy"}
+	return &fakeHermes{sessions: map[string]bool{}, messages: map[string][]map[string]any{}, reply: "pods are healthy"}
+}
+
+// post appends a message to a session, as a turn or a card's wake does.
+// Callers hold f.mu. A nil content models a tool-call-only assistant row.
+func (f *fakeHermes) post(sid, role string, content any) int64 {
+	f.nextID++
+	f.messages[sid] = append(f.messages[sid], map[string]any{"id": f.nextID, "session_id": sid, "role": role, "content": content})
+	return f.nextID
+}
+
+// deliver models a delegated card's result landing on a session after the
+// turn that filed it has returned.
+func (f *fakeHermes) deliver(sid, content string) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.post(sid, "user", "[kanban] card completed")
+	return f.post(sid, "assistant", content)
 }
 
 func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -100,11 +123,27 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			hermesError(w, code, "upstream refused")
 			return
 		}
+		f.mu.Lock()
+		f.post(sid, "user", body["message"])
+		f.post(sid, "assistant", nil)
+		f.post(sid, "tool", "pod list")
+		f.post(sid, "assistant", reply)
+		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"object":     "hermes.session.chat.completion",
 			"session_id": sid,
 			"message":    map[string]string{"role": "assistant", "content": reply},
 		})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sessions/") && strings.HasSuffix(r.URL.Path, "/messages"):
+		sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/messages")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.lastQuery = r.URL.RawQuery
+		if !f.sessions[sid] {
+			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "session_id": sid, "data": f.messages[sid]})
 	default:
 		hermesError(w, http.StatusNotFound, "no route")
 	}
@@ -135,7 +174,6 @@ func setup(t *testing.T) (*fakeHermes, http.Handler) {
 	cfg := config{
 		HermesURL:    upstream.URL,
 		APIServerKey: testKey,
-		AllowedHosts: map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true},
 		ClusterName:  "c1",
 	}
 	return fake, newServer(cfg).routes()
@@ -308,7 +346,7 @@ func TestChatRequiresTheConsoleRequestShape(t *testing.T) {
 
 func TestNonLoopbackHostIsRefused(t *testing.T) {
 	_, h := setup(t)
-	for _, path := range []string{"/", "/api/status", "/api/sessions/recent"} {
+	for _, path := range []string{"/", "/api/status", "/api/sessions/recent", "/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages"} {
 		req := httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:8080"+path, nil)
 		if rec := serve(h, req); rec.Code != http.StatusForbidden {
 			t.Errorf("%s via a foreign Host: status %d, want 403", path, rec.Code)
@@ -339,7 +377,7 @@ func TestStatusReportsTheAgentGateway(t *testing.T) {
 	_, h := setup(t)
 	rec := serve(h, httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/status", nil))
 	got := decode[statusResponse](t, rec)
-	if !got.Agent.Healthy || !got.APIKeyConfigured || got.Cluster != "c1" {
+	if !got.Agent.Healthy || got.Cluster != "c1" {
 		t.Errorf("status = %+v", got)
 	}
 }
@@ -367,7 +405,7 @@ func TestRecentSessionsOmitsPreviewsAndMarksConsoleSessions(t *testing.T) {
 }
 
 func TestRecentSessionsReportsAnUnreachableGateway(t *testing.T) {
-	cfg := config{HermesURL: "http://127.0.0.1:1", AllowedHosts: map[string]bool{"localhost": true}}
+	cfg := config{HermesURL: "http://127.0.0.1:1"}
 	h := newServer(cfg).routes()
 	rec := serve(h, httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/sessions/recent", nil))
 	if rec.Code != http.StatusBadGateway {
@@ -389,6 +427,98 @@ func TestHostOnly(t *testing.T) {
 	} {
 		if got := hostOnly(in); got != want {
 			t.Errorf("hostOnly(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func messagesReq(sid, after string) *http.Request {
+	target := "http://localhost:8080/api/sessions/" + sid + "/messages"
+	if after != "" {
+		target += "?after=" + after
+	}
+	return httptest.NewRequest(http.MethodGet, target, nil)
+}
+
+func TestMessagesReturnsADelegatedResultAfterTheTurnsReply(t *testing.T) {
+	fake, h := setup(t)
+	turn := decode[chatResponse](t, serve(h, chatReq(`{"message":"audit the fleet"}`)))
+
+	// The page's first poll after a reply sees the turn's own messages.
+	first := decode[sessionMessagesResponse](t, serve(h, messagesReq(turn.SessionID, "")))
+	if len(first.Messages) != 2 ||
+		first.Messages[0].Role != roleUser || first.Messages[0].Content != "audit the fleet" ||
+		first.Messages[1].Role != roleAssistant || first.Messages[1].Content != turn.Reply {
+		t.Fatalf("first poll = %+v, want the typed message then the reply (no tool or empty assistant rows)", first)
+	}
+	if first.LatestID != first.Messages[1].ID {
+		t.Errorf("latest_id = %d, want the reply's ID %d", first.LatestID, first.Messages[1].ID)
+	}
+	if fake.lastQuery != "order=latest&limit=50" {
+		t.Errorf("upstream query = %q, want the newest page", fake.lastQuery)
+	}
+
+	resultID := fake.deliver(turn.SessionID, "audit finished: 2 findings")
+	next := decode[sessionMessagesResponse](t, serve(h, messagesReq(turn.SessionID, strconv.FormatInt(first.LatestID, 10))))
+	if len(next.Messages) != 2 || next.Messages[0].Role != roleUser ||
+		next.Messages[1].Content != "audit finished: 2 findings" || next.Messages[1].ID != resultID {
+		t.Fatalf("poll after the mark = %+v, want the wake and the delegated result", next)
+	}
+	if next.LatestID != resultID {
+		t.Errorf("latest_id = %d, want %d", next.LatestID, resultID)
+	}
+
+	idle := decode[sessionMessagesResponse](t, serve(h, messagesReq(turn.SessionID, strconv.FormatInt(next.LatestID, 10))))
+	if len(idle.Messages) != 0 || idle.LatestID != next.LatestID {
+		t.Errorf("poll with nothing new = %+v, want no messages and the same mark", idle)
+	}
+}
+
+func TestMessagesRefusesForeignSessionIDs(t *testing.T) {
+	fake, h := setup(t)
+	for _, sid := range []string{"k8s-evt-abc", sessionIDPrefix + "xyz", sessionIDPrefix + strings.Repeat("A", 32)} {
+		if rec := serve(h, messagesReq(sid, "")); rec.Code != http.StatusBadRequest {
+			t.Errorf("session %q: status %d, want 400", sid, rec.Code)
+		}
+	}
+	if fake.lastQuery != "" {
+		t.Errorf("a refused poll reached Hermes")
+	}
+}
+
+func TestMessagesRefusesABadMark(t *testing.T) {
+	_, h := setup(t)
+	sid := sessionIDPrefix + strings.Repeat("b", 32)
+	for _, after := range []string{"-1", "abc", "1.5"} {
+		if rec := serve(h, messagesReq(sid, after)); rec.Code != http.StatusBadRequest {
+			t.Errorf("after=%q: status %d, want 400", after, rec.Code)
+		}
+	}
+}
+
+func TestMessagesReportsAMissingSession(t *testing.T) {
+	_, h := setup(t)
+	rec := serve(h, messagesReq(sessionIDPrefix+strings.Repeat("c", 32), ""))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown session: status %d, want 404", rec.Code)
+	}
+}
+
+func TestEveryResponseForbidsFraming(t *testing.T) {
+	_, h := setup(t)
+	reqs := []*http.Request{
+		httptest.NewRequest(http.MethodGet, "http://localhost:8080/", nil),
+		httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/status", nil),
+		httptest.NewRequest(http.MethodGet, "http://10.0.0.5:8080/healthz", nil),
+		httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:8080/", nil),
+		chatReq(`{"message":"hi"}`),
+	}
+	for _, req := range reqs {
+		rec := serve(h, req)
+		if got := rec.Header().Get("Content-Security-Policy"); got != cspFrameAncestorsNone {
+			t.Errorf("%s %s: Content-Security-Policy = %q", req.Method, req.URL, got)
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != xFrameOptionsDeny {
+			t.Errorf("%s %s: X-Frame-Options = %q", req.Method, req.URL, got)
 		}
 	}
 }

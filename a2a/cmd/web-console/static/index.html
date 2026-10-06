@@ -518,9 +518,91 @@
     const SESSION_KEY = "kube-agents-web-console-session";
     const STATUS_POLL_MS = 15000;
     const SESSIONS_POLL_MS = 15000;
+    // Results of work the agent delegated to a kanban card arrive later, as
+    // new messages on this tab's session. MARK_KEY holds the highest message
+    // ID this tab has accounted for, so a reload does not repeat them.
+    const MESSAGES_POLL_MS = 10000;
+    const MARK_KEY = "kube-agents-web-console-mark";
 
     let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
     let turnInFlight = false;
+    let pollInFlight = false;
+    let markKnown = sessionStorage.getItem(MARK_KEY) !== null;
+    let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
+
+    function advanceMark(id) {
+      if (typeof id !== "number" || id <= lastSeenId) return;
+      lastSeenId = id;
+      markKnown = true;
+      sessionStorage.setItem(MARK_KEY, String(lastSeenId));
+    }
+
+    function resetMark() {
+      lastSeenId = 0;
+      markKnown = false;
+      sessionStorage.removeItem(MARK_KEY);
+    }
+
+    // Returns {latest_id, messages} for this tab's session, or null.
+    async function fetchNewMessages() {
+      if (!currentSessionId) return null;
+      const after = markKnown ? `?after=${lastSeenId}` : "";
+      try {
+        const resp = await fetch(`/api/sessions/${encodeURIComponent(currentSessionId)}/messages${after}`);
+        if (!resp.ok) return null;
+        return await resp.json();
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // Shows each agent message above the mark once, then moves the mark past
+    // it. User-role rows (this tab's own turns, and the wake that delivers a
+    // card's result) only move the mark.
+    function showUpdates(messages) {
+      (messages || []).forEach(m => {
+        if (m.id <= lastSeenId) return;
+        if (m.role === "assistant") appendMessage("agent", m.content, "update");
+        advanceMark(m.id);
+      });
+    }
+
+    // Periodic poll between turns. On a tab that has no mark yet (a reload
+    // of an older session), the first poll only sets the mark.
+    async function pollMessages() {
+      if (!currentSessionId || turnInFlight || pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const data = await fetchNewMessages();
+        if (!data) return;
+        if (markKnown) showUpdates(data.messages);
+        advanceMark(data.latest_id);
+      } finally {
+        pollInFlight = false;
+      }
+    }
+
+    // Runs once a turn's reply is on screen. The session holds three runs of
+    // messages above the mark: results that landed before this turn started
+    // (shown), the turn itself from the typed message to its reply (already
+    // on screen, so only marked), and results that landed after the reply
+    // (shown).
+    async function settleAfterReply(typed, reply) {
+      const data = await fetchNewMessages();
+      if (!data) return;
+      const messages = data.messages || [];
+      const same = (a, b) => (a || "").trim() === (b || "").trim();
+      let turnAt = -1;
+      messages.forEach((m, i) => { if (m.role === "user" && same(m.content, typed)) turnAt = i; });
+      let replyAt = -1;
+      messages.forEach((m, i) => { if (i > turnAt && m.role === "assistant" && same(m.content, reply)) replyAt = i; });
+      if (turnAt >= 0) showUpdates(messages.slice(0, turnAt));
+      if (replyAt >= 0) {
+        advanceMark(messages[replyAt].id);
+        showUpdates(messages.slice(replyAt + 1));
+      }
+      advanceMark(data.latest_id);
+    }
 
     function escapeHtml(text) {
       const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
@@ -606,13 +688,15 @@
           body: JSON.stringify({ message: text, session_id: currentSessionId })
         });
         const data = await readBody(resp);
-        if (data.session_id) {
+        if (data.session_id && data.session_id !== currentSessionId) {
           currentSessionId = data.session_id;
           sessionStorage.setItem(SESSION_KEY, currentSessionId);
+          resetMark();
         }
         pending.remove();
         if (resp.ok) {
           appendMessage("agent", data.reply || "(The agent returned an empty reply.)");
+          await settleAfterReply(text, data.reply);
         } else {
           appendMessage("agent", `Request failed (HTTP ${resp.status}): ${data.detail || data.error || "no detail"}`, "error");
         }
@@ -690,10 +774,7 @@
           tag.hidden = false;
         }
         badge.title = data.agent ? data.agent.detail : "";
-        if (!data.api_key_configured) {
-          badge.className = "badge badge-red";
-          label.innerText = "No agent API key";
-        } else if (data.agent && data.agent.healthy) {
+        if (data.agent && data.agent.healthy) {
           badge.className = "badge badge-green";
           label.innerText = "Agent reachable";
         } else {
@@ -722,6 +803,8 @@
     fetchSessions();
     setInterval(checkStatus, STATUS_POLL_MS);
     setInterval(fetchSessions, SESSIONS_POLL_MS);
+    pollMessages();
+    setInterval(pollMessages, MESSAGES_POLL_MS);
   </script>
 </body>
 </html>
