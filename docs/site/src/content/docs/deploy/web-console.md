@@ -9,7 +9,9 @@ The web console is a chat page for the Platform Agent that runs inside the clust
 
 ## What it does
 
-Each browser tab opens its own agent session. Messages you type go to the Platform Agent as turns in that session, the same way a chat platform delivers them, and the agent's reply comes back to the page. A turn that calls tools can take several minutes; the console waits up to five minutes for a reply. When the agent proposes a change, it opens a pull request, as it does from any other chat surface.
+Each browser tab opens its own agent session. A message you type reaches the Planning Agent, the same front door a Slack or Google Chat message reaches. It answers directly, or it files a kanban card and hands the work to the Platform Agent. A turn that calls tools can take several minutes; the console waits up to five minutes for a reply. When the agent proposes a change, it opens a pull request, as it does from any other chat surface.
+
+Work handed to a card finishes after the turn's reply is already on the page. The card's result lands on the same session as a new message, and the page checks for new messages every ten seconds between turns. It shows them tagged `update`. The page remembers what it has shown for as long as the tab is open, so a reload does not repeat them.
 
 The side panel lists the agent's recent sessions by title, including the triage sessions the event watcher opens. Each entry shows the session's title, its source, its message count and when it was last active, but no message content. You cannot open or post into a session the console did not create.
 
@@ -23,27 +25,26 @@ Do not expose the console through a LoadBalancer, an Ingress or a NodePort. Anyo
 
 ## Turning it on
 
-Set `webConsole.enabled: true`, or install with the `values-poc.yaml` overlay that ships in the chart:
+Pass `--enable-web-console` to the installer, on a new install or a re-run of an existing one:
 
 ```bash
-helm install kube-agents charts/kube-agents \
-  --namespace kube-agents --create-namespace \
-  -f charts/kube-agents/values-poc.yaml \
-  --set platformAgent.harness.projectId=YOUR_PROJECT \
-  --set platformAgent.harness.clusterName=YOUR_CLUSTER \
-  --set platformAgent.harness.location=YOUR_LOCATION
+./install.sh --enable-web-console
 ```
 
-The console's Deployment and Service are named `<release>-web-console`, so `kube-agents-web-console` for the release above. Once the Deployment is ready, forward its port and open the page:
+The installer records the choice as `WEB_CONSOLE_ENABLED=true` in `install.env`, so later runs keep it. `--enable-web-console=false` turns it off again. If you drive the Terraform composition in `terraform/examples/full-install` directly, set `web_console_enabled = true`.
+
+The console needs the Platform Agent; the chart refuses to render it on an install with `platformAgent.enabled: false`. Its image follows the agent's image tag and the install's image registry, so a mirrored install pulls it from the mirror.
+
+When the install finishes, the installer prints the command to reach the console. Its Service is `kube-agents-web-console` in the install namespace, `kubeagents-system` by default:
 
 ```bash
-kubectl port-forward -n kube-agents svc/kube-agents-web-console 8080:8080
+kubectl port-forward -n kubeagents-system svc/kube-agents-web-console 8080:8080
 ```
 
-Then open `http://localhost:8080`. The `8080:8080` assumes the default `webConsole.service.port`.
+Then open `http://localhost:8080`. The console pod does not run under gVisor, so this works on a sandboxed install as well.
 
 ## What to expect when something is wrong
 
-The badge in the header shows whether the console can reach the agent. It reads "Agent unreachable" while the agent pod is starting. It reads "No agent API key" when the console started without one, and in that state every turn fails. A failed turn shows its error in the chat, including the agent's own message when the agent returned one. The console does not fall back to answering from the model directly, so a reply in the page always came from the Platform Agent.
+The badge in the header shows whether the console can reach the agent. It reads "Agent unreachable" while the agent pod is starting. A failed turn shows its error in the chat, including the agent's own message when the agent returned one. The console does not fall back to answering from the model directly, so a reply in the page always came from the Platform Agent.
 
 If you send a second message before the first has been answered, the console refuses it. Wait for the reply, then send again.

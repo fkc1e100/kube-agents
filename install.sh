@@ -463,6 +463,8 @@ fi
 # the second. The same asymmetry applies to MEMORY / MEMORY_PROVIDER below and
 # to GOOGLE_CHAT_ENABLED below.
 PARAM_ENABLE_WEBUI="${ENABLE_WEBUI:-${HERMES_DASHBOARD_ENABLED:-}}"
+# WEB_CONSOLE_ENABLED is both the input and the recorded spelling.
+PARAM_ENABLE_WEB_CONSOLE="${WEB_CONSOLE_ENABLED:-}"
 # MEMORY is the input spelling (file | hindsight | off). MEMORY_PROVIDER is what
 # the install records, so translate it back when that is all there is.
 memory_mode_from_provider() {
@@ -644,6 +646,10 @@ Flags for AI Agents & Automation:
   --enable-hermes-dashboard[=true|false]
                                 Enable Hermes Web UI port 9119 dashboard
                                 (default: DEFAULT_ENABLE_WEBUI, currently false)
+  --enable-web-console[=true|false]
+                                Deploy the in-cluster web console, a browser chat
+                                page for the agent reached by kubectl port-forward
+                                (default: DEFAULT_ENABLE_WEB_CONSOLE, currently false)
   --enable-gke-backup-plan[=true|false]
                                 Provision a GKE Backup Plan for the cluster
                                 (default: DEFAULT_ENABLE_GKE_BACKUP_PLAN, currently false)
@@ -907,6 +913,11 @@ parse_args() {
       --enable-hermes-dashboard|--enable-hermes-dashboard=*)
         PARAM_ENABLE_WEBUI="$(flag_bool_value "$1")"
         validate_bool_flag_value "${1%%=*}" "$PARAM_ENABLE_WEBUI"; shift ;;
+      # Validated here and again in main(), for the reason given above
+      # --enable-hermes-dashboard: the default is applied with ${VAR:-...}.
+      --enable-web-console|--enable-web-console=*)
+        PARAM_ENABLE_WEB_CONSOLE="$(flag_bool_value "$1")"
+        validate_bool_flag_value "${1%%=*}" "$PARAM_ENABLE_WEB_CONSOLE"; shift ;;
       --user-profile-enabled=*) PARAM_USER_PROFILE_ENABLED="${1#*=}"; shift ;;
       --enable-gke-backup-plan|--enable-gke-backup-plan=*)
         PARAM_ENABLE_GKE_BACKUP_PLAN="$(flag_bool_value "$1")"
@@ -1131,6 +1142,17 @@ require_creatable_cluster_mode() {
     print_info "For a zonal cluster, pass --gke-cluster-mode=standard."
     exit 1
   fi
+}
+
+# How to open the web console. It is reached only by port-forward: its Service
+# is ClusterIP behind a deny-all NetworkPolicy, and it answers only on
+# localhost. The console pod is not sandboxed, so port-forward reaches it even
+# when the agent runs under gVisor.
+print_web_console_access() {
+  local namespace=$1
+  echo -e "  • ${C_CYAN}Web Console:${C_RESET} ${C_GREEN}Enabled${C_RESET}"
+  echo -e "    ${C_YELLOW}Workstation Access Command:${C_RESET} kubectl port-forward svc/${WEB_CONSOLE_SERVICE} -n ${namespace} ${WEB_CONSOLE_PORT}:${WEB_CONSOLE_PORT}"
+  echo -e "    ${C_YELLOW}Browser URL:${C_RESET} ${C_UNDERLINE}http://localhost:${WEB_CONSOLE_PORT}${C_RESET}"
 }
 
 # How GKE writes the shape. bash 3.2, still macOS's /bin/bash, has no ${var^}.
@@ -2130,6 +2152,7 @@ bootstrap_install_env_file() {
   write_env_var "$tmp" MEMORY "$PARAM_MEMORY"
   write_env_var "$tmp" USER_PROFILE_ENABLED "${USER_PROFILE_ENABLED:-$DEFAULT_USER_PROFILE_ENABLED}"
   write_env_var "$tmp" HERMES_DASHBOARD_ENABLED "${HERMES_DASHBOARD_ENABLED:-$DEFAULT_ENABLE_WEBUI}"
+  write_env_var "$tmp" WEB_CONSOLE_ENABLED "${WEB_CONSOLE_ENABLED:-$DEFAULT_ENABLE_WEB_CONSOLE}"
   write_env_var "$tmp" ENABLE_GVISOR "${ENABLE_GVISOR:-$DEFAULT_ENABLE_GVISOR}"
   write_env_var "$tmp" ENABLE_GKE_BACKUP_PLAN "${ENABLE_GKE_BACKUP_PLAN:-$DEFAULT_ENABLE_GKE_BACKUP_PLAN}"
   write_env_var "$tmp" ENABLE_PUBSUB_PLATFORM "${PARAM_ENABLE_PUBSUB_PLATFORM:-$DEFAULT_ENABLE_PUBSUB_PLATFORM}"
@@ -2474,6 +2497,7 @@ resolve_shared_defaults() {
   # that has to survive to the validator rather than being read as the default.
   PARAM_ENABLE_GVISOR="${PARAM_ENABLE_GVISOR-$DEFAULT_ENABLE_GVISOR}"
   PARAM_ENABLE_WEBUI="${PARAM_ENABLE_WEBUI:-$DEFAULT_ENABLE_WEBUI}"
+  PARAM_ENABLE_WEB_CONSOLE="${PARAM_ENABLE_WEB_CONSOLE:-$DEFAULT_ENABLE_WEB_CONSOLE}"
   PARAM_USER_PROFILE_ENABLED="${PARAM_USER_PROFILE_ENABLED:-$DEFAULT_USER_PROFILE_ENABLED}"
   PARAM_MEMORY="${PARAM_MEMORY:-$DEFAULT_MEMORY}"
   PARAM_ENABLE_GOOGLE_CHAT="${PARAM_ENABLE_GOOGLE_CHAT:-$DEFAULT_GOOGLE_CHAT_ENABLED}"
@@ -5047,6 +5071,12 @@ main() {
     echo -e "  ${C_CYAN}Agent front door where a chat message would have landed.${C_RESET}"
     echo ""
     echo -e "  To add a chat platform later, re-run ${C_BOLD}./install.sh --enable-google-chat${C_RESET} or ${C_BOLD}./install.sh --enable-slack${C_RESET}."
+    if [ "${PARAM_ENABLE_WEB_CONSOLE:-false}" = "true" ]; then
+      echo ""
+      print_web_console_access "${NAMESPACE:-$DEFAULT_NAMESPACE}"
+    else
+      echo -e "  For a browser chat page instead of a terminal, re-run with ${C_BOLD}--enable-web-console${C_RESET}."
+    fi
   }
 
   case "$chat_choice" in
@@ -5452,6 +5482,10 @@ main() {
     print_error "--enable-hermes-dashboard must be either true or false."
     exit 1
   fi
+  if [[ ! "$PARAM_ENABLE_WEB_CONSOLE" =~ ^(true|false)$ ]]; then
+    print_error "--enable-web-console must be either true or false."
+    exit 1
+  fi
   # The remaining --enable-* toggles are checked in parse_args, not here.
   # flag_bool_value extracts what they carry without checking it, and every
   # read below goes through is_truthy, where anything that is not "true" is
@@ -5782,6 +5816,7 @@ main() {
   export MEMORY_PROVIDER="$memory_provider"
   export USER_PROFILE_ENABLED="$PARAM_USER_PROFILE_ENABLED"
   export HERMES_DASHBOARD_ENABLED="$PARAM_ENABLE_WEBUI"
+  export WEB_CONSOLE_ENABLED="$PARAM_ENABLE_WEB_CONSOLE"
   export REGISTRY_PREFIX="$registry_prefix"
   export ENABLE_PUBSUB_PLATFORM="$PARAM_ENABLE_PUBSUB_PLATFORM"
   export ENABLE_STOCKOUT_INVESTIGATOR="$PARAM_ENABLE_STOCKOUT_INVESTIGATOR"
@@ -6238,6 +6273,9 @@ main() {
       echo -e "    ${C_YELLOW}Workstation Access Command:${C_RESET} kubectl port-forward deploy/${PLATFORM_AGENT_DEPLOYMENT} -n ${namespace} 9119:9119"
     fi
     echo -e "    ${C_YELLOW}Browser Dashboard URL:${C_RESET} ${C_UNDERLINE}http://localhost:9119${C_RESET}"
+  fi
+  if [ "$PARAM_ENABLE_WEB_CONSOLE" = "true" ]; then
+    print_web_console_access "$namespace"
   fi
 
   if [ "${google_chat_enabled:-false}" = "true" ]; then
