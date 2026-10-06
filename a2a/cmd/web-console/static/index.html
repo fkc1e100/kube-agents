@@ -394,6 +394,7 @@
       padding: 0 5px;
     }
     .post-subject { font-size: 14px; margin-top: 2px; word-break: break-word; }
+    .post-subject.muted { color: var(--text-muted); font-style: italic; }
     .post-reply {
       font-size: 13px;
       color: var(--text-secondary);
@@ -1285,6 +1286,21 @@
       return n > 0 ? `(${n}) ${APP_TITLE}` : APP_TITLE;
     }
 
+    // The headline a channel post shows. A session the agent has not
+    // started holds no messages, so there is no prompt to name it by:
+    // say so in a muted line instead of showing the bare session ID.
+    // Returns { text, muted, started }.
+    function postHeadline(p) {
+      const noun = p.kind === "scheduled" ? "Check" : "Event";
+      const subject = p.summary && p.summary.subject;
+      if (subject) return { text: subject, muted: false, started: true };
+      const empty = p.message_count === 0 || (p.summary && !p.summary.replies);
+      if (empty) {
+        return { text: `${noun} ${p.id}: the agent has not started on this yet`, muted: true, started: false };
+      }
+      return { text: `${noun} ${p.id}`, muted: true, started: true };
+    }
+
     // ---- End of thread state. ----
 
     const $ = id => document.getElementById(id);
@@ -1505,7 +1521,7 @@
     const channelErrors = {};
 
     function postSubject(p) {
-      return (p.summary && p.summary.subject) || p.title || p.id;
+      return postHeadline(p).text;
     }
 
     function postHtml(p, ch) {
@@ -1514,7 +1530,8 @@
       const classes = ["post"];
       if (feedNew.has(p.id)) classes.push("unread");
       if (pane.mode === "post" && pane.id === p.id) classes.push("selected");
-      const label = typeof replies === "number"
+      const head = postHeadline(p);
+      const label = typeof replies === "number" && head.started
         ? `${replies} ${replies === 1 ? "reply" : "replies"} · View thread`
         : "View thread";
       return `
@@ -1526,7 +1543,7 @@
               <span class="post-time">${escapeHtml(relativeTime(p.started_at || p.last_active))}</span>
               ${feedNew.has(p.id) ? `<span class="post-new">new</span>` : ""}
             </div>
-            <div class="post-subject">${escapeHtml(postSubject(p))}</div>
+            <div class="post-subject${head.muted ? " muted" : ""}">${escapeHtml(head.text)}</div>
             ${latest ? `<div class="post-reply"><b>Agent:</b> ${escapeHtml(latest)}</div>` : ""}
             <div class="post-foot">
               <button type="button" class="post-open" data-post="${escapeHtml(p.id)}">${escapeHtml(label)}</button>
