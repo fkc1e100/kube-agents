@@ -46,6 +46,13 @@ const (
 	kindChat        = "chat"
 	kindOther       = "other"
 
+	// Message authors the transcript and message poll tag each row with.
+	authorUser         = "user"
+	authorAgent        = "agent"
+	authorEventWatcher = "event_watcher"
+	authorScheduler    = "scheduler"
+	authorKanban       = "kanban"
+
 	// sourceAPIServer is the Hermes source of a session created through the
 	// gateway API: the event watcher's triage sessions, scheduled checks, and
 	// this console's. Slack and Google Chat sessions carry their own source.
@@ -99,6 +106,17 @@ var (
 	// _agent_query in session_kv_server.py). Every triage prompt opens with
 	// the same sentence, so that title is the line that tells posts apart.
 	cardTitlePattern = regexp.MustCompile("(?m)^- `title`: `([^`\n]+)`")
+
+	// Event watcher and kanban notification field patterns.
+	eventResourcePattern  = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Resource|Object):\*{0,2}\s*(.+)$`)
+	eventReasonPattern    = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Event Reason|What):\*{0,2}\s*(.+)$`)
+	eventWarningPattern   = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Warning Message|Who):\*{0,2}\s*(.+)$`)
+	kanbanHeaderPattern   = regexp.MustCompile(`^\[kanban\] Task (t_[0-9a-zA-Z_-]+) ([a-z_]+)\.`)
+	kanbanTitlePattern    = regexp.MustCompile(`(?m)^Title:\s*(.+)$`)
+	kanbanAssigneePattern = regexp.MustCompile(`(?m)^Assignee:\s*(.+)$`)
+	kanbanResultPattern   = regexp.MustCompile(`(?ms)\n(?:Result|Reason):\s*(.+?)(?:\n\nThis is an automatic task-status notification|\z)`)
+	titleClusterPattern   = regexp.MustCompile(`\bon\s+([a-z0-9-]+)$`)
+	gkeLocationSuffix     = regexp.MustCompile(`^(.+)-[a-z]{2,}-[a-z]+[0-9](?:-[a-z])?$`)
 
 	// summaryKinds are the kinds a channel reads content for.
 	summaryKinds = map[string]bool{kindEventTriage: true, kindScheduled: true}
@@ -331,18 +349,130 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := transcriptResponse{SessionID: sid, Title: sess.Title, Kind: kind, Messages: []sessionMessage{}}
+	var textMessages []hermesMessage
 	for _, m := range rows {
 		if m.ID > out.LatestID {
 			out.LatestID = m.ID
 		}
 		if hasText(m) {
-			out.Messages = append(out.Messages, sessionMessage{ID: m.ID, Role: m.Role, Content: *m.Content, Timestamp: m.Timestamp})
+			textMessages = append(textMessages, m)
 		}
 	}
-	if len(out.Messages) > transcriptMaxRows {
-		out.Messages = out.Messages[len(out.Messages)-transcriptMaxRows:]
+	truncatedHead := false
+	if len(textMessages) > transcriptMaxRows {
+		textMessages = textMessages[len(textMessages)-transcriptMaxRows:]
+		truncatedHead = true
+	}
+	seenUser := truncatedHead
+	for _, m := range textMessages {
+		firstUser := false
+		if m.Role == roleUser && !seenUser {
+			firstUser = true
+			seenUser = true
+		}
+		out.Messages = append(out.Messages, s.buildSessionMessage(kind, firstUser, m))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// buildSessionMessage tags a user or assistant row with its author and
+// extracts a card for automated prompts (event watcher, scheduler, or kanban
+// task completion).
+func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMessage) sessionMessage {
+	content := *m.Content
+	msg := sessionMessage{
+		ID:        m.ID,
+		Role:      m.Role,
+		Author:    authorAgent,
+		Content:   content,
+		Timestamp: m.Timestamp,
+	}
+	if m.Role != roleUser {
+		return msg
+	}
+	if card, ok := s.parseKanbanCard(content); ok {
+		msg.Author = authorKanban
+		msg.Card = card
+		return msg
+	}
+	if isFirstUser {
+		switch kind {
+		case kindEventTriage:
+			msg.Author = authorEventWatcher
+			msg.Card = parseEventWatcherCard(content)
+			return msg
+		case kindScheduled:
+			msg.Author = authorScheduler
+			msg.Card = &messageCard{Subject: summarySubject(content)}
+			return msg
+		}
+	}
+	msg.Author = authorUser
+	return msg
+}
+
+func parseEventWatcherCard(text string) *messageCard {
+	card := &messageCard{Subject: summarySubject(text)}
+	if m := eventResourcePattern.FindStringSubmatch(text); m != nil {
+		card.Resource = strings.TrimSpace(m[1])
+	}
+	if m := eventReasonPattern.FindStringSubmatch(text); m != nil {
+		card.Reason = strings.TrimSpace(m[1])
+	}
+	if m := eventWarningPattern.FindStringSubmatch(text); m != nil {
+		card.Warning = strings.TrimSpace(m[1])
+	}
+	return card
+}
+
+func (s *server) parseKanbanCard(text string) (*messageCard, bool) {
+	m := kanbanHeaderPattern.FindStringSubmatch(strings.TrimSpace(text))
+	if m == nil {
+		return nil, false
+	}
+	card := &messageCard{
+		TaskID: m[1],
+		Status: m[2],
+	}
+	if tm := kanbanTitlePattern.FindStringSubmatch(text); tm != nil {
+		card.Title = strings.TrimSpace(tm[1])
+	}
+	if am := kanbanAssigneePattern.FindStringSubmatch(text); am != nil {
+		card.Assignee = s.shortenAssignee(strings.TrimSpace(am[1]), card.Title)
+	}
+	if rm := kanbanResultPattern.FindStringSubmatch(text); rm != nil {
+		card.Summary = strings.TrimSpace(rm[1])
+	}
+	return card, true
+}
+
+func (s *server) shortenAssignee(raw, title string) string {
+	name := strings.TrimPrefix(strings.TrimSpace(raw), "@")
+	if name == "platform" {
+		return "Platform agent"
+	}
+	rest, ok := strings.CutPrefix(name, "cluster-")
+	if !ok || rest == "" {
+		return name
+	}
+	if tm := titleClusterPattern.FindStringSubmatch(strings.TrimSpace(title)); tm != nil {
+		if cluster := tm[1]; cluster != "" && strings.Contains(rest, cluster) {
+			return "Cluster agent · " + cluster
+		}
+	}
+	if s.cfg.ProjectID != "" {
+		if trimmed, ok := strings.CutPrefix(rest, s.cfg.ProjectID+"-"); ok && trimmed != "" {
+			rest = trimmed
+		}
+	}
+	if s.cfg.Location != "" {
+		if trimmed, ok := strings.CutSuffix(rest, "-"+s.cfg.Location); ok && trimmed != "" {
+			rest = trimmed
+		}
+	} else if lm := gkeLocationSuffix.FindStringSubmatch(rest); lm != nil && lm[1] != "" {
+		rest = lm[1]
+	}
+	return "Cluster agent · " + rest
 }
 
 // lookupSession reads one session's metadata from Hermes.

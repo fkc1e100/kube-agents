@@ -24,7 +24,7 @@ Each post shows its subject, the agent's latest reply, the reply count and when 
 
 The reply shown on an `# alerts` post is often a short routing line. The session holds the Planning Agent's turn, which files a kanban card for the cluster's specialist. The diagnosis itself runs on that card, and its report reaches the session only when the card's result lands there.
 
-**View thread** opens the post's session in the right pane. You can reply there. The reply goes into that session, and the agent answers in it. **About this agent** opens in the same pane. It shows the model, the cluster, the agent's Kubernetes service account, and the Google Cloud service account and the roles it was granted on the host project.
+**View thread** opens the post's session in the right pane. The first message in an `# alerts` or `# scheduled` thread is the prompt the event watcher or scheduler sent to the agent. The pane shows that message as an **Event watcher** or **Scheduler** card with the resource, reason and warning message lifted out, and keeps the full routing prompt folded under **Show routing prompt**. When a specialist agent completes a kanban card subscribed to the thread, its `[kanban] Task ...` wake message appears as a **Specialist report** card naming the task ID, the shortened specialist name (for example `Cluster agent · prod`) and the one-line summary from the card's completion. You can reply in the pane. The reply goes into that session, and the agent answers in it. **About this agent** opens in the same pane. It shows the model, the cluster, the agent's Kubernetes service account, and the Google Cloud service account and the roles it was granted on the host project.
 
 ## Threads
 
@@ -38,7 +38,7 @@ The thread list is kept in the browser's local storage. It survives a reload and
 
 ## Live status
 
-While a turn runs, a single line under it shows what the agent is doing: thinking, running a named tool, or writing the reply. The line appears in the pane where you sent the message. It can show a tool's name with Hermes' short preview of the tool's arguments, or an excerpt of the model's reasoning. Each line is cut to 160 characters. Reasoning lines stop once the reply starts. Full tool arguments and tool output are not forwarded.
+While a turn runs, a single line under it shows what the agent is doing and how long the turn has been running: thinking, running a named tool, waiting for the model (when three seconds pass between steps without a new event), or writing the reply. Below that line, a step list records each thinking excerpt and tool call (`running`, `done`, or `failed`, up to 50 steps per turn) with Hermes' short preview of the tool's arguments, and streams the reply text as `delta` chunks arrive. When the turn finishes, the step list folds into a **Worked for N s · M steps** summary above the reply. Reasoning lines stop once the reply starts. Full tool arguments and tool output are not forwarded.
 
 If you close or reload the page during a streamed turn, the console keeps reading the agent's stream to its end, so the agent finishes the turn. When you come back, the reply appears in the thread once it lands. If the page loses the stream while it stays open, it says the agent is still finishing the turn, and the reply arrives the same way. A turn still running after 15 minutes is stopped: the console closes the stream, the agent interrupts the run, and the pane shows that the run was interrupted.
 

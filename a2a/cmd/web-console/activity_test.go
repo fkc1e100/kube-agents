@@ -273,3 +273,67 @@ func TestTranscriptRefusesABadID(t *testing.T) {
 		t.Errorf("unknown session: status %d, want 404", rec.Code)
 	}
 }
+
+func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("k8s-evt-55376c71", "api_server", "Triage k8s-evt-55376c71")
+	fake.seed("cron-sweep-20261006", "api_server", "Triage cron-sweep-20261006")
+
+	triagePrompt := "A Kubernetes Warning event needs triage on GKE cluster 'kcc-management-cluster'.\n\n" +
+		"Make exactly one `kanban_create` call:\n\n" +
+		"- `title`: `Triage prod-databases/Pod/stateful-postgres-db-8f4fcc9cf-tk96v (FailedScheduling) on kcc-management-cluster`\n\n" +
+		"--- BEGIN TASK BODY (copy verbatim) ---\n" +
+		"**Event Details:**\n" +
+		"- **Resource:** prod-databases/Pod/stateful-postgres-db-8f4fcc9cf-tk96v\n" +
+		"- **Event Reason:** FailedScheduling\n" +
+		"- **Warning Message:** 0/31 nodes are available: pod has unbound immediate PersistentVolumeClaims.\n"
+	kanbanWake := "[kanban] Task t_9bb9d176 completed.\n" +
+		"Title: Triage prod-databases/Pod/stateful-postgres-db-8f4fcc9cf-tk96v (FailedScheduling) on kcc-management-cluster\n" +
+		"Assignee: @cluster-gca-gke-test-kcc-management-cluster-us-central1\n" +
+		"Board: default\n\n" +
+		"Check the result or decide the next step.\n" +
+		"Result: The Database Pod is unschedulable because its PVC requests a non-existent StorageClass 'premium-nvme-ssd'.\n\n" +
+		"This is an automatic task-status notification, not a request to decompose the task again."
+
+	fake.mu.Lock()
+	fake.post("k8s-evt-55376c71", "user", triagePrompt)
+	fake.post("k8s-evt-55376c71", "assistant", "triaging stateful-postgres-db scheduling on kcc-management-cluster.")
+	fake.post("k8s-evt-55376c71", "user", "fix this")
+	fake.post("k8s-evt-55376c71", "user", kanbanWake)
+	fake.post("cron-sweep-20261006", "user", "Run the policy sweep\nSecond line")
+	fake.mu.Unlock()
+
+	evt := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-55376c71")))
+	if len(evt.Messages) != 4 {
+		t.Fatalf("messages = %d, want 4", len(evt.Messages))
+	}
+	m0 := evt.Messages[0]
+	if m0.Author != authorEventWatcher || m0.Card == nil ||
+		m0.Card.Subject != "Triage prod-databases/Pod/stateful-postgres-db-8f4fcc9cf-tk96v (FailedScheduling) on kcc-management-cluster" ||
+		m0.Card.Resource != "prod-databases/Pod/stateful-postgres-db-8f4fcc9cf-tk96v" ||
+		m0.Card.Reason != "FailedScheduling" ||
+		!strings.Contains(m0.Card.Warning, "unbound immediate PersistentVolumeClaims") {
+		t.Errorf("m0 = %+v, card = %+v", m0, m0.Card)
+	}
+	if m1 := evt.Messages[1]; m1.Author != authorAgent || m1.Card != nil {
+		t.Errorf("m1 = %+v, want agent without card", m1)
+	}
+	if m2 := evt.Messages[2]; m2.Author != authorUser || m2.Card != nil || m2.Content != "fix this" {
+		t.Errorf("m2 = %+v, want user without card", m2)
+	}
+	m3 := evt.Messages[3]
+	if m3.Author != authorKanban || m3.Card == nil ||
+		m3.Card.TaskID != "t_9bb9d176" ||
+		m3.Card.Status != "completed" ||
+		m3.Card.Assignee != "Cluster agent · kcc-management-cluster" ||
+		!strings.Contains(m3.Card.Summary, "premium-nvme-ssd") ||
+		strings.Contains(m3.Card.Summary, "automatic task-status notification") {
+		t.Errorf("m3 = %+v, card = %+v", m3, m3.Card)
+	}
+
+	sched := decode[transcriptResponse](t, serve(h, transcriptReq("cron-sweep-20261006")))
+	if len(sched.Messages) != 1 || sched.Messages[0].Author != authorScheduler ||
+		sched.Messages[0].Card == nil || sched.Messages[0].Card.Subject != "Run the policy sweep" {
+		t.Errorf("scheduled transcript = %+v", sched.Messages)
+	}
+}

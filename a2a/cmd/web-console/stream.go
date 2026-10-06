@@ -55,8 +55,19 @@ const (
 
 	// The events the page reads.
 	eventStatus = "status"
+	eventStep   = "step"
+	eventDelta  = "delta"
 	eventReply  = "reply"
 	eventError  = "error"
+
+	stepKindTool     = "tool"
+	stepKindThinking = "thinking"
+	stepStateRunning = "running"
+	stepStateDone    = "done"
+	stepStateFailed  = "failed"
+
+	// maxStepsPerTurn bounds how many step rows one turn sends to the page.
+	maxStepsPerTurn = 50
 
 	// The Hermes events the relay reads; see _handle_session_chat_stream in
 	// hermes-agent's gateway/platforms/api_server.py.
@@ -107,6 +118,22 @@ type hermesStreamEvent struct {
 }
 
 type statusEvent struct {
+	Text string `json:"text"`
+}
+
+// stepEvent is one row in the turn's collapsible steps block. A tool call
+// sends one with state "running" on tool.started and a second with the same ID
+// and state "done" or "failed" when the tool finishes, keeping the argument
+// preview from tool.started so tool output never reaches the page.
+type stepEvent struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Title  string `json:"title"`
+	Detail string `json:"detail,omitempty"`
+	State  string `json:"state"`
+}
+
+type deltaEvent struct {
 	Text string `json:"text"`
 }
 
@@ -236,6 +263,9 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 		data                                 []string
 		written                              strings.Builder
 		haveReply, done, writing             bool
+		toolCounts                           = map[string]int{}
+		openTools                            = map[string][]stepEvent{}
+		thinkCount, stepsOpened              int
 	)
 	dispatch := func() {
 		defer func() { name, data = "", nil }()
@@ -254,12 +284,56 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 		case hermesDone:
 			done = true
 			return
+		case hermesToolStarted:
+			if tool := clip(ev.ToolName, statusFragmentRunes); tool != "" && stepsOpened < maxStepsPerTurn {
+				stepsOpened++
+				toolCounts[ev.ToolName]++
+				st := stepEvent{
+					ID:     fmt.Sprintf("%s#%d", tool, toolCounts[ev.ToolName]),
+					Kind:   stepKindTool,
+					Title:  "Running " + tool,
+					Detail: clip(ev.Preview, statusFragmentRunes),
+					State:  stepStateRunning,
+				}
+				openTools[ev.ToolName] = append(openTools[ev.ToolName], st)
+				out.send(eventStep, st)
+			}
+		case hermesToolCompleted, hermesToolFailed:
+			if queue := openTools[ev.ToolName]; len(queue) > 0 {
+				st := queue[0]
+				openTools[ev.ToolName] = queue[1:]
+				tool := clip(ev.ToolName, statusFragmentRunes)
+				if name == hermesToolFailed {
+					st.State = stepStateFailed
+					st.Title = tool + " failed"
+				} else {
+					st.State = stepStateDone
+					st.Title = "Finished " + tool
+				}
+				out.send(eventStep, st)
+			}
 		case hermesAssistantDelta:
 			writing = true
 			written.WriteString(ev.Delta)
+			if ev.Delta != "" {
+				out.send(eventDelta, deltaEvent{Text: ev.Delta})
+			}
 		case hermesToolProgress:
 			if ev.ToolName == hermesThinkingTool && (writing || echoesReply(ev.Delta, written.String())) {
 				return
+			}
+			if ev.ToolName == hermesThinkingTool {
+				if thought := clip(ev.Delta, statusFragmentRunes); thought != "" && stepsOpened < maxStepsPerTurn {
+					stepsOpened++
+					thinkCount++
+					out.send(eventStep, stepEvent{
+						ID:     fmt.Sprintf("think#%d", thinkCount),
+						Kind:   stepKindThinking,
+						Title:  "Thinking",
+						Detail: thought,
+						State:  stepStateDone,
+					})
+				}
 			}
 		}
 		text := statusLine(name, ev)
