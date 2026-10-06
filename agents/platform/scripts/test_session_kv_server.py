@@ -2425,7 +2425,9 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
 
     def test_the_pull_request_card_names_the_branch_and_forbids_cluster_writes(self):
         body = session_kv_server._triage_pr_task_body(self.PAYLOAD, self.SESSION)
-        self.assertIn("`platform-agent/incident-evt-prod-us-oom-42`", body)
+        self.assertIn("`platform-agent/incident-prod-us-central1-test-ns-test-pod`", body)
+        self.assertIn("keyed to this workload", body)
+        self.assertIn("push nothing", body)
         self.assertIn("**submit-suggestion**", body)
         self.assertIn("`kanban_show` this card's parent", body)
         self.assertIn("Never change the live cluster directly", body)
@@ -2434,11 +2436,39 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
     def test_the_branch_is_stable_and_one_safe_segment(self):
         first = session_kv_server._incident_branch(self.SESSION, self.PAYLOAD)
         self.assertEqual(first, session_kv_server._incident_branch(self.SESSION, self.PAYLOAD))
-        self.assertEqual(first, "platform-agent/incident-evt-prod-us-oom-42")
-        fallback = session_kv_server._incident_branch("", self.PAYLOAD)
-        self.assertEqual(fallback, "platform-agent/incident-prod-us-central1-test-ns-pod-test-pod-oomkilled")
+        self.assertEqual(first, "platform-agent/incident-prod-us-central1-test-ns-test-pod")
+        nameless = dict(self.PAYLOAD, name="")
+        self.assertEqual(session_kv_server._incident_branch(self.SESSION, nameless), "platform-agent/incident-evt-prod-us-oom-42")
+        self.assertEqual(
+            session_kv_server._incident_branch("", nameless),
+            "platform-agent/incident-prod-us-central1-test-ns-pod--oomkilled",
+        )
         hostile = session_kv_server._incident_branch("../`x` y\n", {})
         self.assertRegex(hostile.removeprefix("platform-agent/incident-"), r"^[a-z0-9-]+$")
+
+    def test_every_incident_on_one_workload_shares_the_branch(self):
+        # The watcher opens a new session each time its window lapses on an
+        # unfixed fault, and sibling replicas carry their own pod names. All of
+        # them must land on one branch, so they revise one open pull request.
+        replica_a = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-hn9mm", reason="FailedScheduling")
+        replica_b = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-zxg5p", reason="FailedScheduling")
+        branches = {
+            session_kv_server._incident_branch("k8s-evt-aaaa1111", replica_a),
+            session_kv_server._incident_branch("k8s-evt-bbbb2222", replica_b),
+            session_kv_server._incident_branch("k8s-evt-cccc3333", dict(replica_a, reason="BackOff")),
+        }
+        self.assertEqual(branches, {"platform-agent/incident-prod-us-central1-test-ns-auth-service"})
+        other = dict(replica_a, name="checkout-gateway-66d545794c-f9dd5")
+        self.assertNotIn(session_kv_server._incident_branch("k8s-evt-aaaa1111", other), branches)
+
+    def test_a_long_key_is_cut_with_a_digest(self):
+        long_a = dict(self.PAYLOAD, name="w" * 120 + "a")
+        long_b = dict(self.PAYLOAD, name="w" * 120 + "b")
+        a = session_kv_server._incident_branch("", long_a).removeprefix("platform-agent/incident-")
+        b = session_kv_server._incident_branch("", long_b).removeprefix("platform-agent/incident-")
+        self.assertLessEqual(len(a), session_kv_server.INCIDENT_BRANCH_KEY_MAX_LEN)
+        self.assertNotEqual(a, b)
+        self.assertRegex(a, r"^[a-z0-9-]+$")
 
     def test_drift_records_ignore_the_setting(self):
         drift = {"kind": session_kv_server.INJECT_KIND_DRIFT, "summary": "s"}
