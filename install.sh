@@ -1859,6 +1859,11 @@ bootstrap_install_env_file() {
       "A later run without it re-reads the recorded value and plans the BackupPlan's destruction; once a backup has been taken the API refuses that destroy and the apply fails partway instead." \
       true \
       "every later install.sh run"
+    warn_flag_beats_unrecorded_file_value "$destination" WEB_CONSOLE_ENABLED --enable-web-console \
+      "${PARAM_ENABLE_WEB_CONSOLE:-}" \
+      "A later run without it re-reads the recorded value and renders the web console to match it, adding or removing it." \
+      true \
+      "every later install.sh, upgrade.sh and --menu run"
     # Five consequence strings, unlike every other call here, which take one.
     # This key is the only one whose consequence varies, and it varies on
     # three things at once.
@@ -2497,7 +2502,9 @@ resolve_shared_defaults() {
   # that has to survive to the validator rather than being read as the default.
   PARAM_ENABLE_GVISOR="${PARAM_ENABLE_GVISOR-$DEFAULT_ENABLE_GVISOR}"
   PARAM_ENABLE_WEBUI="${PARAM_ENABLE_WEBUI:-$DEFAULT_ENABLE_WEBUI}"
-  PARAM_ENABLE_WEB_CONSOLE="${PARAM_ENABLE_WEB_CONSOLE:-$DEFAULT_ENABLE_WEB_CONSOLE}"
+  # No PARAM_ENABLE_WEB_CONSOLE, for the reason given below for
+  # PARAM_ENABLE_DRIFT_DETECTOR: empty means "this run did not say", which is
+  # what lets bootstrap_install_env_file warn only about a flag that was given.
   PARAM_USER_PROFILE_ENABLED="${PARAM_USER_PROFILE_ENABLED:-$DEFAULT_USER_PROFILE_ENABLED}"
   PARAM_MEMORY="${PARAM_MEMORY:-$DEFAULT_MEMORY}"
   PARAM_ENABLE_GOOGLE_CHAT="${PARAM_ENABLE_GOOGLE_CHAT:-$DEFAULT_GOOGLE_CHAT_ENABLED}"
@@ -5032,6 +5039,9 @@ main() {
   # project_id, region and cluster_name are all set by earlier steps, and
   # NAMESPACE is exported before the menu runs.
   _prompt_no_chat_enabled() {
+    # after_summary is true for the repeat at the end of main(), where the
+    # component summary has already printed the web console command.
+    local after_summary="${1:-false}"
     print_info "Chat integrations disabled. Agent will operate via CLI / REST API Gateway."
 
     # gcloud rejects --dns-endpoint on clusters without an external DNS
@@ -5071,9 +5081,14 @@ main() {
     echo -e "  ${C_CYAN}Agent front door where a chat message would have landed.${C_RESET}"
     echo ""
     echo -e "  To add a chat platform later, re-run ${C_BOLD}./install.sh --enable-google-chat${C_RESET} or ${C_BOLD}./install.sh --enable-slack${C_RESET}."
-    if [ "${PARAM_ENABLE_WEB_CONSOLE:-false}" = "true" ]; then
-      echo ""
-      print_web_console_access "${NAMESPACE:-$DEFAULT_NAMESPACE}"
+    if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-$DEFAULT_ENABLE_WEB_CONSOLE}}"; then
+      if [ "$after_summary" = "true" ]; then
+        # The component summary just above already printed the command.
+        echo -e "  For a browser chat page instead of a terminal, use the Web Console command in the summary above."
+      else
+        echo ""
+        print_web_console_access "${NAMESPACE:-$DEFAULT_NAMESPACE}"
+      fi
     else
       echo -e "  For a browser chat page instead of a terminal, re-run with ${C_BOLD}--enable-web-console${C_RESET}."
     fi
@@ -5482,7 +5497,7 @@ main() {
     print_error "--enable-hermes-dashboard must be either true or false."
     exit 1
   fi
-  if [[ ! "$PARAM_ENABLE_WEB_CONSOLE" =~ ^(true|false)$ ]]; then
+  if [ -n "${PARAM_ENABLE_WEB_CONSOLE:-}" ] && [[ ! "$PARAM_ENABLE_WEB_CONSOLE" =~ ^(true|false)$ ]]; then
     print_error "--enable-web-console must be either true or false."
     exit 1
   fi
@@ -5816,7 +5831,11 @@ main() {
   export MEMORY_PROVIDER="$memory_provider"
   export USER_PROFILE_ENABLED="$PARAM_USER_PROFILE_ENABLED"
   export HERMES_DASHBOARD_ENABLED="$PARAM_ENABLE_WEBUI"
-  export WEB_CONSOLE_ENABLED="$PARAM_ENABLE_WEB_CONSOLE"
+  # Conditional, like ENABLE_DRIFT_DETECTOR below: a run that did not say
+  # leaves the recorded value (or, with none, the default) to the generator.
+  if [ -n "${PARAM_ENABLE_WEB_CONSOLE:-}" ]; then
+    export WEB_CONSOLE_ENABLED="$PARAM_ENABLE_WEB_CONSOLE"
+  fi
   export REGISTRY_PREFIX="$registry_prefix"
   export ENABLE_PUBSUB_PLATFORM="$PARAM_ENABLE_PUBSUB_PLATFORM"
   export ENABLE_STOCKOUT_INVESTIGATOR="$PARAM_ENABLE_STOCKOUT_INVESTIGATOR"
@@ -6274,7 +6293,7 @@ main() {
     fi
     echo -e "    ${C_YELLOW}Browser Dashboard URL:${C_RESET} ${C_UNDERLINE}http://localhost:9119${C_RESET}"
   fi
-  if [ "$PARAM_ENABLE_WEB_CONSOLE" = "true" ]; then
+  if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-$DEFAULT_ENABLE_WEB_CONSOLE}}"; then
     print_web_console_access "$namespace"
   fi
 
@@ -6290,7 +6309,7 @@ main() {
   # prints it as well, for the runs that never reach the end of main().
   if [ "$chat_choice" = "4" ]; then
     echo ""
-    _prompt_no_chat_enabled
+    _prompt_no_chat_enabled true
   fi
 }
 
