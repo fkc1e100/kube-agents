@@ -251,6 +251,10 @@ type server struct {
 	usage        usageCache
 
 	summaries summaryCache
+
+	// streamCeiling bounds one streamed turn; streamTurnCeiling, or less
+	// in tests.
+	streamCeiling time.Duration
 }
 
 func newServer(cfg config) *server {
@@ -263,6 +267,7 @@ func newServer(cfg config) *server {
 		summaries: summaryCache{
 			entries: map[string]summaryEntry{},
 		},
+		streamCeiling: streamTurnCeiling,
 	}
 	s.fetchMetrics = s.fetchPeerMetrics
 	return s

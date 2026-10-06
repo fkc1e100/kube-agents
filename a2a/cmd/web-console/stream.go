@@ -20,12 +20,18 @@ limitations under the License.
 // It calls Hermes' POST /api/sessions/{id}/chat/stream and relays a reduced
 // SSE stream to the page: `status` events carrying one short plain-text line
 // ("Running kubectl_get: pods -n x"), then one `reply` event with the full
-// reply, or one `error` event in /api/chat's error shape. Tool arguments and
-// full previews are not forwarded; each line is collapsed and cut here.
+// reply, or one `error` event in /api/chat's error shape. A status line can
+// carry a tool's name with Hermes' short preview of its arguments, or an
+// excerpt of the model's reasoning. Each line is collapsed and cut here; full
+// tool arguments and tool output are not forwarded.
 //
-// The handler reads Hermes' stream to its end before it sends the reply.
-// Closing it early would read to Hermes as a client disconnect and interrupt
-// the run.
+// Hermes interrupts a run when the client reading its stream goes away
+// (_drain_session_stream_task_on_disconnect). So the handler reads Hermes'
+// stream on a context of its own, bounded by streamTurnCeiling, not by the
+// browser's request. When the browser leaves, the handler keeps reading to
+// `done` and holds the session's in-flight claim until then, so the run
+// finishes and no second turn starts on top of it. Only the ceiling cuts a
+// run short, and the error then says the run was interrupted.
 
 package main
 
@@ -36,9 +42,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -74,11 +82,15 @@ const (
 	statusFragmentRunes = 120
 	statusLineRunes     = 160
 
-	statusSending  = "Sending your message to the agent"
-	statusStarted  = "The agent started working"
-	statusWriting  = "Writing the reply"
-	errNoReply     = "The agent's stream ended without a reply."
-	errStreamWrite = "the browser closed the stream"
+	// streamTurnCeiling bounds how long the console reads one turn's stream,
+	// whether or not the browser is still there. When it fires, the console
+	// closes the stream and Hermes interrupts the run.
+	streamTurnCeiling = 15 * time.Minute
+
+	statusSending = "Sending your message to the agent"
+	statusStarted = "The agent started working"
+	statusWriting = "Writing the reply"
+	errNoReply    = "The agent's stream ended without a reply."
 )
 
 // hermesStreamEvent is the part of a Hermes stream event's data the relay
@@ -95,48 +107,57 @@ type statusEvent struct {
 	Text string `json:"text"`
 }
 
-// sseWriter writes events to the page and flushes each one.
+// sseWriter writes events to the page and flushes each one. Once the browser
+// has gone (its request context ended, or a write failed) it drops every
+// later event, so the relay can keep reading Hermes' stream to its end.
 type sseWriter struct {
-	w  http.ResponseWriter
-	rc *http.ResponseController
+	w    http.ResponseWriter
+	rc   *http.ResponseController
+	page context.Context
+	gone bool
 }
 
-func (e *sseWriter) send(name string, v any) error {
+func (e *sseWriter) write(frame string) {
+	if e.gone || e.page.Err() != nil {
+		e.gone = true
+		return
+	}
+	if _, err := io.WriteString(e.w, frame); err != nil {
+		e.gone = true
+		return
+	}
+	if e.rc.Flush() != nil {
+		e.gone = true
+	}
+}
+
+func (e *sseWriter) send(name string, v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return err
+		return
 	}
-	if _, err := fmt.Fprintf(e.w, "event: %s\ndata: %s\n\n", name, b); err != nil {
-		return err
-	}
-	return e.rc.Flush()
+	e.write(fmt.Sprintf("event: %s\ndata: %s\n\n", name, b))
 }
 
-func (e *sseWriter) keepalive() error {
-	if _, err := io.WriteString(e.w, sseKeepalive); err != nil {
-		return err
-	}
-	return e.rc.Flush()
-}
+func (e *sseWriter) keepalive() { e.write(sseKeepalive) }
 
 func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	sid, msg, agentSession, ok := s.beginTurn(w, r)
 	if !ok {
 		return
 	}
+	// Released when Hermes' stream ends, which may be after the browser left.
 	defer s.release(sid)
 
-	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.streamCeiling)
 	defer cancel()
 
 	w.Header().Set("Content-Type", contentTypeEventStream)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	out := &sseWriter{w: w, rc: http.NewResponseController(w)}
-	if out.send(eventStatus, statusEvent{Text: statusSending}) != nil {
-		return
-	}
+	out := &sseWriter{w: w, rc: http.NewResponseController(w), page: r.Context()}
+	out.send(eventStatus, statusEvent{Text: statusSending})
 
 	resp, err := s.openTurnStream(ctx, sid, msg)
 	if errors.Is(err, errSessionNotFound) && !agentSession {
@@ -147,22 +168,32 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		_, body := turnFailure(err, sid)
-		_ = out.send(eventError, body)
+		out.send(eventError, s.streamFailure(err, sid))
 		return
 	}
 	defer drainAndClose(resp)
 
 	reply, err := relayTurnStream(ctx, resp.Body, out)
-	switch {
-	case errors.Is(err, errBrowserGone):
+	if out.gone {
+		log.Printf(logPrefix+"session %s: the browser left during the turn; read the agent's stream to its end (err=%v)", sid, err)
 		return
-	case err != nil:
-		_, body := turnFailure(err, sid)
-		_ = out.send(eventError, body)
-	default:
-		_ = out.send(eventReply, chatResponse{SessionID: sid, Reply: reply})
 	}
+	if err != nil {
+		out.send(eventError, s.streamFailure(err, sid))
+		return
+	}
+	out.send(eventReply, chatResponse{SessionID: sid, Reply: reply})
+}
+
+// streamFailure is turnFailure's body, except when the turn ceiling fired:
+// the console then closed Hermes' stream, which interrupts the run.
+func (s *server) streamFailure(err error, sid string) errorResponse {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errorResponse{Error: "turn_interrupted", SessionID: sid,
+			Detail: fmt.Sprintf("The agent did not finish within %s, so the console stopped reading the turn and the agent interrupted it. Ask again, or ask for a smaller piece of the work.", s.streamCeiling)}
+	}
+	_, body := turnFailure(err, sid)
+	return body
 }
 
 // openTurnStream starts a streamed turn. An error status arrives before the
@@ -182,58 +213,63 @@ func (s *server) openTurnStream(ctx context.Context, sid, msg string) (*http.Res
 	return nil, &upstreamError{status: resp.StatusCode, detail: upstreamErrorDetail(resp)}
 }
 
-var errBrowserGone = errors.New(errStreamWrite)
-
 // relayTurnStream reads Hermes' SSE stream until done or EOF, sends a status
 // line for each event worth showing, and returns the reply from
-// assistant.completed. An error event with no reply becomes the error.
+// assistant.completed. An error event with no reply becomes the error. It
+// keeps reading after the browser has gone; out drops what it cannot send.
+//
+// Hermes reports reasoning as `_thinking` progress. Some models stream the
+// reply itself that way once they start writing it, so after the first
+// assistant.delta no reasoning line is shown, and none whose text the reply
+// so far already starts with.
 func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (string, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), maxUpstreamBodyBytes)
 	var (
 		name, lastStatus, reply, upstreamMsg string
 		data                                 []string
-		haveReply, done                      bool
+		written                              strings.Builder
+		haveReply, done, writing             bool
 	)
-	dispatch := func() error {
+	dispatch := func() {
 		defer func() { name, data = "", nil }()
 		if name == "" && len(data) == 0 {
-			return nil
+			return
 		}
 		var ev hermesStreamEvent
 		_ = json.Unmarshal([]byte(strings.Join(data, "\n")), &ev)
 		switch name {
 		case hermesAssistantCompleted:
 			reply, haveReply = ev.Content, true
-			return nil
+			return
 		case hermesEventError:
 			upstreamMsg = ev.Message
-			return nil
+			return
 		case hermesDone:
 			done = true
-			return nil
+			return
+		case hermesAssistantDelta:
+			writing = true
+			written.WriteString(ev.Delta)
+		case hermesToolProgress:
+			if ev.ToolName == hermesThinkingTool && (writing || echoesReply(ev.Delta, written.String())) {
+				return
+			}
 		}
 		text := statusLine(name, ev)
 		if text == "" || text == lastStatus {
-			return nil
+			return
 		}
 		lastStatus = text
-		if out.send(eventStatus, statusEvent{Text: text}) != nil {
-			return errBrowserGone
-		}
-		return nil
+		out.send(eventStatus, statusEvent{Text: text})
 	}
 	for !done && scanner.Scan() {
 		line := scanner.Text()
 		switch {
 		case line == "":
-			if err := dispatch(); err != nil {
-				return "", err
-			}
+			dispatch()
 		case strings.HasPrefix(line, sseComment):
-			if out.keepalive() != nil {
-				return "", errBrowserGone
-			}
+			out.keepalive()
 		case strings.HasPrefix(line, sseEventPrefix):
 			name = strings.TrimSpace(strings.TrimPrefix(line, sseEventPrefix))
 		case strings.HasPrefix(line, sseDataPrefix):
@@ -241,9 +277,7 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 		}
 	}
 	if !done {
-		if err := dispatch(); err != nil {
-			return "", err
-		}
+		dispatch()
 	}
 	if err := scanner.Err(); err != nil && !haveReply {
 		if ctx.Err() != nil {
@@ -261,6 +295,14 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 		return "", errors.New(upstreamMsg)
 	}
 	return "", errors.New(errNoReply)
+}
+
+// echoesReply reports whether a reasoning excerpt is the start of the reply
+// written so far, compared with whitespace collapsed.
+func echoesReply(thought, written string) bool {
+	t := strings.Join(strings.Fields(thought), " ")
+	w := strings.Join(strings.Fields(written), " ")
+	return t != "" && w != "" && strings.HasPrefix(w, t)
 }
 
 // statusLine is the one-line status for a Hermes event, or "" for an event

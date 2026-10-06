@@ -18,11 +18,13 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A turn as Hermes streams it: frames in the shapes
@@ -270,5 +272,140 @@ func TestClip(t *testing.T) {
 	long := clip(strings.Repeat("x ", statusFragmentRunes), statusFragmentRunes)
 	if !strings.HasSuffix(long, ellipsis) || len([]rune(long)) > statusFragmentRunes+1 {
 		t.Errorf("clip long = %q", long)
+	}
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+const gatedTail = "event: assistant.completed\ndata: {\"content\": \"done\"}\n\nevent: done\ndata: {}\n\n"
+
+func TestChatStreamKeepsReadingAfterTheBrowserLeaves(t *testing.T) {
+	fake, s := setupServer(t)
+	h := s.routes()
+	console := httptest.NewServer(h)
+	t.Cleanup(console.Close)
+	sid := sessionIDPrefix + strings.Repeat("e", 32)
+	fake.seed(sid, "api_server", "Web console")
+	gate := make(chan struct{})
+	fake.mu.Lock()
+	fake.stream = "event: run.started\ndata: {}\n\n"
+	fake.streamGate, fake.streamTail = gate, gatedTail
+	fake.mu.Unlock()
+
+	ctx, leave := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, console.URL+"/api/chat/stream",
+		strings.NewReader(`{"message":"hi","session_id":"`+sid+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(consoleHeader, consoleHeaderValue)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := bufio.NewScanner(resp.Body)
+	for lines.Scan() && !strings.Contains(lines.Text(), statusStarted) {
+	}
+	// The browser goes away mid-turn.
+	leave()
+	resp.Body.Close()
+	time.Sleep(100 * time.Millisecond)
+
+	if code := serve(h, chatReq(`{"message":"again","session_id":"`+sid+`"}`)).Code; code != http.StatusConflict {
+		t.Errorf("a turn while the abandoned one still runs: status %d, want 409", code)
+	}
+	fake.mu.Lock()
+	end := fake.streamEnd
+	fake.mu.Unlock()
+	if end != "" {
+		t.Fatalf("the agent's stream ended (%s) before the run finished", end)
+	}
+
+	close(gate)
+	waitFor(t, "the claim to be released", func() bool {
+		return serve(h, chatReq(`{"message":"again","session_id":"`+sid+`"}`)).Code == http.StatusOK
+	})
+	fake.mu.Lock()
+	end = fake.streamEnd
+	fake.mu.Unlock()
+	if end != "finished" {
+		t.Errorf("the agent's stream ended %q, want it read to the end", end)
+	}
+}
+
+func TestChatStreamCeilingInterruptsTheRun(t *testing.T) {
+	fake, s := setupServer(t)
+	s.streamCeiling = 300 * time.Millisecond
+	sid := sessionIDPrefix + strings.Repeat("f", 32)
+	fake.seed(sid, "api_server", "Web console")
+	gate := make(chan struct{})
+	t.Cleanup(func() { close(gate) })
+	fake.mu.Lock()
+	fake.stream = "event: run.started\ndata: {}\n\n"
+	fake.streamGate, fake.streamTail = gate, gatedTail
+	fake.mu.Unlock()
+
+	events := readRelay(t, serve(s.routes(), streamReq(`{"message":"hi","session_id":"`+sid+`"}`)).Body.String())
+	last := events[len(events)-1]
+	detail, _ := last.data["detail"].(string)
+	if last.name != eventError || last.data["error"] != "turn_interrupted" || !strings.Contains(detail, "interrupted") {
+		t.Errorf("final event = %+v, want turn_interrupted", last)
+	}
+	if strings.Contains(detail, "may still be working") {
+		t.Errorf("the error says the run may still be working: %q", detail)
+	}
+	waitFor(t, "the agent to see the stream closed", func() bool {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		return fake.streamEnd == "abandoned"
+	})
+}
+
+func TestChatStreamDropsReasoningThatEchoesTheReply(t *testing.T) {
+	fake, h := setup(t)
+	fake.mu.Lock()
+	// The order seen on a cluster: the reply starts streaming, then the same
+	// text arrives again as _thinking progress, then the reply.
+	fake.stream = "event: run.started\ndata: {}\n\n" +
+		"event: tool.progress\ndata: {\"tool_name\": \"_thinking\", \"delta\": \"Check the pods.\"}\n\n" +
+		"event: assistant.delta\ndata: {\"delta\": \"There are eight pods \"}\n\n" +
+		"event: tool.progress\ndata: {\"tool_name\": \"_thinking\", \"delta\": \"There are eight pods running\"}\n\n" +
+		"event: assistant.completed\ndata: {\"content\": \"There are eight pods running.\"}\n\n" +
+		"event: done\ndata: {}\n\n"
+	fake.mu.Unlock()
+	events := readRelay(t, serve(h, streamReq(`{"message":"hi"}`)).Body.String())
+	var statuses []string
+	for _, e := range events {
+		if e.name == eventStatus {
+			statuses = append(statuses, e.data["text"].(string))
+		}
+	}
+	want := []string{statusSending, statusStarted, "Thinking: Check the pods.", statusWriting}
+	if strings.Join(statuses, "|") != strings.Join(want, "|") {
+		t.Errorf("status lines = %q, want %q", statuses, want)
+	}
+}
+
+func TestEchoesReply(t *testing.T) {
+	for _, tc := range []struct {
+		thought, written string
+		want             bool
+	}{
+		{"There are  eight", "There are eight pods", true},
+		{"Check the pods", "There are eight pods", false},
+		{"anything", "", false},
+		{"", "text", false},
+	} {
+		if got := echoesReply(tc.thought, tc.written); got != tc.want {
+			t.Errorf("echoesReply(%q, %q) = %v, want %v", tc.thought, tc.written, got, tc.want)
+		}
 	}
 }
