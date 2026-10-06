@@ -115,6 +115,14 @@
       "description": "The platform-agent image of the same commit plus the bridge binary that runs the platform persona as the bus executor (a2a/Dockerfile.hermes-bridge)."
     },
     {
+      "name": "web-console",
+      "origin": "first-party",
+      "repository": "ghcr.io/gke-labs/kube-agents/web-console",
+      "tagPolicy": "release",
+      "pulledBy": "The web console Deployment the chart renders when webConsole.enabled is true, and nothing on a default install. The chart takes the tag from webConsole.image.tag, else the agent image's tag, else the chart's appVersion.",
+      "description": "A browser chat page for the Platform Agent, reached through kubectl port-forward, that talks to the Hermes gateway on the agent Service (a2a/Dockerfile.web-console)."
+    },
+    {
       "name": "litellm",
       "origin": "third-party",
       "repository": "ghcr.io/berriai/litellm",

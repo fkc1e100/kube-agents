@@ -1,8 +1,25 @@
+{{- /*
+The web console: a browser chat page for the Platform Agent, for installs with
+no chat platform configured. docs/site/src/content/docs/deploy/web-console.md
+is the user-facing page.
+
+Access is `kubectl port-forward` and nothing else, and three things here hold
+that line. The Service is ClusterIP with no way to change its type. The
+NetworkPolicy refuses all ingress from the pod network, so no other workload
+can reach the console and borrow the agent API key it holds — port-forwards
+enter from the node, which NetworkPolicy does not govern, and so do kubelet
+probes. And the binary refuses any Host that is not loopback, so a forwarded
+port cannot be reached through a rebinding DNS name in the operator's browser.
+
+One replica on purpose: a port-forward lands on one pod, and the console keeps
+which sessions have a turn in flight in memory.
+*/ -}}
 {{- if .Values.webConsole.enabled }}
 {{- $agentName := .Values.platformAgent.name | default "platform-agent" }}
 {{- $secretName := .Values.platformAgent.credentials.secretName | default "platform-agent-secrets" }}
-{{- $tag := .Values.webConsole.image.tag | default .Chart.AppVersion }}
-{{- $repo := include "kube-agents.imageRepository" (dict "repository" .Values.webConsole.image.repository "registry" .Values.global.imageRegistry) }}
+{{- /* Same tag resolution as the plugin images: an install pinned to an agent image of one commit gets the console of that commit. */ -}}
+{{- $tag := .Values.webConsole.image.tag | default .Values.platformAgent.deployment.image.tag | default .Chart.AppVersion }}
+{{- $repo := include "kube-agents.imageRepository" (dict "repository" .Values.webConsole.image.repository "registry" (include "kube-agents.imageRegistry" .)) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,10 +47,13 @@ spec:
       imagePullSecrets:
         {{- . | nindent 8 }}
       {{- end }}
+      automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
         fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web-console
           image: {{ printf "%s:%s" $repo $tag | quote }}
@@ -47,28 +67,17 @@ spec:
               value: "8080"
             - name: HERMES_URL
               value: {{ printf "http://%s.%s.svc.cluster.local:8642" $agentName .Release.Namespace | quote }}
-            - name: SESSION_KV_URL
-              value: {{ printf "http://%s.%s.svc.cluster.local:8642" $agentName .Release.Namespace | quote }}
-            - name: LITELLM_URL
-              value: {{ printf "http://litellm.%s.svc.cluster.local:4000" .Release.Namespace | quote }}
             - name: CLUSTER_NAME
-              value: {{ .Values.platformAgent.harness.clusterName | default "gke-cluster" | quote }}
+              value: {{ .Values.platformAgent.harness.clusterName | default "" | quote }}
             - name: PROJECT_ID
-              value: {{ .Values.platformAgent.harness.projectId | default "gcp-project" | quote }}
+              value: {{ .Values.platformAgent.harness.projectId | default "" | quote }}
             - name: LOCATION
-              value: {{ .Values.platformAgent.harness.location | default "us-central1" | quote }}
+              value: {{ .Values.platformAgent.harness.location | default "" | quote }}
             - name: API_SERVER_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ $secretName | quote }}
                   key: API_SERVER_KEY
-                  optional: true
-            - name: SESSION_KV_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ $secretName | quote }}
-                  key: SESSION_KV_API_KEY
-                  optional: true
           livenessProbe:
             httpGet:
               path: /healthz
@@ -96,16 +105,31 @@ metadata:
     app.kubernetes.io/component: web-console
     {{- include "kube-agents.labels" . | nindent 4 }}
 spec:
-  type: {{ .Values.webConsole.service.type | default "ClusterIP" }}
+  type: ClusterIP
   ports:
     - name: http
       port: {{ .Values.webConsole.service.port | default 8080 }}
       targetPort: http
       protocol: TCP
-      {{- if and (eq .Values.webConsole.service.type "NodePort") .Values.webConsole.service.nodePort }}
-      nodePort: {{ .Values.webConsole.service.nodePort }}
-      {{- end }}
   selector:
     app.kubernetes.io/name: web-console
     app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-web-console
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: web-console
+    app.kubernetes.io/component: web-console
+    {{- include "kube-agents.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: web-console
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress: []
 {{- end }}

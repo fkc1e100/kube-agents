@@ -4,9 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Kube-Agents Operations Console</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto+Mono:wght@400;500&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
       --gcp-blue: #1a73e8;
@@ -114,6 +111,8 @@
     .badge-amber .badge-dot { background: var(--amber-text); }
     .badge-red { background: var(--red-bg); color: var(--red-text); }
     .badge-red .badge-dot { background: var(--red-text); }
+    .badge-grey { background: var(--border-subtle); color: var(--text-secondary); }
+    .badge-grey .badge-dot { background: var(--text-muted); }
 
     /* Main Container */
     main {
@@ -157,9 +156,15 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
+      font-family: var(--font-sans);
     }
 
-    .chip:hover {
+    .chip:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .chip:hover:not(:disabled) {
       background: var(--gcp-blue-light);
       color: var(--gcp-blue);
       border-color: #aecbfa;
@@ -285,30 +290,6 @@
       margin-bottom: 8px;
     }
 
-    .thinking-card {
-      background: #f8f9fa;
-      border-left: 3px solid #4285f4;
-      border-radius: 4px;
-      padding: 8px 12px;
-      font-size: 12px;
-      color: var(--text-secondary);
-      margin-bottom: 8px;
-      cursor: pointer;
-    }
-
-    .thinking-card summary {
-      font-weight: 500;
-      color: var(--gcp-blue);
-      outline: none;
-    }
-
-    .thinking-body {
-      margin-top: 6px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      line-height: 1.4;
-      white-space: pre-wrap;
-    }
 
     .chat-input-bar {
       padding: 16px 24px;
@@ -391,29 +372,6 @@
       letter-spacing: 0.5px;
     }
 
-    .tabs {
-      display: flex;
-      background: var(--bg-surface);
-      border-bottom: 1px solid var(--border-color);
-      padding: 0 16px;
-    }
-
-    .tab-btn {
-      padding: 10px 14px;
-      background: none;
-      border: none;
-      border-bottom: 2px solid transparent;
-      font-family: var(--font-sans);
-      font-size: 12.5px;
-      font-weight: 500;
-      color: var(--text-secondary);
-      cursor: pointer;
-    }
-
-    .tab-btn.active {
-      color: var(--gcp-blue);
-      border-bottom-color: var(--gcp-blue);
-    }
 
     .sidebar-content {
       flex: 1;
@@ -500,302 +458,270 @@
         <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" fill="#4285F4"/>
       </svg>
       <div class="brand-title">
-        Kube-Agents Operations Console
-        <span class="cluster-pill" id="cluster-tag">GKE Cluster</span>
+        Kube-Agents Console
+        <span class="cluster-pill" id="cluster-tag" hidden></span>
       </div>
     </div>
     <div class="header-actions">
-      <div class="badge badge-green" id="agent-badge">
+      <div class="badge badge-grey" id="agent-badge" title="">
         <span class="badge-dot"></span>
-        <span id="agent-status-text">Platform Agent Ready</span>
-      </div>
-      <div class="badge badge-green" id="litellm-badge">
-        <span class="badge-dot"></span>
-        <span>Gemini 3.8 Flash</span>
+        <span id="agent-status-text">Checking agent&hellip;</span>
       </div>
     </div>
   </header>
 
   <main>
-    <!-- Left Column: Interactive Chat -->
     <section class="chat-section">
       <div class="prompt-chips-bar">
-        <div class="chip" onclick="sendPrompt('Audit cluster health and identify any failing pods')">
-          ⚡ Cluster Health
-        </div>
-        <div class="chip" onclick="sendPrompt('Show recent Kubernetes warning events intercepted by Kube-Agents')">
-          🔍 Intercepted Warnings
-        </div>
-        <div class="chip" onclick="sendPrompt('Check GitOps configuration drift against live workloads')">
-          🧭 GitOps Drift
-        </div>
-        <div class="chip" onclick="sendPrompt('Review cluster security posture, RBAC, and workload isolation')">
-          🛡️ Security & RBAC
-        </div>
+        <button type="button" class="chip" data-prompt="Audit cluster health and identify any failing pods">Cluster health</button>
+        <button type="button" class="chip" data-prompt="Summarise the recent Kubernetes warning events on this cluster">Recent warnings</button>
+        <button type="button" class="chip" data-prompt="Check GitOps configuration drift against live workloads">GitOps drift</button>
+        <button type="button" class="chip" data-prompt="Review cluster security posture, RBAC, and workload isolation">Security and RBAC</button>
       </div>
 
       <div class="chat-stream" id="chat-stream">
         <div class="message-row">
-          <div class="avatar avatar-agent">✨</div>
+          <div class="avatar avatar-agent">i</div>
           <div class="message-content">
             <div class="message-header">
-              <span class="message-author">Kube-Agents</span>
-              <span class="source-tag">hermes-gateway</span>
-              <span class="message-time">Now</span>
+              <span class="message-author">Web console</span>
+              <span class="source-tag">web-console</span>
             </div>
             <div class="message-bubble">
-              <p>Welcome to the Kube-Agents Operations Console. I am listening autonomously for Kubernetes warning events on this cluster.</p>
-              <p>You can ask operational questions, request workload diagnoses, or inspect live cluster state without configuring external chat platforms.</p>
+              <p>Messages you send here go to the Platform Agent as turns in a session of their own. Each browser tab gets a new session.</p>
+              <p>A turn that calls tools can take a few minutes. The agent proposes changes as pull requests for you to review.</p>
             </div>
           </div>
         </div>
       </div>
 
       <div class="chat-input-bar">
-        <textarea
-          class="input-box"
-          id="prompt-input"
-          placeholder="Ask Kube-Agents a question, diagnose an incident, or type 'apply'..."
-          rows="1"
-          onkeydown="handleKeyDown(event)"
-        ></textarea>
-        <button class="btn-send" id="btn-send" onclick="submitMessage()">
-          Send
-        </button>
+        <textarea class="input-box" id="prompt-input" rows="1"
+          placeholder="Ask the Platform Agent a question or describe an incident"></textarea>
+        <button type="button" class="btn-send" id="btn-send">Send</button>
       </div>
     </section>
 
-    <!-- Right Column: Live Incident Feed & Status -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <span class="sidebar-title">Live Telemetry</span>
-        <span class="source-tag" id="last-refresh">Syncing...</span>
-      </div>
-      <div class="tabs">
-        <button class="tab-btn active" id="tab-incidents" onclick="switchTab('incidents')">Intercepted Events</button>
-        <button class="tab-btn" id="tab-tasks" onclick="switchTab('tasks')">Triage Cards</button>
+        <span class="sidebar-title">Recent agent sessions</span>
+        <span class="source-tag" id="last-refresh">Loading&hellip;</span>
       </div>
       <div class="sidebar-content" id="sidebar-list">
-        <div class="empty-state">
-          <div class="empty-icon">🌱</div>
-          <div>No active cluster incidents. Cluster is operating normally.</div>
-        </div>
+        <div class="empty-state"><div>Loading sessions&hellip;</div></div>
       </div>
     </aside>
   </main>
 
   <script>
-    let currentSessionId = "";
-    let activeTab = "incidents";
+    const CONSOLE_HEADER = "X-Kube-Agents-Console";
+    const SESSION_KEY = "kube-agents-web-console-session";
+    const STATUS_POLL_MS = 15000;
+    const SESSIONS_POLL_MS = 15000;
 
-    function formatTime(isoStr) {
-      if (!isoStr) return new Date().toLocaleTimeString();
-      try {
-        const d = new Date(isoStr);
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      } catch (e) {
-        return isoStr;
-      }
-    }
+    let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
+    let turnInFlight = false;
 
     function escapeHtml(text) {
       const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-      return text.replace(/[&<>"']/g, m => map[m]);
+      return String(text).replace(/[&<>"']/g, m => map[m]);
     }
 
+    function formatEpoch(seconds) {
+      if (typeof seconds !== "number") return "";
+      return new Date(seconds * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    // Inline formatting for text outside code fences.
+    function renderInline(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+      html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+      return html.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join("");
+    }
+
+    // Splits on ``` fences first, so code keeps its blank lines and is never
+    // run through the inline rules; the info string after the opening fence
+    // (```yaml) is dropped rather than rendered as the first line.
     function renderMarkdown(text) {
       if (!text) return "";
-      let html = escapeHtml(text);
-      // Code blocks
-      html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
-      // Inline code
-      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-      // Bold
-      html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-      // Linebreaks
-      html = html.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>');
-      return `<p>${html}</p>`;
+      const parts = text.split(/```/);
+      let html = "";
+      parts.forEach((part, i) => {
+        if (i % 2 === 1) {
+          const body = part.replace(/^[^\n]*\n/, "");
+          html += `<pre><code>${escapeHtml(body.replace(/\n$/, ""))}</code></pre>`;
+        } else if (part.trim()) {
+          html += renderInline(part.trim());
+        }
+      });
+      return html;
     }
 
-    function appendMessage(role, text, source, thinking) {
+    function appendMessage(role, text, tag) {
       const stream = document.getElementById("chat-stream");
       const row = document.createElement("div");
       row.className = "message-row";
-
       const isAgent = role === "agent";
-      const avatarClass = isAgent ? "avatar-agent" : "avatar-user";
-      const avatarIcon = isAgent ? "✨" : "👤";
-      const author = isAgent ? "Kube-Agents" : "Operator";
       const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-      let thinkingHtml = "";
-      if (thinking) {
-        thinkingHtml = `
-          <details class="thinking-card">
-            <summary>Thinking trace (${escapeHtml(source || "Gemini")})</summary>
-            <div class="thinking-body">${escapeHtml(thinking)}</div>
-          </details>
-        `;
-      }
-
       row.innerHTML = `
-        <div class="avatar ${avatarClass}">${avatarIcon}</div>
+        <div class="avatar ${isAgent ? "avatar-agent" : "avatar-user"}">${isAgent ? "A" : "Y"}</div>
         <div class="message-content">
           <div class="message-header">
-            <span class="message-author">${author}</span>
-            <span class="source-tag">${escapeHtml(source || (isAgent ? "hermes" : "web-console"))}</span>
+            <span class="message-author">${isAgent ? "Platform Agent" : "You"}</span>
+            ${tag ? `<span class="source-tag">${escapeHtml(tag)}</span>` : ""}
             <span class="message-time">${timeStr}</span>
           </div>
-          ${thinkingHtml}
           <div class="message-bubble">${renderMarkdown(text)}</div>
-        </div>
-      `;
-
+        </div>`;
       stream.appendChild(row);
       stream.scrollTop = stream.scrollHeight;
+      return row;
     }
 
-    async function submitMessage() {
-      const input = document.getElementById("prompt-input");
-      const text = input.value.trim();
+    function setBusy(busy) {
+      turnInFlight = busy;
+      document.getElementById("btn-send").disabled = busy;
+      document.querySelectorAll(".chip").forEach(c => { c.disabled = busy; });
+    }
+
+    // Reads a response body that may not be JSON (a proxy error page, a
+    // port-forward that dropped) without reporting it as a network failure.
+    async function readBody(resp) {
+      const text = await resp.text();
+      try { return JSON.parse(text); } catch (e) { return { detail: text.trim() || resp.statusText }; }
+    }
+
+    async function submitMessage(text) {
+      if (turnInFlight) return;
+      text = (text || "").trim();
       if (!text) return;
-
-      appendMessage("user", text, "operator");
-      input.value = "";
-      input.style.height = "auto";
-
-      const btn = document.getElementById("btn-send");
-      btn.disabled = true;
-
+      appendMessage("user", text);
+      setBusy(true);
+      const pending = appendMessage("agent", "Working on it…", "pending");
       try {
         const resp = await fetch("/api/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", [CONSOLE_HEADER]: "1" },
           body: JSON.stringify({ message: text, session_id: currentSessionId })
         });
-        const data = await resp.json();
-        if (data.session_id) currentSessionId = data.session_id;
-
+        const data = await readBody(resp);
+        if (data.session_id) {
+          currentSessionId = data.session_id;
+          sessionStorage.setItem(SESSION_KEY, currentSessionId);
+        }
+        pending.remove();
         if (resp.ok) {
-          appendMessage("agent", data.reply, data.source, data.thinking);
+          appendMessage("agent", data.reply || "(The agent returned an empty reply.)");
         } else {
-          appendMessage("agent", "⚠️ " + (data.reply || data.error || "Request failed"), "error");
+          appendMessage("agent", `Request failed (HTTP ${resp.status}): ${data.detail || data.error || "no detail"}`, "error");
         }
       } catch (err) {
-        appendMessage("agent", "⚠️ Network error connecting to agent gateway: " + err.message, "error");
+        pending.remove();
+        appendMessage("agent", "Could not reach the web console. Is the port-forward still running? " + err.message, "error");
       } finally {
-        btn.disabled = false;
+        setBusy(false);
+        fetchSessions();
       }
     }
 
-    function sendPrompt(text) {
+    function sendFromInput() {
       const input = document.getElementById("prompt-input");
-      input.value = text;
-      submitMessage();
+      if (turnInFlight) return;
+      const text = input.value;
+      input.value = "";
+      submitMessage(text);
     }
 
-    function handleKeyDown(e) {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        submitMessage();
-      }
+    function renderSessionsError(message) {
+      document.getElementById("last-refresh").innerText = "Error";
+      document.getElementById("sidebar-list").innerHTML =
+        `<div class="empty-state"><div>Could not load sessions.</div><div>${escapeHtml(message)}</div></div>`;
     }
 
-    function switchTab(tab) {
-      activeTab = tab;
-      document.getElementById("tab-incidents").className = tab === "incidents" ? "tab-btn active" : "tab-btn";
-      document.getElementById("tab-tasks").className = tab === "tasks" ? "tab-btn active" : "tab-btn";
-      fetchSidebarData();
-    }
-
-    async function fetchSidebarData() {
+    async function fetchSessions() {
+      let resp, data;
       try {
-        const url = activeTab === "incidents" ? "/api/incidents" : "/api/tasks";
-        const resp = await fetch(url);
-        if (!resp.ok) return;
-        const data = await resp.json();
-        const list = document.getElementById("sidebar-list");
-        document.getElementById("last-refresh").innerText = new Date().toLocaleTimeString();
-
-        const items = data.incidents || data.tasks || [];
-        if (items.length === 0) {
-          list.innerHTML = `
-            <div class="empty-state">
-              <div class="empty-icon">🌱</div>
-              <div>No ${activeTab === 'incidents' ? 'warning events' : 'triage cards'} on record.</div>
-            </div>
-          `;
-          return;
-        }
-
-        let html = "";
-        for (const item of items) {
-          if (activeTab === "incidents") {
-            const sevClass = item.severity === "Critical" ? "badge-red" : "badge-amber";
-            html += `
-              <div class="incident-card">
-                <div class="incident-top">
-                  <div class="incident-reason">${escapeHtml(item.reason || "Warning")}</div>
-                  <span class="badge ${sevClass}">${escapeHtml(item.severity || "Warning")}</span>
-                </div>
-                <div class="incident-target">${escapeHtml(item.namespace || "default")}/${escapeHtml(item.workload || item.name || "workload")}</div>
-                ${item.message ? `<div class="incident-msg">${escapeHtml(item.message)}</div>` : ""}
-                <div class="incident-meta">
-                  <span>Occurrences: ${item.occurrences || 1}</span>
-                  <span>${formatTime(item.created_at)}</span>
-                </div>
-              </div>
-            `;
-          } else {
-            const statusClass = item.status === "completed" ? "badge-green" : "badge-amber";
-            html += `
-              <div class="incident-card">
-                <div class="incident-top">
-                  <div class="incident-reason">${escapeHtml(item.title || "Triage Task")}</div>
-                  <span class="badge ${statusClass}">${escapeHtml(item.status || "active")}</span>
-                </div>
-                <div class="incident-target">Assignee: ${escapeHtml(item.assignee || "platform")}</div>
-                ${item.summary ? `<div class="incident-msg">${escapeHtml(item.summary)}</div>` : ""}
-                <div class="incident-meta">
-                  <span>ID: ${escapeHtml(String(item.id || ""))}</span>
-                  <span>${formatTime(item.completed_at || item.created_at)}</span>
-                </div>
-              </div>
-            `;
-          }
-        }
-        list.innerHTML = html;
+        resp = await fetch("/api/sessions/recent");
+        data = await readBody(resp);
       } catch (e) {
-        console.error("Telemetry sync error:", e);
+        renderSessionsError(e.message);
+        return;
       }
+      if (!resp.ok) {
+        renderSessionsError(data.detail || `HTTP ${resp.status}`);
+        return;
+      }
+      document.getElementById("last-refresh").innerText = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const list = document.getElementById("sidebar-list");
+      const sessions = data.sessions || [];
+      if (sessions.length === 0) {
+        list.innerHTML = `<div class="empty-state"><div>No agent sessions recorded yet.</div></div>`;
+        return;
+      }
+      list.innerHTML = sessions.map(s => {
+        const isCurrent = s.id === currentSessionId;
+        const kind = isCurrent ? "this tab" : (s.console ? "web console" : (s.source || "agent"));
+        const count = typeof s.message_count === "number" ? `${s.message_count} messages` : "";
+        return `
+          <div class="incident-card">
+            <div class="incident-top">
+              <div class="incident-reason">${escapeHtml(s.title || s.id)}</div>
+              <span class="badge ${isCurrent ? "badge-green" : "badge-grey"}">${escapeHtml(kind)}</span>
+            </div>
+            <div class="incident-meta">
+              <span>${escapeHtml(count)}</span>
+              <span>${escapeHtml(formatEpoch(s.last_active || s.started_at))}</span>
+            </div>
+          </div>`;
+      }).join("");
     }
 
     async function checkStatus() {
+      const badge = document.getElementById("agent-badge");
+      const label = document.getElementById("agent-status-text");
       try {
         const resp = await fetch("/api/status");
-        if (!resp.ok) return;
-        const data = await resp.json();
+        const data = await readBody(resp);
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
         if (data.cluster) {
-          document.getElementById("cluster-tag").innerText = data.cluster;
+          const tag = document.getElementById("cluster-tag");
+          tag.innerText = data.cluster;
+          tag.hidden = false;
         }
-        const agentBadge = document.getElementById("agent-badge");
-        if (data.hermes && data.hermes.healthy) {
-          agentBadge.className = "badge badge-green";
-          document.getElementById("agent-status-text").innerText = "Agent Connected";
+        badge.title = data.agent ? data.agent.detail : "";
+        if (!data.api_key_configured) {
+          badge.className = "badge badge-red";
+          label.innerText = "No agent API key";
+        } else if (data.agent && data.agent.healthy) {
+          badge.className = "badge badge-green";
+          label.innerText = "Agent reachable";
         } else {
-          agentBadge.className = "badge badge-amber";
-          document.getElementById("agent-status-text").innerText = "Agent Initializing";
+          badge.className = "badge badge-amber";
+          label.innerText = "Agent unreachable";
         }
       } catch (e) {
-        console.error("Status check failed:", e);
+        badge.className = "badge badge-red";
+        badge.title = e.message;
+        label.innerText = "Console unreachable";
       }
     }
 
-    // Polling intervals
+    document.getElementById("btn-send").addEventListener("click", sendFromInput);
+    document.getElementById("prompt-input").addEventListener("keydown", e => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendFromInput();
+      }
+    });
+    document.querySelectorAll(".chip").forEach(chip => {
+      chip.addEventListener("click", () => submitMessage(chip.dataset.prompt));
+    });
+
     checkStatus();
-    fetchSidebarData();
-    setInterval(checkStatus, 15000);
-    setInterval(fetchSidebarData, 5000);
+    fetchSessions();
+    setInterval(checkStatus, STATUS_POLL_MS);
+    setInterval(fetchSessions, SESSIONS_POLL_MS);
   </script>
 </body>
 </html>
