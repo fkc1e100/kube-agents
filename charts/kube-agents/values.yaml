@@ -699,7 +699,7 @@ platformAgent:
     # per object UID, so two failing replicas of one Deployment, or a rollout
     # that replaces one failing pod with another, each open a triage session
     # — and with openPullRequest, a pull request each for the same fix. Within
-    # this many seconds of the workload's last delivered event, a further event
+    # this many seconds of the workload's last admitted event, a further event
     # for the same cluster, namespace and workload is recorded as a duplicate
     # and starts no session. 0 or null keeps one incident per object UID.
     incidentTriage:

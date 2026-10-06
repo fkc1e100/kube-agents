@@ -293,7 +293,7 @@ deduplicates on the involved object's UID, so a Deployment whose two replicas fa
 whose rollout replaces one failing pod with another, offers one event per pod. Each becomes a triage
 session, and with `openPullRequest` a pull request for the same fix. With the window set, a further
 Warning event for the same cluster, namespace and workload within that many seconds of the
-workload's last delivered event is written to the event ledger as a duplicate of that row
+workload's last admitted event is written to the event ledger as a duplicate of that row
 (`status: duplicate`, `duplicate_of` on `GET /v1/intercepted-events`), answered to the watcher as
 filtered, and starts no session. Only a delivered event anchors the window: an event the daily
 ceiling refused does not silence the next. Pick a window longer than the gap between sibling pods'

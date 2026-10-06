@@ -143,8 +143,10 @@ TRIAGE_FALLBACK_CLUSTER = "platform-agent-host"
 # fail, or whose rollout replaces a failing pod with another failing pod,
 # offers one event per pod — and with `openPullRequest` on, each of those is a
 # triage session, a diagnosis, and a pull request for the same fix. Within this
-# many seconds of a workload's last delivered event, a further event for the
-# same cluster, namespace and workload is recorded in the ledger as a
+# many seconds of a workload's last admitted event (one the inject route
+# answered "injected", whether or not its chat post then went through), a
+# further event for the same cluster, namespace and workload is recorded in
+# the ledger as a
 # duplicate of that row (`duplicate_of`), answered to the watcher as filtered,
 # and starts no session. 0, the default, keeps today's one-incident-per-UID
 # behaviour. The operator sets it from
@@ -873,13 +875,22 @@ def _workload_dedup_seconds() -> int:
 
 
 def _recent_delivered_event(cluster: str, namespace: str, workload: str, window_seconds: int) -> Optional[int]:
-    """The newest delivered ledger row for this workload inside the window, or None.
+    """The newest admitted ledger row for this workload inside the window, or None.
 
-    Delivered means `notified = 1` with no `delivery_error`: a row the inject
-    route answered "injected" and whose session the agent is working. A row
-    the ceiling suppressed, the severity gate filtered, or the window already
-    folded does not anchor a window of its own — otherwise a workload whose
-    first event was refused would silence its second.
+    Admitted means the inject route answered "injected" and started the
+    triage turn: `notified = 1`, or `notified = 0` with a `delivery_error`.
+    The second form is a row :func:`mark_delivery_failed` corrected because
+    the chat post failed — and the chat post is the only thing that failed;
+    `trigger_agent_troubleshooter` goes on to create the gateway session and
+    run the turn, so the agent is working that incident whether or not chat
+    heard of it. An install with no chat platform reaches that branch on
+    every admitted row, within seconds of the insert, so a window keyed on
+    `notified` alone had nothing to anchor on exactly where it was wanted.
+
+    A row the ceiling suppressed, the severity gate filtered, or the window
+    already folded has neither mark and does not anchor a window of its own
+    — otherwise a workload whose first event was refused would silence its
+    second.
 
     Keyed on cluster, namespace and the cleaned workload name rather than on
     the reason: kubelet reports one failing pod under several reasons as it
@@ -900,7 +911,7 @@ def _recent_delivered_event(cluster: str, namespace: str, workload: str, window_
             row = conn.execute(
                 "SELECT id FROM intercepted_events "
                 "WHERE cluster = ? AND namespace = ? AND workload = ? "
-                "AND notified = 1 AND delivery_error = '' "
+                "AND (notified = 1 OR delivery_error != '') "
                 "AND created_at >= datetime('now', ?) "
                 "ORDER BY id DESC LIMIT 1",
                 (cluster, namespace, workload, f"-{int(window_seconds)} seconds"),
