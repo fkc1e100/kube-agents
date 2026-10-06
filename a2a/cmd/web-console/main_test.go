@@ -143,7 +143,19 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "session_id": sid, "data": f.messages[sid]})
+		// Same paging as Hermes with order=latest: offset counts back from
+		// the newest message, and the page comes back oldest first.
+		all := f.messages[sid]
+		limit, offset := len(all), 0
+		if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
+			limit = v
+		}
+		if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil {
+			offset = v
+		}
+		end := max(len(all)-offset, 0)
+		page := all[max(end-limit, 0):end]
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "session_id": sid, "data": page})
 	default:
 		hermesError(w, http.StatusNotFound, "no route")
 	}
@@ -453,7 +465,7 @@ func TestMessagesReturnsADelegatedResultAfterTheTurnsReply(t *testing.T) {
 	if first.LatestID != first.Messages[1].ID {
 		t.Errorf("latest_id = %d, want the reply's ID %d", first.LatestID, first.Messages[1].ID)
 	}
-	if fake.lastQuery != "order=latest&limit=50" {
+	if fake.lastQuery != "order=latest&limit=50&offset=0" {
 		t.Errorf("upstream query = %q, want the newest page", fake.lastQuery)
 	}
 
@@ -470,6 +482,28 @@ func TestMessagesReturnsADelegatedResultAfterTheTurnsReply(t *testing.T) {
 	idle := decode[sessionMessagesResponse](t, serve(h, messagesReq(turn.SessionID, strconv.FormatInt(next.LatestID, 10))))
 	if len(idle.Messages) != 0 || idle.LatestID != next.LatestID {
 		t.Errorf("poll with nothing new = %+v, want no messages and the same mark", idle)
+	}
+}
+
+func TestMessagesPagesBackPastALongTurnToTheMark(t *testing.T) {
+	fake, h := setup(t)
+	turn := decode[chatResponse](t, serve(h, chatReq(`{"message":"audit the fleet"}`)))
+	mark := decode[sessionMessagesResponse](t, serve(h, messagesReq(turn.SessionID, ""))).LatestID
+
+	// A result lands, then a tool-heavy turn writes more rows than one page.
+	resultID := fake.deliver(turn.SessionID, "audit finished: 2 findings")
+	fake.mu.Lock()
+	for i := 0; i < 3*messagesPageLimit; i++ {
+		fake.post(turn.SessionID, "tool", "pod list")
+	}
+	fake.mu.Unlock()
+
+	got := decode[sessionMessagesResponse](t, serve(h, messagesReq(turn.SessionID, strconv.FormatInt(mark, 10))))
+	if len(got.Messages) != 2 || got.Messages[1].ID != resultID {
+		t.Fatalf("poll = %+v, want the result written before the long turn", got.Messages)
+	}
+	if got.LatestID <= resultID {
+		t.Errorf("latest_id = %d, want past the turn's rows", got.LatestID)
 	}
 }
 

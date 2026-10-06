@@ -60,7 +60,8 @@ spec:
       containers:
         - name: web-console
           image: {{ printf "%s:%s" $repo $tag | quote }}
-          imagePullPolicy: {{ .Values.webConsole.image.pullPolicy | default "IfNotPresent" }}
+          {{- /* A cached `latest` never picks up a new build, so pull it every time. */}}
+          imagePullPolicy: {{ .Values.webConsole.image.pullPolicy | default (ternary "Always" "IfNotPresent" (eq $tag "latest")) }}
           ports:
             - name: http
               containerPort: 8080

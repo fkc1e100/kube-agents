@@ -22,7 +22,7 @@ limitations under the License.
 // the browser. The console has no login of its own. Its access boundary is the
 // one the chart builds around it: a ClusterIP Service, a deny-all ingress
 // NetworkPolicy, and therefore `kubectl port-forward`, which needs
-// pods/portforward on the namespace. Two checks in this file keep that
+// pods/portforward on the namespace. Three checks in this file keep that
 // boundary from being bypassed through the operator's own browser:
 //
 //   - every route but /healthz refuses a Host header that is not loopback,
@@ -107,10 +107,13 @@ const (
 	maxUpstreamBodyBytes = 8 << 20
 
 	recentSessionsLimit = 20
-	// messagesPageLimit is how many of a session's newest messages one poll
-	// reads. A poll runs every few seconds, so a page this size covers every
-	// message written between two polls with a wide margin.
+	// messagesPageLimit is how many messages one Hermes page holds. A poll
+	// pages back from the newest message until it reaches the page's mark.
 	messagesPageLimit = 50
+	// messagesMaxPages caps how far back one poll pages. A turn writes about
+	// two rows per tool call, so this covers a turn of a few hundred tool
+	// calls; anything older than that is skipped, not shown.
+	messagesMaxPages = 10
 	// roleAssistant and roleUser are the Hermes message roles a poll returns.
 	// The page shows assistant messages; it reads user messages only to find
 	// where its own turn starts, so it can tell the turn's working messages
@@ -383,35 +386,25 @@ func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), messagesTimeout)
 	defer cancel()
-	path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d", url.PathEscape(sid), messagesPageLimit)
-	resp, err := s.hermes(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "agent_unreachable", "Could not reach the agent gateway: "+err.Error())
-		return
-	}
-	defer drainAndClose(resp)
-	if resp.StatusCode == http.StatusNotFound {
-		writeError(w, http.StatusNotFound, "session_not_found", "The agent has no record of this session.")
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		writeError(w, http.StatusBadGateway, "agent_error", upstreamErrorDetail(resp))
-		return
-	}
-	var listed struct {
-		Data []struct {
-			ID        int64    `json:"id"`
-			Role      string   `json:"role"`
-			Content   *string  `json:"content"`
-			Timestamp *float64 `json:"timestamp"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(&listed); err != nil {
-		writeError(w, http.StatusBadGateway, "agent_bad_response", "Agent gateway returned unreadable messages.")
-		return
+	// Pages back from the newest message until a page reaches ?after= or the
+	// session runs out. A long turn writes many tool rows, so one page can
+	// stop short of the mark.
+	var rows []hermesMessage
+	for page := 0; page < messagesMaxPages; page++ {
+		path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=%d",
+			url.PathEscape(sid), messagesPageLimit, page*messagesPageLimit)
+		listed, failure := s.fetchMessagesPage(ctx, path)
+		if failure != nil {
+			writeError(w, failure.status, failure.code, failure.message)
+			return
+		}
+		rows = append(listed, rows...)
+		if len(listed) < messagesPageLimit || listed[0].ID <= after {
+			break
+		}
 	}
 	out := sessionMessagesResponse{SessionID: sid, LatestID: after, Messages: []sessionMessage{}}
-	for _, m := range listed.Data {
+	for _, m := range rows {
 		if m.ID > out.LatestID {
 			out.LatestID = m.ID
 		}
@@ -421,6 +414,43 @@ func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 		out.Messages = append(out.Messages, sessionMessage{ID: m.ID, Role: m.Role, Content: *m.Content, Timestamp: m.Timestamp})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// hermesMessage is one row of Hermes' session messages list.
+type hermesMessage struct {
+	ID        int64    `json:"id"`
+	Role      string   `json:"role"`
+	Content   *string  `json:"content"`
+	Timestamp *float64 `json:"timestamp"`
+}
+
+// upstreamFailure is an error response to send when a Hermes call fails.
+type upstreamFailure struct {
+	status  int
+	code    string
+	message string
+}
+
+// fetchMessagesPage reads one page of a session's messages, oldest first.
+func (s *server) fetchMessagesPage(ctx context.Context, path string) ([]hermesMessage, *upstreamFailure) {
+	resp, err := s.hermes(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, &upstreamFailure{http.StatusBadGateway, "agent_unreachable", "Could not reach the agent gateway: " + err.Error()}
+	}
+	defer drainAndClose(resp)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &upstreamFailure{http.StatusNotFound, "session_not_found", "The agent has no record of this session."}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &upstreamFailure{http.StatusBadGateway, "agent_error", upstreamErrorDetail(resp)}
+	}
+	var listed struct {
+		Data []hermesMessage `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(&listed); err != nil {
+		return nil, &upstreamFailure{http.StatusBadGateway, "agent_bad_response", "Agent gateway returned unreadable messages."}
+	}
+	return listed.Data, nil
 }
 
 type chatRequest struct {

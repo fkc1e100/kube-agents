@@ -1111,7 +1111,7 @@
             },
             "pullPolicy": {
               "type": "string",
-              "enum": ["Always", "IfNotPresent", "Never"]
+              "enum": ["", "Always", "IfNotPresent", "Never"]
             }
           }
         },
