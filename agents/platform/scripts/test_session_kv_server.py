@@ -5412,7 +5412,6 @@ class TestDriftInject(unittest.TestCase):
         self.assertIn(f'injectKindDrift = "{session_kv_server.INJECT_KIND_DRIFT}"', source)
 
 
-
 class TestStallInject(unittest.TestCase):
     """The `controller-stall` half of /sessions/{id}/inject."""
 
@@ -5662,6 +5661,10 @@ class TestStallInject(unittest.TestCase):
 
 class TestReadOnlyActivityFeed(unittest.TestCase):
     """Read-only HTTP activity feed for intercepted events and kanban tasks."""
+=======
+class TestTaskWorkerStepsFeed(unittest.TestCase):
+    """`GET /v1/tasks/{id}` returns the worker's live Hermes steps from `state.db`."""
+>>>>>>> 1098806f (feat(session-kv): include worker Hermes steps in GET /v1/tasks/{id})
 
     def setUp(self):
         import sqlite3
@@ -5672,6 +5675,7 @@ class TestReadOnlyActivityFeed(unittest.TestCase):
         self.root = Path(self._tmpdir.name)
         self.kanban_path = self.root / "kanban.db"
 
+<<<<<<< HEAD
         with sqlite3.connect(temp_db_path) as conn:
             conn.execute("DELETE FROM intercepted_events")
             conn.execute("DELETE FROM alert_quota")
@@ -5700,6 +5704,8 @@ class TestReadOnlyActivityFeed(unittest.TestCase):
     def _create_kanban_schema(self):
         import sqlite3
 
+=======
+>>>>>>> 1098806f (feat(session-kv): include worker Hermes steps in GET /v1/tasks/{id})
         with sqlite3.connect(self.kanban_path) as conn:
             conn.executescript(
                 """
@@ -5747,6 +5753,7 @@ class TestReadOnlyActivityFeed(unittest.TestCase):
                 );
                 """
             )
+<<<<<<< HEAD
 
     @patch.object(session_kv_server, "trigger_agent_troubleshooter")
     def test_intercepted_events_feed_returns_statuses_and_paginates_by_since_id(self, _mock_trigger):
@@ -6182,6 +6189,160 @@ class TestReadOnlyActivityFeed(unittest.TestCase):
                     "/custom/home/kanban.db",
                 )
 
+
+class TestTaskWorkerStepsFeed(unittest.TestCase):
+    """`GET /v1/tasks/{id}` returns the worker's live Hermes steps from `state.db`."""
+
+    def setUp(self):
+        import sqlite3
+        from fastapi.testclient import TestClient
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.root = Path(self._tmpdir.name)
+        self.kanban_path = self.root / "kanban.db"
+
+        with sqlite3.connect(self.kanban_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    body TEXT,
+                    assignee TEXT,
+                    status TEXT,
+                    priority INTEGER,
+                    session_id TEXT,
+                    created_at REAL,
+                    started_at REAL,
+                    completed_at REAL,
+                    last_heartbeat_at REAL,
+                    result TEXT,
+                    last_failure_error TEXT
+                );
+                CREATE TABLE task_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    profile TEXT,
+                    status TEXT,
+                    started_at REAL,
+                    ended_at REAL,
+                    outcome TEXT,
+                    summary TEXT,
+                    error TEXT,
+                    metadata TEXT
+                );
+                CREATE TABLE task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    run_id INTEGER,
+                    kind TEXT,
+                    payload TEXT,
+                    created_at REAL
+                );
+                CREATE TABLE task_comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    author TEXT,
+                    body TEXT,
+                    created_at REAL
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, title, body, assignee, status, priority, session_id, created_at) "
+                "VALUES ('t_d1c3323e', 'Open GitOps PR', 'body', 'platform', 'running', 1, 'k8s-evt-1', 100.0)"
+            )
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, metadata) "
+                "VALUES ('t_d1c3323e', 'platform', 'running', 101.0, '{}')"
+            )
+
+        patcher = patch.object(session_kv_server, "KANBAN_DB_PATH", str(self.kanban_path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        os.environ["SESSION_KV_API_KEY"] = API_KEY
+        self.addCleanup(lambda: os.environ.pop("SESSION_KV_API_KEY", None))
+        self.client = TestClient(session_kv_server.app, headers=AUTH_HEADERS)
+
+    def _write_profile_store(self, profile: str, rows: list[tuple]):
+        import sqlite3
+
+        db_path = self.root / "profiles" / profile / "state.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE messages ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
+                "content TEXT, tool_name TEXT, tool_calls TEXT, timestamp REAL, "
+                "reasoning TEXT, active INTEGER DEFAULT 1)"
+            )
+            for sid, role, content, tool_name, tool_calls, ts, reasoning in rows:
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, tool_name, tool_calls, timestamp, reasoning) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        sid,
+                        role,
+                        content,
+                        tool_name,
+                        json.dumps(tool_calls) if tool_calls is not None else None,
+                        ts,
+                        reasoning,
+                    ),
+                )
+
+    def test_worker_steps_are_matched_by_dispatcher_prompt_and_returned_in_order(self):
+        long_output = "diff --git a/deployment.yaml b/deployment.yaml\n" + ("+line\n" * 80)
+        self._write_profile_store(
+            "platform",
+            [
+                ("sess-other", "user", "work kanban task t_d1c3323e_other", None, None, 90.0, None),
+                (
+                    "sess-other",
+                    "assistant",
+                    None,
+                    None,
+                    [{"function": {"name": "terminal", "arguments": '{"command":"wrong"}'}}],
+                    91.0,
+                    None,
+                ),
+                ("sess-worker", "user", "work kanban task t_d1c3323e", None, None, 101.0, None),
+                (
+                    "sess-worker",
+                    "assistant",
+                    None,
+                    None,
+                    [{"function": {"name": "terminal", "arguments": '{"command":"submit_suggestion.py prepare"}'}}],
+                    102.0,
+                    "Checking the triage options and preparing the suggestion branch.",
+                ),
+                ("sess-worker", "tool", long_output, "terminal", None, 103.0, None),
+                ("sess-worker", "assistant", "Opened Pull Request #1.", None, None, 104.0, None),
+            ],
+        )
+
+        resp = self.client.get("/v1/tasks/t_d1c3323e")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["steps_truncated"])
+        steps = body["steps"]
+        self.assertEqual([s["kind"] for s in steps], ["thinking", "tool_call", "tool_result", "reply"])
+        self.assertEqual(steps[0]["preview"], "Checking the triage options and preparing the suggestion branch.")
+        self.assertEqual(steps[1]["tool"], "terminal")
+        self.assertIn("submit_suggestion.py prepare", steps[1]["preview"])
+        self.assertEqual(steps[2]["tool"], "terminal")
+        self.assertTrue(steps[2]["preview"].endswith("…"))
+        self.assertIn("+line", steps[2]["detail"])
+        self.assertEqual(steps[3]["preview"], "Opened Pull Request #1.")
+
+    def test_missing_profile_store_returns_empty_steps_without_failing(self):
+        resp = self.client.get("/v1/tasks/t_d1c3323e")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["steps"], [])
+        self.assertFalse(body["steps_truncated"])
 
 
 if __name__ == "__main__":
