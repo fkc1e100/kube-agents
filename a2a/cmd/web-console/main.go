@@ -461,6 +461,8 @@ type chatRequest struct {
 type chatResponse struct {
 	SessionID string `json:"session_id"`
 	Reply     string `json:"reply"`
+	BeforeID  int64  `json:"before_id,omitempty"`
+	ReplyID   int64  `json:"reply_id,omitempty"`
 }
 
 func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -486,6 +488,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_session_id", "Session ID was not issued by this console.")
 		return
 	}
+	created := false
 	if sid == "" {
 		var err error
 		if sid, err = newSessionID(); err != nil {
@@ -496,6 +499,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "session_create_failed", err.Error())
 			return
 		}
+		created = true
 	}
 
 	if !s.claim(sid) {
@@ -504,12 +508,18 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(sid)
 
+	var beforeID int64
+	if !created {
+		beforeID = s.latestMessageID(r.Context(), sid)
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
 	defer cancel()
 	reply, err := s.runTurn(ctx, sid, msg)
 	if errors.Is(err, errSessionNotFound) {
 		// The agent pod's session store does not have this ID, for instance
 		// after the pod was replaced. Recreate it and run the turn once more.
+		beforeID = 0
 		if err = s.createSession(ctx, sid); err == nil {
 			reply, err = s.runTurn(ctx, sid, msg)
 		}
@@ -528,7 +538,21 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, chatResponse{SessionID: sid, Reply: reply})
+	replyID := s.latestMessageID(r.Context(), sid)
+	writeJSON(w, http.StatusOK, chatResponse{SessionID: sid, Reply: reply, BeforeID: beforeID, ReplyID: replyID})
+}
+
+// latestMessageID reads the session's newest message row ID, or 0 when the
+// session is empty or the read fails.
+func (s *server) latestMessageID(parent context.Context, sid string) int64 {
+	ctx, cancel := context.WithTimeout(parent, messagesTimeout)
+	defer cancel()
+	path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=1&offset=0", url.PathEscape(sid))
+	listed, failure := s.fetchMessagesPage(ctx, path)
+	if failure != nil || len(listed) == 0 {
+		return 0
+	}
+	return listed[len(listed)-1].ID
 }
 
 func (s *server) claim(sid string) bool {

@@ -22,12 +22,16 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import unittest
 from pathlib import Path
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from tests.testing.release import parse_required_release_images
 CHART_DIR = REPO_ROOT / "charts" / "kube-agents"
 TEMPLATE = CHART_DIR / "templates" / "web-console.yaml"
 HELPERS = CHART_DIR / "templates" / "_helpers.tpl"
@@ -82,11 +86,17 @@ class WebConsoleChartTest(unittest.TestCase):
         spec = policy["spec"]
         self.assertIn("Ingress", spec["policyTypes"])
         self.assertEqual(spec.get("ingress"), [], "the policy admits some ingress")
-        deployment_labels = re.search(
-            r"selector:\s*\n\s*matchLabels:\s*\n((?:\s+\S+: .*\n)+)", self.docs["Deployment"]
-        ).group(1)
-        for key in spec["podSelector"]["matchLabels"]:
-            self.assertIn(key, deployment_labels, f"policy selects on {key}, which the Deployment does not carry")
+        deployment = yaml.safe_load(_plain_yaml(self.docs["Deployment"]))
+        self.assertEqual(
+            spec["podSelector"]["matchLabels"],
+            deployment["spec"]["selector"]["matchLabels"],
+            "policy podSelector.matchLabels does not equal Deployment selector.matchLabels",
+        )
+        self.assertEqual(
+            spec["podSelector"]["matchLabels"]["app.kubernetes.io/name"],
+            deployment["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name"),
+        )
+        self.assertIn('{{- include "kube-agents.labels" . | nindent 8 }}', self.docs["Deployment"])
 
     def test_console_reaches_only_the_agent_gateway(self) -> None:
         deployment = self.docs["Deployment"]
@@ -101,7 +111,10 @@ class WebConsoleChartTest(unittest.TestCase):
         self.assertRegex(self.docs["Deployment"], r"(?m)^\s+replicas: 1$")
 
     def test_quota_preflight_counts_the_console(self) -> None:
-        self.assertRegex(HELPERS.read_text(), r'(?s)if \.Values\.webConsole\.enabled.*?append \$chartWorkloads')
+        self.assertRegex(
+            HELPERS.read_text(),
+            r'(?s)if \.Values\.webConsole\.enabled -\}\}(?:(?!\{\{- end).)*append \$chartWorkloads \(dict "values" \.Values\.webConsole ',
+        )
 
     def test_off_by_default(self) -> None:
         values = yaml.safe_load(VALUES.read_text())
@@ -120,7 +133,9 @@ class WebConsoleChartTest(unittest.TestCase):
         self.assertFalse((CHART_DIR / "values-poc.yaml").exists(), "values-poc.yaml bypasses install.sh")
 
     def test_latest_tag_is_pulled_every_time(self) -> None:
-        # A node that cached `latest` never picks up a new build under IfNotPresent.
+        # A node that cached `latest` never picks up a new build under IfNotPresent,
+        # and an integer tag must be cast to string before `eq $tag "latest"`.
+        self.assertIn('| default .Chart.AppVersion | toString }}', self.template)
         self.assertIn('(ternary "Always" "IfNotPresent" (eq $tag "latest"))', self.template)
         self.assertEqual(yaml.safe_load(VALUES.read_text())["webConsole"]["image"]["pullPolicy"], "")
 
@@ -144,7 +159,7 @@ class WebConsoleImageTest(unittest.TestCase):
         self.assertEqual(values["webConsole"]["image"]["repository"], entry["repository"])
 
     def test_release_requires_the_image(self) -> None:
-        self.assertRegex(RELEASE_COMMON.read_text(), rf'(?m)^\s+"{IMAGE_NAME}"$')
+        self.assertIn(IMAGE_NAME, parse_required_release_images(RELEASE_COMMON.read_text()))
 
     def test_publish_workflow_builds_and_signs_it(self) -> None:
         workflow = PUBLISH_WORKFLOW.read_text()

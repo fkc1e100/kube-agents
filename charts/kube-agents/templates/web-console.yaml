@@ -21,7 +21,7 @@ which sessions have a turn in flight in memory.
 {{- $agentName := .Values.platformAgent.name | default "platform-agent" }}
 {{- $secretName := .Values.platformAgent.credentials.secretName | default "platform-agent-secrets" }}
 {{- /* Same tag resolution as the plugin images: an install pinned to an agent image of one commit gets the console of that commit. */ -}}
-{{- $tag := .Values.webConsole.image.tag | default .Values.platformAgent.deployment.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.webConsole.image.tag | default .Values.platformAgent.deployment.image.tag | default .Chart.AppVersion | toString }}
 {{- $repo := include "kube-agents.imageRepository" (dict "repository" .Values.webConsole.image.repository "registry" (include "kube-agents.imageRegistry" .)) }}
 apiVersion: apps/v1
 kind: Deployment
@@ -42,7 +42,6 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: web-console
-        app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: web-console
         {{- include "kube-agents.labels" . | nindent 8 }}
     spec:

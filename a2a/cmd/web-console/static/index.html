@@ -353,7 +353,7 @@
       cursor: not-allowed;
     }
 
-    /* Right Column: Live Incidents & Telemetry */
+    /* Right Column: Recent Agent Sessions */
     .sidebar {
       background: var(--bg-page);
       display: flex;
@@ -379,7 +379,6 @@
       letter-spacing: 0.5px;
     }
 
-
     .sidebar-content {
       flex: 1;
       overflow-y: auto;
@@ -389,7 +388,7 @@
       gap: 12px;
     }
 
-    .incident-card {
+    .session-card {
       background: var(--bg-surface);
       border: 1px solid var(--border-color);
       border-radius: 8px;
@@ -400,41 +399,23 @@
       transition: box-shadow 0.15s ease;
     }
 
-    .incident-card:hover {
+    .session-card:hover {
       box-shadow: 0 1px 4px rgba(60,64,67,0.12);
     }
 
-    .incident-top {
+    .session-top {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
     }
 
-    .incident-reason {
+    .session-title {
       font-size: 13px;
       font-weight: 700;
       color: var(--text-primary);
     }
 
-    .incident-target {
-      font-size: 11.5px;
-      font-family: var(--font-mono);
-      color: var(--text-secondary);
-    }
-
-    .incident-msg {
-      font-size: 12px;
-      color: var(--text-secondary);
-      line-height: 1.4;
-      background: #f8f9fa;
-      padding: 6px 8px;
-      border-radius: 4px;
-      font-family: var(--font-mono);
-      max-height: 80px;
-      overflow-y: auto;
-    }
-
-    .incident-meta {
+    .session-meta {
       display: flex;
       justify-content: space-between;
       font-size: 10.5px;
@@ -451,10 +432,6 @@
       text-align: center;
       gap: 8px;
       font-size: 13px;
-    }
-
-    .empty-icon {
-      font-size: 28px;
     }
   </style>
 </head>
@@ -600,30 +577,51 @@
     // messages above the mark: results that landed before this turn started
     // (shown), the turn itself from the typed message to its reply (already
     // on screen, so only marked), and results that landed after the reply
-    // (shown).
-    async function settleAfterReply(typed, reply) {
+    // (shown). Even when the follow-up fetch fails, replyId from the turn
+    // response moves the mark past the reply so the next poll never replays it.
+    async function settleAfterReply(typed, reply, beforeId, replyId) {
       const data = await fetchNewMessages();
-      if (!data) return;
+      if (!data) {
+        if (typeof replyId === "number" && replyId > 0) advanceMark(replyId);
+        return;
+      }
       const messages = data.messages || [];
       const same = (a, b) => (a || "").trim() === (b || "").trim();
       let turnAt = -1;
-      messages.forEach((m, i) => { if (m.role === "user" && same(m.content, typed)) turnAt = i; });
+      messages.forEach((m, i) => {
+        if (m.role === "user" && same(m.content, typed) && (!beforeId || m.id > beforeId)) turnAt = i;
+      });
+      if (turnAt < 0 && typeof beforeId === "number" && beforeId > 0) {
+        turnAt = messages.findIndex(m => m.id > beforeId && m.role === "user");
+      }
       let replyAt = -1;
-      messages.forEach((m, i) => { if (i > turnAt && m.role === "assistant" && same(m.content, reply)) replyAt = i; });
+      if (typeof replyId === "number" && replyId > 0) {
+        replyAt = messages.findIndex((m, i) => i > turnAt && m.id === replyId);
+      }
+      if (replyAt < 0) {
+        messages.forEach((m, i) => { if (i > turnAt && m.role === "assistant" && same(m.content, reply)) replyAt = i; });
+      }
       if (turnAt >= 0) showUpdates(messages.slice(0, turnAt));
       // Hermes does not serialize turns on one session, so a card's wake can
       // run during this turn and land inside its range. A user row other than
-      // the typed message starts such a wake; its agent replies are shown.
+      // the typed message starts such a wake; its agent reply is shown and
+      // ends the wake so later assistant rows of the typed turn are not shown.
       if (turnAt >= 0 && replyAt > turnAt) {
         let inWake = false;
         messages.slice(turnAt + 1, replyAt).forEach(m => {
-          if (m.role === "user") inWake = true;
-          else if (inWake && m.id > lastSeenId) appendMessage("agent", m.content, "update");
+          if (m.role === "user") {
+            inWake = true;
+          } else if (inWake && m.role === "assistant" && m.id > lastSeenId) {
+            appendMessage("agent", m.content, "update");
+            inWake = false;
+          }
         });
       }
       if (replyAt >= 0) {
         advanceMark(messages[replyAt].id);
         showUpdates(messages.slice(replyAt + 1));
+      } else if (typeof replyId === "number" && replyId > 0) {
+        advanceMark(replyId);
       }
       advanceMark(data.latest_id);
     }
@@ -720,7 +718,7 @@
         pending.remove();
         if (resp.ok) {
           appendMessage("agent", data.reply || "(The agent returned an empty reply.)");
-          await settleAfterReply(text, data.reply);
+          await settleAfterReply(text, data.reply, data.before_id, data.reply_id);
         } else {
           appendMessage("agent", `Request failed (HTTP ${resp.status}): ${data.detail || data.error || "no detail"}`, "error");
         }
@@ -772,12 +770,12 @@
         const kind = isCurrent ? "this tab" : (s.console ? "web console" : (s.source || "agent"));
         const count = typeof s.message_count === "number" ? `${s.message_count} messages` : "";
         return `
-          <div class="incident-card">
-            <div class="incident-top">
-              <div class="incident-reason">${escapeHtml(s.title || s.id)}</div>
+          <div class="session-card">
+            <div class="session-top">
+              <div class="session-title">${escapeHtml(s.title || s.id)}</div>
               <span class="badge ${isCurrent ? "badge-green" : "badge-grey"}">${escapeHtml(kind)}</span>
             </div>
-            <div class="incident-meta">
+            <div class="session-meta">
               <span>${escapeHtml(count)}</span>
               <span>${escapeHtml(formatEpoch(s.last_active || s.started_at))}</span>
             </div>
