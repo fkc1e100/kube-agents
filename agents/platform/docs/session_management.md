@@ -20,6 +20,7 @@ It binds loopback rather than `0.0.0.0` because every one of its callers shares 
 4. **Gateway Message Rewriting Hook:** Integrates the `incident_context` plugin to intercept user replies on active incident threads and automatically prepend the triage report, allowing the fixer agent session to run with full context.
 5. **Severity Gate & Event Ledger:** Records every forwarded event in `intercepted_events`, then alerts on the warning ones only. The drift detector and the stall watch write to the same table under `reason`s of their own; see [the second producer](#the-second-producer-gitops-drift) and [the third](#the-third-producer-controller-stall). Informational events are held back from chat and reported as a count by the daily recap.
 6. **Daily Alert Ceiling:** Caps how many alerts of each severity reach chat in one UTC day, bounding the volume that survives deduplication.
+   - **Workload window (opt-in):** `INCIDENT_WORKLOAD_DEDUP_SECONDS` — set by the operator from `spec.harness.incidentTriage.workloadDedupSeconds`, default `0` (off) — folds sibling-replica events for the same `(cluster, namespace, object_kind, workload)` (resolved from `context.controller_ref` when populated by the watcher, falling back to `clean_workload_name`) within a fixed window of `N` seconds after the anchor row's admission timestamp (`duplicate_of`), regardless of whether the anchor's triage session is still running or has already closed. A folded event spends no quota, answers `{"status": "folded", "duplicate_of": "..."}` so the watcher keeps its per-pod dedup entry closed without marking it `PolicyFiltered`, and starts no second triage session. Only an admitted row (`notified >= 1` or `delivery_error != ''`, `duplicate_of = 0`) anchors the window, whether or not its chat post went through, a `Warning` anchor never silences a `Critical` escalation, and an aborted anchor promotes a pending folded sibling.
 7. **Scheduled-Report Relay:** Accepts a finished report from a specialist's cron job on `POST /v1/cron-reports`, posts it as written (on Slack, a fleet-audit report is replaced by a headline linking its ledger issue), and stores the full report against the thread it lands in, so a reply there reaches the Chat Agent with the report attached. Its caller is the scheduler, not the model: `deliver: "chat"` resolves to a delivery-only platform plugin whose sender POSTs here, and `report_to_chat` remains for a job that needs to report mid-run. Deliberately not a mode of `/sessions/{id}/inject`: a scheduled report has no severity and must not spend the alert ceiling above. See [the design](../../../docs/designs/cron-report-relay.md).
 8. **Triage Routing:** Instructs the front door to hand the diagnosis to the Cluster Agent of the cluster the event came from, and records the chat route that carries the report back.
 
@@ -313,14 +314,26 @@ number instead of losing them; the watcher's own dedup snapshot cannot substitut
 rolling window of _active_ incidents keyed by `(uid, reason)`, carries no namespace or workload
 name, and resets each entry's `count` when its window rolls over.
 
-`notified = 0` covers three unrelated outcomes and the recap must not conflate them. The [severity
+`notified = 0` covers four unrelated outcomes and the recap must not conflate them. The [severity
 gate](#severity-gate) holds back events Kubernetes itself graded informational, and those are the
 recap's subject — reported as a count. An alert the [daily ceiling](#daily-alert-ceiling) dropped
 carries the same flag but was graded `Critical` or `Warning` and was on its way to chat, so the
 recap reads `severity` to tell the two apart. It does not report those: they are outside its scope,
 and counting them as informational would inflate the one number it exists to publish. It does count
 them privately, because a day that withheld alerts may not be reported as a clean one — the SOP's
-"What this recap does not report" owns that contract.
+"What this recap does not report" owns that contract. A sibling replica folded into an earlier admitted anchor event by the workload deduplication
+window (`INCIDENT_WORKLOAD_DEDUP_SECONDS`) is also recorded with `notified = 0`, and carries
+`duplicate_of > 0` pointing at the anchor row; the recap excludes `duplicate_of > 0` rows from its
+ceiling-drop count so folded duplicates are not misreported as withheld alerts, and
+`GET /v1/intercepted-events` reports their status as `folded`. When an admitted anchor's triage
+session fails to start (`_create_gateway_session` or `_start_agent_turn` fails),
+`mark_triage_aborted` stamps `duplicate_of = -1` (`TRIAGE_ABORTED_SENTINEL`) on the aborted row so
+it no longer anchors the window, promotes the earliest folded sibling if one arrived in the meantime
+and starts that sibling's triage turn, and causes `GET /v1/intercepted-events` to report the aborted
+row as `undelivered`. When the process restarts while an anchor is still
+`triage_state = 'pending'`, the startup sweep (`_sweep_orphan_triage_anchors`) stamps the anchor
+and every sibling folded into it `-1` and promotes nothing, because no turn can start before the
+server is serving; the workload's next event is then admitted with a session of its own.
 
 The third is `delivery_error`, and it exists because `notified` is an _intent_ at the moment it is
 written. The row goes in before the chat post is attempted: the send runs in a background task, so a
@@ -379,9 +392,10 @@ CREATE TABLE intercepted_events(
   message     TEXT NOT NULL DEFAULT '',
   severity    TEXT NOT NULL DEFAULT '',
   occurrences INTEGER NOT NULL DEFAULT 1,
-  notified    INTEGER NOT NULL DEFAULT 0,  -- 0 when the gate, the ceiling or a failed send held it back; 1 when posted to chat; 2 when dispatched on a headless install with no chat platform enabled
+  notified    INTEGER NOT NULL DEFAULT 0,  -- 0 when the gate, the ceiling, the workload window or a failed send held it back; 1 when posted to chat; 2 when dispatched on a headless install with no chat platform enabled
   delivery_error TEXT NOT NULL DEFAULT '',  -- non-empty when the chat post failed after notified = 1
   session_id  TEXT NOT NULL DEFAULT '',  -- the session the inject arrived on, joining the row to GET /v1/sessions/{id}/tasks
+  duplicate_of INTEGER NOT NULL DEFAULT 0,  -- id of the anchor row when INCIDENT_WORKLOAD_DEDUP_SECONDS folded this event (> 0), or -1 (TRIAGE_ABORTED_SENTINEL) when the row's triage turn failed to start
   created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -406,9 +420,9 @@ time and bounds nothing on disk; 512 keeps more than it shows, which leaves room
 
 ##### Which columns are migrated, and which are not
 
-`init_db` runs `ALTER TABLE intercepted_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`
-for `session_id` (which arrived after the table first shipped in 0.2.0, so released 0.2.0+
-databases carry `cluster`, `object_uid` and `delivery_error` and gain `session_id` in place on
+`init_db` runs `ALTER TABLE intercepted_events ADD COLUMN` for `session_id` and `duplicate_of`
+(which arrived after the table first shipped in 0.2.0, so released 0.2.0+ databases carry
+`cluster`, `object_uid` and `delivery_error` and gain `session_id` and `duplicate_of` in place on
 startup), and runs `CREATE TABLE IF NOT EXISTS` for everything else: there is no `ALTER TABLE` for
 `cluster`, `object_uid` or `delivery_error` anywhere in the tree. Those three columns landed
 before the table ever shipped in a release, so the only databases carrying an earlier shape
@@ -416,7 +430,7 @@ without them are pre-0.2.0 dev installs that ran an intermediate commit of the c
 introduced the table (#426), and a migration maintained for a pre-release shape no released
 install has is machinery that outlives its reason.
 
-**If you have such a pre-0.2.0 dev install missing `cluster`, `object_uid` or `delivery_error`, you must drop the table before rolling the image.** (Released 0.2.0+ installs already carry all three columns and migrate `session_id` automatically on startup; do not drop the table on a released install.) `CREATE TABLE IF
+**If you have such a pre-0.2.0 dev install missing `cluster`, `object_uid` or `delivery_error`, you must drop the table before rolling the image.** (Released 0.2.0+ installs already carry all three columns and migrate `session_id` and `duplicate_of` automatically on startup; do not drop the table on a released install.) `CREATE TABLE IF
 NOT EXISTS` is a no-op against a pre-0.2.0 table missing those three columns, so they never appear, and how badly that ends depends on
 which column is missing:
 
@@ -425,7 +439,8 @@ which column is missing:
   `except Exception` around it, is logged once per event, and is dropped. The table stays empty for
   as long as the shape lasts.
 - **No `object_uid`** — the same, and for the same reason: it is in the INSERT, so nothing is
-  recorded.
+  recorded (`eod_report_generator.py` substitutes `0` for `duplicate_of` when reading a pre-column
+  table during a rollout).
 - **No `delivery_error`** — events are still recorded correctly and only the correction fails.
   `mark_delivery_failed` raises `no such column: delivery_error`, the same blanket `except`
   swallows it, and the row keeps `notified = 1`, so the recap counts an alert nobody received as

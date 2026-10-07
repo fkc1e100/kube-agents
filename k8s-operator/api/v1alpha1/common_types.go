@@ -563,6 +563,28 @@ type IncidentTriageSpec struct {
 	// +kubebuilder:default=false
 	// +optional
 	OpenPullRequest *bool `json:"openPullRequest,omitempty"`
+
+	// WorkloadDedupSeconds folds further events for the same workload into its
+	// last admitted anchor event for a fixed window of this many seconds,
+	// regardless of whether the anchor's triage session is still running or has
+	// already closed. The k8s-event-watcher deduplicates on the involved
+	// object's UID, so a Deployment whose replicas fail the same way, or whose
+	// rollout replaces one failing pod with another, offers one event per pod;
+	// with OpenPullRequest each of those is a triage session and a pull request
+	// for the same fix. Within this many seconds of a workload's last admitted
+	// event, a further event for the same cluster, namespace, object kind and
+	// workload is recorded in the event ledger as a duplicate of it, answered
+	// to the watcher as folded, and starts no session (a Warning anchor never
+	// silences a Critical escalation). 0, the default, keeps one incident per
+	// object UID.
+	//
+	// The operator sets INCIDENT_WORKLOAD_DEDUP_SECONDS on the platform agent
+	// container when this is above zero, and sets nothing otherwise.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=86400
+	// +kubebuilder:default=0
+	// +optional
+	WorkloadDedupSeconds *int32 `json:"workloadDedupSeconds,omitempty"`
 }
 
 // DriftDetectorSpec configures the drift-detector, which runs as a peer service
