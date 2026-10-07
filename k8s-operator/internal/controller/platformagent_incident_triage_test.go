@@ -101,3 +101,67 @@ func TestIncidentTriageEnvIsOnlySetByTheField(t *testing.T) {
 		t.Errorf("field unset with deployment.env + plugin entry: %s is set, want it dropped", incidentTriageOpenPullRequestEnv)
 	}
 }
+
+// TestIncidentTriageWorkloadDedupIsOffByDefault: an install that never set the
+// field, or set it to zero, renders the gateway container it had, with no
+// INCIDENT_WORKLOAD_DEDUP_SECONDS entry.
+func TestIncidentTriageWorkloadDedupIsOffByDefault(t *testing.T) {
+	baseline := gatewayEnv(t, incidentTriageAgent(nil)).Env
+	for name, triage := range map[string]*agentv1alpha1.IncidentTriageSpec{
+		"empty block": {},
+		"zero":        {WorkloadDedupSeconds: ptr.To(int32(0))},
+	} {
+		got := gatewayEnv(t, incidentTriageAgent(triage))
+		if _, found := envValue(got, incidentTriageWorkloadDedupEnv); found {
+			t.Errorf("%s: %s is set, want it absent", name, incidentTriageWorkloadDedupEnv)
+		}
+		if !reflect.DeepEqual(got.Env, baseline) {
+			t.Errorf("%s: gateway env differs from an install without the block", name)
+		}
+	}
+}
+
+func TestIncidentTriageWorkloadDedupSetsTheEnv(t *testing.T) {
+	got := gatewayEnv(t, incidentTriageAgent(&agentv1alpha1.IncidentTriageSpec{
+		OpenPullRequest:      ptr.To(true),
+		WorkloadDedupSeconds: ptr.To(int32(120)),
+	}))
+	value, found := envValue(got, incidentTriageWorkloadDedupEnv)
+	if !found || value != "120" {
+		t.Errorf("%s = %q (found %v), want \"120\"", incidentTriageWorkloadDedupEnv, value, found)
+	}
+	count := 0
+	for _, env := range got.Env {
+		if env.Name == incidentTriageWorkloadDedupEnv {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("%s appears %d times, want once", incidentTriageWorkloadDedupEnv, count)
+	}
+}
+
+// TestIncidentTriageWorkloadDedupEnvIsOnlySetByTheField mirrors the open-PR
+// case: neither spec.deployment.env nor an AgentPlugin's spec.env may turn the
+// window on or override it.
+func TestIncidentTriageWorkloadDedupEnvIsOnlySetByTheField(t *testing.T) {
+	overrideFive := []corev1.EnvVar{{Name: incidentTriageWorkloadDedupEnv, Value: "5"}}
+	overrideWindow := []corev1.EnvVar{{Name: incidentTriageWorkloadDedupEnv, Value: "120"}}
+	pluginWith := func(env []corev1.EnvVar) *agentv1alpha1.AgentPlugin {
+		return &agentv1alpha1.AgentPlugin{
+			Spec: agentv1alpha1.AgentPluginSpec{Env: env},
+		}
+	}
+
+	on := incidentTriageAgent(&agentv1alpha1.IncidentTriageSpec{WorkloadDedupSeconds: ptr.To(int32(120))})
+	on.Spec.Deployment.Env = overrideFive
+	if value, _ := envValue(gatewayEnv(t, on, pluginWith(overrideFive)), incidentTriageWorkloadDedupEnv); value != "120" {
+		t.Errorf("field 120 with deployment.env + plugin override: %s = %q, want \"120\"", incidentTriageWorkloadDedupEnv, value)
+	}
+
+	off := incidentTriageAgent(nil)
+	off.Spec.Deployment.Env = overrideWindow
+	if _, found := envValue(gatewayEnv(t, off, pluginWith(overrideWindow)), incidentTriageWorkloadDedupEnv); found {
+		t.Errorf("field unset with deployment.env + plugin entry: %s is set, want it dropped", incidentTriageWorkloadDedupEnv)
+	}
+}

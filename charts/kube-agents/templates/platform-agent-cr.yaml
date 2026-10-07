@@ -88,7 +88,8 @@ spec:
     {{- $triage := .Values.platformAgent.harness.incidentTriage | default dict }}
     {{- /* Omitted unless set, for the reason driftDetector above is. */}}
     {{- with include "kube-agents.compactFields" (dict
-          "openPullRequest" $triage.openPullRequest) }}
+          "openPullRequest" $triage.openPullRequest
+          "workloadDedupSeconds" $triage.workloadDedupSeconds) }}
     incidentTriage:
       {{- . | nindent 6 }}
     {{- end }}

@@ -556,6 +556,11 @@
               "properties": {
                 "openPullRequest": {
                   "type": ["boolean", "null"]
+                },
+                "workloadDedupSeconds": {
+                  "type": ["integer", "null"],
+                  "minimum": 0,
+                  "maximum": 86400
                 }
               }
             },
