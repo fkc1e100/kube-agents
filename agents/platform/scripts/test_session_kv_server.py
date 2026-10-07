@@ -853,6 +853,575 @@ class TestInterceptedEventLedger(unittest.TestCase):
         self.assertTrue(stored.startswith("0/900 nodes are available: insufficient cpu,"))
 
 
+class TestWorkloadWindow(unittest.TestCase):
+    """INCIDENT_WORKLOAD_DEDUP_SECONDS folds a workload's second event into its first.
+
+    The watcher dedups on the involved object's UID, so two replicas of one
+    Deployment failing the same way, or a rollout replacing one failing pod
+    with another, offer one event each — and with the pull-request opt-in on,
+    each becomes a triage session, a diagnosis and a pull request for the same
+    fix. Inside the window the second event is a ledger row that points at the
+    first, the watcher is answered `folded`, and no session starts.
+    """
+
+    WINDOW = "300"
+
+    def setUp(self):
+        import sqlite3
+        from fastapi.testclient import TestClient
+        os.environ["SESSION_KV_API_KEY"] = API_KEY
+        os.environ.pop(session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, None)
+        os.environ.pop(session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV, None)
+        self.client = TestClient(session_kv_server.app, headers=AUTH_HEADERS)
+        # The module shares one database; earlier classes' injects spend the
+        # same UTC-day budget, and a cap-dropped event here would read as a
+        # window verdict.
+        with sqlite3.connect(temp_db_path) as conn:
+            with conn:
+                conn.execute("DELETE FROM alert_quota")
+
+    def tearDown(self):
+        import sqlite3
+        os.environ.pop("SESSION_KV_API_KEY", None)
+        os.environ.pop(session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, None)
+        os.environ.pop(session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV, None)
+        # Hand the shared UTC-day budget back as found, for the same reason.
+        with sqlite3.connect(temp_db_path) as conn:
+            with conn:
+                conn.execute("DELETE FROM alert_quota")
+
+    def _inject(self, session_id, features="policy-filtered", **payload_overrides):
+        payload = {
+            "reason": "BackOff",
+            "namespace": "prod-payments",
+            "kind_of_object": "Pod",
+            "name": "checkout-gateway-7d9f8b6c4-abcde",
+            "uid": "uid-" + session_id,
+            "message": "Back-off restarting failed container",
+            "count": 1,
+            "type": "Warning",
+            "cluster": "fleet-a",
+        }
+        payload.update(payload_overrides)
+        return self.client.post(
+            f"/sessions/{session_id}/inject",
+            json={"message": json.dumps(payload)},
+            headers={} if features is None else {"X-Watcher-Features": features},
+        )
+
+    def _rows(self, workload):
+        import sqlite3
+        with sqlite3.connect(temp_db_path) as conn:
+            return conn.execute(
+                "SELECT id, notified, duplicate_of FROM intercepted_events "
+                "WHERE workload = ? ORDER BY id",
+                (workload,),
+            ).fetchall()
+
+    def _age(self, row_id, seconds):
+        import sqlite3
+        with sqlite3.connect(temp_db_path) as conn:
+            conn.execute(
+                "UPDATE intercepted_events SET created_at = datetime('now', ?) WHERE id = ?",
+                (f"-{seconds} seconds", row_id),
+            )
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_off_by_default_opens_one_incident_per_pod(self, mock_trigger):
+        first = self._inject("k8s-evt-off-1", name="off-api-7d9f8b6c4-aaaaa")
+        second = self._inject("k8s-evt-off-2", name="off-api-7d9f8b6c4-bbbbb")
+        self.assertEqual((first.json()["status"], second.json()["status"]), ("injected", "injected"))
+        self.assertEqual(mock_trigger.call_count, 2)
+        self.assertEqual([row[1:3] for row in self._rows("off-api")], [(1, 0), (1, 0)])
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_sibling_replica_inside_the_window_is_folded(self, mock_trigger):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-fold-1", name="fold-api-7d9f8b6c4-aaaaa", reason="OOMKilled")
+        second = self._inject("k8s-evt-fold-2", name="fold-api-7d9f8b6c4-bbbbb", reason="OOMKilled")
+        self.assertEqual(first.json()["status"], "injected")
+        rows = self._rows("fold-api")
+        self.assertEqual(len(rows), 2)
+        anchor_id = rows[0][0]
+        self.assertEqual(second.json(), {"status": "folded", "duplicate_of": str(anchor_id)})
+        # One session, one diagnosis, one pull request.
+        self.assertEqual(mock_trigger.call_count, 1)
+        # The duplicate row: not delivered, points at the anchor.
+        self.assertEqual(rows[1][1:], (0, anchor_id))
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_warning_anchor_does_not_silence_a_critical_escalation(self, mock_trigger):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-esc-1", name="esc-api-7d9f8b6c4-aaaaa", reason="Unhealthy")
+        second = self._inject("k8s-evt-esc-2", name="esc-api-7d9f8b6c4-bbbbb", reason="OOMKilled")
+        third = self._inject("k8s-evt-esc-3", name="esc-api-7d9f8b6c4-ccccc", reason="OOMKilled")
+        self.assertEqual(first.json()["status"], "injected")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(third.json()["status"], "folded")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_the_window_is_per_cluster_namespace_and_workload(self, mock_trigger):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        self._inject("k8s-evt-key-1", name="key-api-7d9f8b6c4-aaaaa")
+        other_workload = self._inject("k8s-evt-key-2", name="key-web-7d9f8b6c4-aaaaa")
+        other_namespace = self._inject("k8s-evt-key-3", name="key-api-7d9f8b6c4-bbbbb", namespace="staging")
+        other_cluster = self._inject("k8s-evt-key-4", name="key-api-7d9f8b6c4-ccccc", cluster="fleet-b")
+        other_kind = self._inject(
+            "k8s-evt-key-5", name="key-api", kind_of_object="HorizontalPodAutoscaler"
+        )
+        for resp in (other_workload, other_namespace, other_cluster, other_kind):
+            self.assertEqual(resp.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 5)
+
+    def test_clean_workload_name_preserves_cronjob_and_digitless_names(self):
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "checkout-gateway-7d9f8b6c4-abcde"),
+            ("Deployment", "checkout-gateway"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "api-5678956789-zwv24"),
+            ("Deployment", "api"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "api-5678956-zwv24"),
+            ("Deployment", "api"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "web-fdbcbdcf-x7k2m"),
+            ("Deployment", "web"),
+        )
+        # A tail too short to be a pod-template-hash is part of the name.
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "backup-5-x7k2m"),
+            ("Pod", "backup-5-x7k2m"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("ReplicaSet", "worker-7"),
+            ("ReplicaSet", "worker-7"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "db-bb-x7k2m", "ReplicaSet/db-bb"),
+            ("ReplicaSet", "db-bb"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "backup-28473920-x7k2m"),
+            ("Pod", "backup-28473920"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "api-1700000000-x7k2m"),
+            ("Pod", "api-1700000000"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "api-deadbeef-cache"),
+            ("Pod", "api-deadbeef-cache"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity("Pod", "billing-zwv24"),
+            ("Pod", "billing-zwv24"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity(
+                "Pod", "billing-6c8b7f5d4-x9m2q", "Deployment/billing"
+            ),
+            ("Deployment", "billing"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity(
+                "Pod", "billing-zwv24", "Pod/billing-zwv24"
+            ),
+            ("Pod", "billing-zwv24"),
+        )
+        self.assertEqual(
+            session_kv_server.resolve_workload_identity(
+                "Pod", "other-pod-x9m2q", "Deployment/billing"
+            ),
+            ("Pod", "other-pod-x9m2q"),
+        )
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_controller_ref_distinguishes_owners_and_standalone_pods(self, mock_trigger):
+        """Real owner references fold sibling replicas while keeping distinct owners separate."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        deploy_1 = self._inject(
+            "k8s-evt-owner-1",
+            name="billing-6c8b7f5d4-aaaaa",
+            context={"controller_ref": "Deployment/billing"},
+        )
+        deploy_2 = self._inject(
+            "k8s-evt-owner-2",
+            name="billing-7f9d8c6b5-bbbbb",
+            context={"controller_ref": "Deployment/billing"},
+        )
+        fallback_pod = self._inject(
+            "k8s-evt-owner-fallback",
+            name="billing-8d9f7b6c5-ccccc",
+        )
+        job_1 = self._inject(
+            "k8s-evt-owner-3",
+            name="billing-zwv24",
+            context={"controller_ref": "Job/billing"},
+        )
+        standalone = self._inject(
+            "k8s-evt-owner-4",
+            name="billing-k4p8z",
+            context={"controller_ref": "Pod/billing-k4p8z"},
+        )
+        self.assertEqual(deploy_1.json()["status"], "injected")
+        self.assertEqual(deploy_2.json()["status"], "folded")
+        self.assertEqual(fallback_pod.json()["status"], "folded")
+        self.assertEqual(job_1.json()["status"], "injected")
+        self.assertEqual(standalone.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 3)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_an_anchor_older_than_the_window_does_not_fold(self, mock_trigger):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        self._inject("k8s-evt-old-1", name="old-api-7d9f8b6c4-aaaaa")
+        self._age(self._rows("old-api")[0][0], int(self.WINDOW) + 5)
+        second = self._inject("k8s-evt-old-2", name="old-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_only_an_admitted_row_anchors_the_window(self, mock_trigger):
+        """A refused first event must not silence the second; a chat failure is not a refusal."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        info = self._inject("k8s-evt-anchor-1", name="anchor-api-7d9f8b6c4-aaaaa", type="Normal")
+        self.assertEqual(info.json()["status"], "filtered")
+        second = self._inject("k8s-evt-anchor-2", name="anchor-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json()["status"], "injected")
+        # The chat post failed, but the triage turn ran: the incident is being
+        # worked, so a sibling inside the window still folds into it.
+        anchor_id = self._rows("anchor-api")[1][0]
+        session_kv_server.mark_delivery_failed(anchor_id, "chat down")
+        third = self._inject("k8s-evt-anchor-3", name="anchor-api-7d9f8b6c4-ccccc")
+        self.assertEqual(third.json(), {"status": "folded", "duplicate_of": str(anchor_id)})
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "_start_agent_turn", return_value=True)
+    @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
+    @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
+    def test_an_install_without_a_chat_platform_still_folds(self, mock_post, mock_session, mock_turn):
+        """The real troubleshooter path on an install whose chat post never succeeds."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-nochat-1", name="nochat-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        rows = self._rows("nochat-api")
+        self.assertEqual(rows[0][1], 0, "the failed chat post cleared notified")
+        second = self._inject("k8s-evt-nochat-2", name="nochat-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json(), {"status": "folded", "duplicate_of": str(rows[0][0])})
+        self.assertEqual(mock_turn.call_count, 1)
+
+    @patch.object(session_kv_server, "_start_agent_turn", return_value=True)
+    @patch.object(session_kv_server, "_create_gateway_session", side_effect=[False, True])
+    @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
+    def test_an_aborted_gateway_session_does_not_anchor_the_window(self, mock_post, mock_session, mock_turn):
+        """If gateway session creation fails, the next sibling replica must still run."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-abort-gw-1", name="abortgw-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        self.assertEqual(mock_turn.call_count, 0)
+        second = self._inject("k8s-evt-abort-gw-2", name="abortgw-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_turn.call_count, 1)
+        rows = self._rows("abortgw-api")
+        self.assertEqual(
+            [row[2] for row in rows],
+            [session_kv_server.TRIAGE_ABORTED_SENTINEL, 0],
+        )
+
+    @patch.object(session_kv_server, "_start_agent_turn", side_effect=[False, True])
+    @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
+    @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
+    def test_a_failed_start_agent_turn_does_not_anchor_the_window(self, mock_post, mock_session, mock_turn):
+        """If _start_agent_turn fails before starting the turn, the next sibling replica must run."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-abort-turn-1", name="abortturn-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        second = self._inject("k8s-evt-abort-turn-2", name="abortturn-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_turn.call_count, 2)
+        rows = self._rows("abortturn-api")
+        self.assertEqual(
+            [row[2] for row in rows],
+            [session_kv_server.TRIAGE_ABORTED_SENTINEL, 0],
+        )
+
+    def test_a_promoted_sibling_whose_turn_also_fails_promotes_the_next(self):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        with patch.object(session_kv_server, "trigger_agent_troubleshooter") as mock_trigger:
+            self._inject("k8s-evt-hop-1", name="hop-api-7d9f8b6c4-aaaaa")
+            self._inject("k8s-evt-hop-2", name="hop-api-7d9f8b6c4-bbbbb")
+            self._inject("k8s-evt-hop-3", name="hop-api-7d9f8b6c4-ccccc")
+            anchor_id, sibling_id, third_id = (row[0] for row in self._rows("hop-api"))
+            session_kv_server._register_session_routing("k8s-evt-hop-1", "google_chat", "spaces/S/threads/T1")
+            session_kv_server.mark_triage_aborted(anchor_id)
+            # The promoted sibling's own turn fails in the same outage.
+            session_kv_server.mark_triage_aborted(sibling_id)
+            self.assertEqual(mock_trigger.call_args.args[0], "k8s-evt-hop-3")
+        self.assertEqual(
+            self._rows("hop-api"),
+            [(anchor_id, 0, -1), (sibling_id, 0, -1), (third_id, 1, 0)],
+        )
+
+    def test_aborted_anchor_triage_promotes_pending_folded_sibling(self):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        with patch.object(session_kv_server, "trigger_agent_troubleshooter") as mock_trigger:
+            first = self._inject("k8s-evt-abort-1", name="abort-api-7d9f8b6c4-aaaaa")
+            second = self._inject("k8s-evt-abort-2", name="abort-api-7d9f8b6c4-bbbbb")
+            third = self._inject("k8s-evt-abort-3", name="abort-api-7d9f8b6c4-ccccc")
+            self.assertEqual(first.json()["status"], "injected")
+            self.assertEqual(second.json()["status"], "folded")
+            self.assertEqual(third.json()["status"], "folded")
+            anchor_id = self._rows("abort-api")[0][0]
+            sibling_id = self._rows("abort-api")[1][0]
+            third_id = self._rows("abort-api")[2][0]
+            session_kv_server._register_session_routing("k8s-evt-abort-1", "google_chat", "spaces/S/threads/T1")
+            session_kv_server.mark_triage_aborted(anchor_id)
+            self.assertEqual(mock_trigger.call_count, 2)
+            self.assertEqual(mock_trigger.call_args.args[0], "k8s-evt-abort-2")
+            self.assertTrue(mock_trigger.call_args.kwargs.get("_reuse_routing"))
+            self.assertEqual(
+                session_kv_server._lookup_session_routing("k8s-evt-abort-2"),
+                ("google_chat", "spaces/S", "spaces/S/threads/T1"),
+            )
+        self.assertEqual(
+            self._rows("abort-api"),
+            [(anchor_id, 0, -1), (sibling_id, 1, 0), (third_id, 0, sibling_id)],
+        )
+        feed = self.client.get("/v1/intercepted-events?limit=10").json()["events"]
+        by_id = {e["id"]: e["status"] for e in feed}
+        self.assertEqual(by_id[anchor_id], "undelivered")
+        self.assertEqual(by_id[sibling_id], "injected")
+        self.assertEqual(by_id[third_id], "folded")
+
+    def test_init_db_sweeps_orphan_pending_triage_anchors(self):
+        import sqlite3
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        with patch.object(session_kv_server, "trigger_agent_troubleshooter"):
+            first = self._inject("k8s-evt-orphan-1", name="orphan-api-7d9f8b6c4-aaaaa")
+            self.assertEqual(first.json()["status"], "injected")
+            anchor_id = self._rows("orphan-api")[0][0]
+            # Fresh pending anchor on another replica host is NOT swept.
+            with sqlite3.connect(temp_db_path) as conn:
+                with conn:
+                    session_kv_server._upsert_event_session_metadata(
+                        conn,
+                        "k8s-evt-orphan-1",
+                        anchor_id,
+                        {
+                            "triage_state": "pending",
+                            "pending_host": "other-replica-pod",
+                            "pending_at": time.time(),
+                        },
+                    )
+            session_kv_server.init_db()
+            self.assertEqual(self._rows("orphan-api"), [(anchor_id, 1, 0)])
+            # Once the anchor is from this host (or stale), init_db releases it and its siblings.
+            sibling = self._inject("k8s-evt-orphan-sib", name="orphan-api-7d9f8b6c4-sib00")
+            self.assertEqual(sibling.json()["status"], "folded")
+            sibling_id = self._rows("orphan-api")[1][0]
+            with sqlite3.connect(temp_db_path) as conn:
+                with conn:
+                    session_kv_server._upsert_event_session_metadata(
+                        conn,
+                        "k8s-evt-orphan-1",
+                        anchor_id,
+                        {
+                            "triage_state": "pending",
+                            "pending_host": "other-replica-pod",
+                            "pending_at": time.time() - 600.0,
+                        },
+                    )
+            session_kv_server.init_db()
+            self.assertEqual(
+                self._rows("orphan-api"),
+                [(anchor_id, 1, -1), (sibling_id, 0, -1)],
+            )
+            # Nothing holds the window, so the workload's next event gets a session.
+            third = self._inject("k8s-evt-orphan-3", name="orphan-api-7d9f8b6c4-third")
+            self.assertEqual(third.json()["status"], "injected")
+
+    def test_dotenv_cannot_override_operator_incident_switches(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as f:
+            f.write(
+                "INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true\n"
+                "INCIDENT_WORKLOAD_DEDUP_SECONDS=300\n"
+                "BAD=a\x00b\n"
+                "BAD\x00KEY=1\n"
+                "export SAFE_AFTER_NUL='loaded_ok'\n"
+                "PREEXISTING_VAR=from_dotenv\n"
+            )
+            dotenv_path = f.name
+        try:
+            with patch.dict(os.environ, {"PREEXISTING_VAR": "from_env"}, clear=False):
+                os.environ.pop(session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV, None)
+                os.environ.pop(session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, None)
+                os.environ.pop("SAFE_AFTER_NUL", None)
+                session_kv_server._load_dotenv_ignoring_operator_switches(dotenv_path)
+                self.assertIsNone(os.environ.get(session_kv_server.INCIDENT_TRIAGE_OPEN_PR_ENV))
+                self.assertIsNone(os.environ.get(session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV))
+                self.assertIsNone(os.environ.get("BAD"))
+                self.assertEqual(os.environ.get("SAFE_AFTER_NUL"), "loaded_ok")
+                self.assertEqual(os.environ.get("PREEXISTING_VAR"), "from_env")
+        finally:
+            os.remove(dotenv_path)
+
+    @patch.object(session_kv_server, "_start_agent_turn", return_value=True)
+    @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
+    @patch.object(session_kv_server, "_post_initial_alert", side_effect=["spaces/S/threads/T1", "spaces/S/threads/T2"])
+    def test_shared_session_mode_still_posts_alerts_for_distinct_incidents(
+        self, mock_post, mock_session, mock_turn
+    ):
+        """A shared session_id (--mode=shared) must still post an alert for the second incident."""
+        first = self._inject("k8s-shared-session", name="shared-api-7d9f8b6c4-aaaaa")
+        second = self._inject("k8s-shared-session", name="shared-web-7d9f8b6c4-bbbbb")
+        self.assertEqual(first.json()["status"], "injected")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_an_open_kanban_card_does_not_extend_the_window(self, mock_trigger):
+        """The window is the configured seconds and nothing else, whatever the board says."""
+        import sqlite3
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-kanban-1", name="kanban-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        anchor_id = self._rows("kanban-api")[0][0]
+        self._age(anchor_id, int(self.WINDOW) + 60)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            kanban_db = os.path.join(tmpdir, "kanban.db")
+            with sqlite3.connect(kanban_db) as kconn:
+                kconn.execute("CREATE TABLE tasks (id TEXT, session_id TEXT, status TEXT)")
+                kconn.execute(
+                    "INSERT INTO tasks (id, session_id, status) VALUES (?, ?, ?)",
+                    ("task-1", "k8s-evt-kanban-1", "running"),
+                )
+            with patch.object(session_kv_server, "KANBAN_DB_PATH", kanban_db):
+                second = self._inject("k8s-evt-kanban-2", name="kanban-api-7d9f8b6c4-bbbbb")
+                self.assertEqual(second.json()["status"], "injected")
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_failed_ledger_insert_in_the_admission_transaction_still_alerts(self, mock_trigger):
+        import sqlite3
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        with patch.object(
+            session_kv_server,
+            "_insert_intercepted_event_row",
+            side_effect=sqlite3.OperationalError("table intercepted_events has no column named duplicate_of"),
+        ):
+            resp = self._inject("k8s-evt-ledger-fail-1", name="ledgerfail-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "injected")
+        mock_trigger.assert_called_once()
+
+    def test_admission_transaction_failure_returns_503(self):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        with patch.object(
+            session_kv_server.sqlite3,
+            "connect",
+            side_effect=session_kv_server.sqlite3.OperationalError("database is locked"),
+        ):
+            resp = self._inject("k8s-evt-locked-1", name="locked-api-7d9f8b6c4-aaaaa")
+            self.assertEqual(resp.status_code, 503)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_duplicate_is_not_an_anchor_itself(self, mock_trigger):
+        """Three replicas fold into the first row, not into a chain."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        self._inject("k8s-evt-chain-1", name="chain-api-7d9f8b6c4-aaaaa")
+        self._inject("k8s-evt-chain-2", name="chain-api-7d9f8b6c4-bbbbb")
+        third = self._inject("k8s-evt-chain-3", name="chain-api-7d9f8b6c4-ccccc")
+        rows = self._rows("chain-api")
+        self.assertEqual(third.json()["duplicate_of"], str(rows[0][0]))
+        self.assertEqual([row[2] for row in rows], [0, rows[0][0], rows[0][0]])
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_watcher_without_policy_filtered_is_still_answered_folded(self, mock_trigger):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        self._inject("k8s-evt-skew-1", name="skew-api-7d9f8b6c4-aaaaa")
+        second = self._inject("k8s-evt-skew-2", name="skew-api-7d9f8b6c4-bbbbb", features=None)
+        self.assertEqual(second.json()["status"], "folded")
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "_claim_alert_quota", return_value=(True, 0))
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_duplicate_spends_no_quota(self, mock_trigger, mock_claim):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        self._inject("k8s-evt-quota-1", name="quota-api-7d9f8b6c4-aaaaa")
+        self._inject("k8s-evt-quota-2", name="quota-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(mock_claim.call_count, 1)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_a_malformed_or_negative_setting_is_off(self, mock_trigger):
+        for raw in ("abc", "-5", "0", " "):
+            os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = raw
+            self.assertEqual(session_kv_server._workload_dedup_seconds(), 0, raw)
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = "abc"
+        self._inject("k8s-evt-bad-1", name="bad-api-7d9f8b6c4-aaaaa")
+        second = self._inject("k8s-evt-bad-2", name="bad-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 2)
+
+    def test_a_window_above_the_maximum_is_clamped(self):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = "999999"
+        self.assertEqual(
+            session_kv_server._workload_dedup_seconds(),
+            session_kv_server.INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS,
+        )
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_drift_and_stall_rows_do_not_anchor_the_workload_window(self, mock_trigger):
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        for reason in (session_kv_server.DRIFT_LEDGER_REASON, session_kv_server.STALL_LEDGER_REASON):
+            session_kv_server.record_intercepted_event(
+                cluster="fleet-a",
+                namespace="prod-payments",
+                workload="nonwatcher-api",
+                object_uid=f"uid-{reason}",
+                object_kind="Deployment",
+                reason=reason,
+                message="non-watcher row",
+                severity="Warning",
+                occurrences=1,
+                notified=True,
+            )
+        resp = self._inject("k8s-evt-nonwatcher-1", name="nonwatcher-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(resp.json()["status"], "injected")
+        self.assertEqual(mock_trigger.call_count, 1)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_concurrent_sibling_replicas_admit_one_and_fold_the_other(self, mock_trigger):
+        import threading
+
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        barrier = threading.Barrier(2)
+        real_lookup = session_kv_server._recent_delivered_event
+
+        def lookup_with_pause(*args, **kwargs):
+            res = real_lookup(*args, **kwargs)
+            if res is None:
+                time.sleep(0.05)
+            return res
+
+        outcomes = []
+
+        def worker(idx):
+            barrier.wait(timeout=5)
+            resp = self._inject(f"k8s-evt-race-{idx}", name=f"race-api-7d9f8b6c4-zzzz{idx}")
+            outcomes.append(resp.json()["status"])
+
+        with patch.object(session_kv_server, "_recent_delivered_event", side_effect=lookup_with_pause):
+            threads = [threading.Thread(target=worker, args=(1,)), threading.Thread(target=worker, args=(2,))]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+        self.assertEqual(sorted(outcomes), ["folded", "injected"])
+        self.assertEqual(mock_trigger.call_count, 1)
 
 
 class TestDeliveryFailureIsWrittenBack(unittest.TestCase):

@@ -9,6 +9,7 @@ import math
 import os
 import hashlib
 import re
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -18,9 +19,9 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, NamedTuple, Optional, Sequence
+from typing import Any, Dict, NamedTuple, Optional, Sequence, Tuple
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import logging
@@ -46,7 +47,10 @@ logger = logging.getLogger("session_kv_server")
 # Switches only the operator may set, through the PlatformAgent CR. The PVC
 # `.env` is agent-writable (`save_env_value`), and `load_dotenv` adds any key the
 # container env lacks, which on an install that did not opt in is exactly these.
-_OPERATOR_ONLY_ENV_KEYS = ("INCIDENT_TRIAGE_OPEN_PULL_REQUEST",)
+_OPERATOR_ONLY_ENV_KEYS = (
+    "INCIDENT_TRIAGE_OPEN_PULL_REQUEST",
+    "INCIDENT_WORKLOAD_DEDUP_SECONDS",
+)
 
 
 def _load_dotenv_ignoring_operator_switches(path: str) -> None:
@@ -133,13 +137,15 @@ TASK_DETAIL_MAX_RUNS = 100
 TASK_DETAIL_MAX_EVENTS = 500
 TASK_DETAIL_MAX_COMMENTS = 200
 # The `status` a feed row reports, derived from what the ledger stored. The
-# first three are the inject route's own answers. `undelivered` is the fourth
-# outcome the ledger can hold on an install with chat enabled: injected, then
-# the chat post failed and `mark_delivery_failed` reset `notified` and wrote
-# `delivery_error`.
+# first four are the inject route's own answers. `undelivered` is the fifth
+# outcome the ledger can hold: injected, then either the chat post failed and
+# `mark_delivery_failed` reset `notified` and wrote `delivery_error`, or the
+# triage turn failed to start and `mark_triage_aborted` stamped
+# `duplicate_of = TRIAGE_ABORTED_SENTINEL`.
 FEED_STATUS_INJECTED = "injected"
 FEED_STATUS_FILTERED = "filtered"
 FEED_STATUS_SUPPRESSED = "suppressed"
+FEED_STATUS_FOLDED = "folded"
 FEED_STATUS_UNDELIVERED = "undelivered"
 # The severity the inject route filters out of chat (see `inject_message`).
 FEED_FILTERED_SEVERITY = "Info"
@@ -183,14 +189,6 @@ INCIDENT_BRANCH_DIGEST_LEN = 8
 # come from the watcher and are already narrow; this keeps the branch to one
 # lowercase path segment whatever a future producer sends.
 _INCIDENT_BRANCH_UNSAFE_RE = re.compile(r"[^a-z0-9-]+")
-# Unambiguous replica suffixes stripped for branch identity when no
-# `context.controller_ref` is present: a Deployment replica's
-# `-<fnv32a-template-hash>-<5-char-SafeEncodeString>` or a StatefulSet's
-# `-<ordinal>`. Arbitrary 5-character words (`redis-cache`, `redis-proxy`,
-# `nginx-web01`) are left intact so distinct bare pods never share a branch.
-_INCIDENT_BRANCH_REPLICA_RE = re.compile(
-    r"^(.*?)-(?:[4-9bcdf]{1,10}-[a-z0-9]{5}|[0-9]+)$"
-)
 # What an event payload's missing fields read as. `_triage_task_body` and
 # `_build_agent_query` inline the same values; the pull-request card names
 # them so the three cards for one incident describe it the same way.
@@ -198,6 +196,88 @@ TRIAGE_DEFAULT_REASON = "Unknown"
 TRIAGE_DEFAULT_NAMESPACE = "default"
 TRIAGE_DEFAULT_KIND = "Pod"
 TRIAGE_FALLBACK_CLUSTER = "platform-agent-host"
+
+# The opt-in that folds a second event for a workload that already has a live
+# incident into that incident instead of opening another. The watcher's dedup
+# key is the involved object's UID, so a Deployment whose two replicas both
+# fail, or whose rollout replaces a failing pod with another failing pod,
+# offers one event per pod — and with `openPullRequest` on, each of those is a
+# triage session, a diagnosis, and a pull request for the same fix. Within this
+# many seconds of a workload's last admitted event (one the inject route
+# answered "injected", whether or not its chat post then went through), a
+# further event for the same cluster, namespace and workload is recorded in
+# the ledger as a duplicate of that row (`duplicate_of`), answered to the
+# watcher as folded,
+# and starts no session. 0, the default, keeps today's one-incident-per-UID
+# behaviour. The operator sets it from
+# spec.harness.incidentTriage.workloadDedupSeconds, and only when that is set.
+INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV = "INCIDENT_WORKLOAD_DEDUP_SECONDS"
+INCIDENT_WORKLOAD_DEDUP_OFF = 0
+INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS = 86400
+TRIAGE_ABORTED_SENTINEL = -1
+# ReplicaSet pod-template-hash alphabet (`util/rand.SafeEncodeString` in
+# Kubernetes, mapping bytes mod 10 to '456789bcdf') and `util/rand.String(5)`
+# generated suffix alphabet ('bcdfghjklmnpqrstvwxz2456789'), shared with
+# `fleet_waste.py`.
+_K8S_TEMPLATE_HASH_CHARS = r"[4-9bcdf]"
+# Width of a pod-template-hash: a decimal uint32 re-encoded character for
+# character, so 10 at most and below 6 only for hashes under 100000 (about one
+# in 40,000). A shorter floor turns any `<name>-<digit>` into a Deployment.
+_K8S_TEMPLATE_HASH_WIDTH = "{6,10}"
+_K8S_GENERATED_SUFFIX_CHARS = r"[bcdfghjklmnpqrstvwxz2456789]"
+_WORKLOAD_CONTROLLER_KINDS = (
+    "deployment",
+    "replicaset",
+    "statefulset",
+    "daemonset",
+    "job",
+    "cronjob",
+)
+
+
+@contextmanager
+def _inject_admission_transaction():
+    """Run the window lookup, quota claim and ledger INSERT in one IMMEDIATE transaction."""
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0, isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=503,
+            detail=f"the session KV database is busy: {exc}",
+        ) from None
+    try:
+        yield conn
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    else:
+        try:
+            conn.execute("COMMIT")
+        except Exception as exc:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=503,
+                detail=f"the session KV database is busy: {exc}",
+            ) from None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 # Deliberately not API_SERVER_KEY. That value is the loopback sentinel
 # `cluster-internal-trusted` — a marker, not a secret — so reusing it here would
 # authenticate nothing. See docs/credential-isolation-design.md.
@@ -885,18 +965,25 @@ def init_db() -> None:
                     notified    INTEGER NOT NULL DEFAULT 0,
                     delivery_error TEXT NOT NULL DEFAULT '',
                     session_id  TEXT NOT NULL DEFAULT '',
+                    duplicate_of INTEGER NOT NULL DEFAULT 0,
                     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
-            # `session_id` arrived after `intercepted_events` first shipped in
-            # 0.2.0, so released databases lack it and `init_db` adds it with
-            # `ALTER TABLE` to preserve existing ledger rows (additive and
-            # defaulted, so earlier rows read back with '').
+            # `session_id` and `duplicate_of` arrived after `intercepted_events`
+            # first shipped in 0.2.0, so released databases lack them and
+            # `init_db` adds them with `ALTER TABLE` to preserve existing ledger
+            # rows (additive and defaulted, so earlier rows read back with '' and 0).
             ledger_columns = {row[1] for row in conn.execute("PRAGMA table_info(intercepted_events)")}
             if "session_id" not in ledger_columns:
                 try:
                     conn.execute("ALTER TABLE intercepted_events ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError as exc:
+                    if _SQLITE_DUPLICATE_COLUMN_SUBSTR not in str(exc).lower():
+                        raise
+            if "duplicate_of" not in ledger_columns:
+                try:
+                    conn.execute("ALTER TABLE intercepted_events ADD COLUMN duplicate_of INTEGER NOT NULL DEFAULT 0")
                 except sqlite3.OperationalError as exc:
                     if _SQLITE_DUPLICATE_COLUMN_SUBSTR not in str(exc).lower():
                         raise
@@ -959,6 +1046,152 @@ def init_db() -> None:
             )
             findings_queue.init_findings_schema(conn)
             _purge_plaintext_identities(conn)
+            _sweep_orphan_triage_anchors(conn)
+
+
+_ORPHAN_SWEEP_MIN_AGE_SECONDS = 300.0
+
+
+def _bounded_folded_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy ``payload`` with ``message`` bounded to ``LEDGER_MESSAGE_MAX_CHARS``."""
+    bounded = dict(payload)
+    msg = bounded.get("message")
+    if isinstance(msg, str) and len(msg) > LEDGER_MESSAGE_MAX_CHARS:
+        bounded["message"] = msg[:LEDGER_MESSAGE_MAX_CHARS]
+    return bounded
+
+
+def _upsert_session_metadata(conn: sqlite3.Connection, session_id: str, updates: Dict[str, Any]) -> None:
+    """Merge ``updates`` into ``session_metadata`` for ``session_id`` on ``conn``."""
+    if not session_id:
+        return
+    row = conn.execute(
+        "SELECT metadata FROM session_metadata WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    meta: Dict[str, Any] = {}
+    if row and row[0]:
+        try:
+            loaded = json.loads(row[0])
+            if isinstance(loaded, dict):
+                meta = loaded
+        except Exception:
+            meta = {}
+    meta.update(updates)
+    if row:
+        conn.execute(
+            "UPDATE session_metadata SET metadata = ? WHERE session_id = ?",
+            (json.dumps(meta), session_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO session_metadata (session_id, metadata) VALUES (?, ?)",
+            (session_id, json.dumps(meta)),
+        )
+
+
+def _upsert_event_session_metadata(
+    conn: sqlite3.Connection,
+    session_id: str,
+    event_row_id: Optional[int],
+    updates: Dict[str, Any],
+) -> None:
+    """Merge ``updates`` into ``session_metadata`` both top-level and under ``events[event_row_id]``."""
+    if not session_id:
+        return
+    row = conn.execute(
+        "SELECT metadata FROM session_metadata WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    meta: Dict[str, Any] = {}
+    if row and row[0]:
+        try:
+            loaded = json.loads(row[0])
+            if isinstance(loaded, dict):
+                meta = loaded
+        except Exception:
+            meta = {}
+    meta.update(updates)
+    if event_row_id:
+        events_map = meta.get("events")
+        if not isinstance(events_map, dict):
+            events_map = {}
+        row_key = str(int(event_row_id))
+        existing_entry = events_map.get(row_key)
+        entry = dict(existing_entry) if isinstance(existing_entry, dict) else {}
+        entry.update(updates)
+        events_map[row_key] = entry
+        meta["events"] = events_map
+    if row:
+        conn.execute(
+            "UPDATE session_metadata SET metadata = ? WHERE session_id = ?",
+            (json.dumps(meta), session_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO session_metadata (session_id, metadata) VALUES (?, ?)",
+            (session_id, json.dumps(meta)),
+        )
+
+
+def _event_metadata_from_blob(meta: Dict[str, Any], event_row_id: int) -> Dict[str, Any]:
+    """Return per-event metadata for ``event_row_id``, falling back to top-level keys."""
+    if not isinstance(meta, dict):
+        return {}
+    events_map = meta.get("events")
+    if isinstance(events_map, dict):
+        entry = events_map.get(str(int(event_row_id)))
+        if isinstance(entry, dict):
+            return entry
+    return meta
+
+
+def _sweep_orphan_triage_anchors(conn: sqlite3.Connection) -> None:
+    """Release workload-window anchors whose background turn never started before a restart.
+
+    The anchor and every sibling folded into it are stamped
+    ``TRIAGE_ABORTED_SENTINEL``, so none of them holds the window and the
+    workload's next event is admitted with a session of its own. Nothing is
+    promoted here: this runs from ``init_db`` at import, before the app serves,
+    so there is no point at which a promoted sibling's turn could start, and a
+    promoted row with no turn would fold every later event into an incident
+    nobody works.
+    """
+    try:
+        current_host = socket.gethostname()
+        now = time.time()
+        rows = conn.execute(
+            "SELECT ie.id, ie.session_id, sm.metadata "
+            "FROM intercepted_events ie "
+            "JOIN session_metadata sm ON sm.session_id = ie.session_id "
+            "WHERE ie.duplicate_of = 0 AND ie.session_id != ''"
+        ).fetchall()
+        for row_id, session_id, raw_meta in rows:
+            try:
+                meta = json.loads(raw_meta) if raw_meta else {}
+            except Exception:
+                continue
+            if not isinstance(meta, dict):
+                continue
+            ev_meta = _event_metadata_from_blob(meta, int(row_id))
+            if ev_meta.get("triage_state") != "pending":
+                continue
+            pending_host = str(ev_meta.get("pending_host") or "")
+            pending_at = ev_meta.get("pending_at")
+            if (
+                pending_host
+                and pending_host != current_host
+                and isinstance(pending_at, (int, float))
+                and (now - float(pending_at)) < _ORPHAN_SWEEP_MIN_AGE_SECONDS
+            ):
+                continue
+            conn.execute(
+                "UPDATE intercepted_events SET duplicate_of = ? WHERE id = ? OR duplicate_of = ?",
+                (TRIAGE_ABORTED_SENTINEL, int(row_id), int(row_id)),
+            )
+            _upsert_event_session_metadata(conn, session_id, int(row_id), {"triage_state": "aborted"})
+    except Exception as exc:
+        logger.error(f"Failed to sweep orphan triage anchors on startup: {exc}")
 
 
 def cleanup_old_records(conn: sqlite3.Connection) -> None:
@@ -1002,6 +1235,44 @@ def cleanup_old_records(conn: sqlite3.Connection) -> None:
         logger.error(f"Failed to clean up old DB records: {exc}")
 
 
+def _insert_intercepted_event_row(
+    conn: sqlite3.Connection,
+    cluster: str,
+    namespace: str,
+    workload: str,
+    object_uid: str,
+    object_kind: str,
+    reason: str,
+    message: str,
+    severity: str,
+    occurrences: int,
+    notified: bool,
+    session_id: str,
+    duplicate_of: int,
+) -> int:
+    cursor = conn.execute(
+        "INSERT INTO intercepted_events "
+        "(cluster, namespace, workload, object_uid, object_kind, reason, message, severity, "
+        "occurrences, notified, session_id, duplicate_of) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            cluster,
+            namespace,
+            workload,
+            object_uid,
+            object_kind,
+            reason,
+            message[:LEDGER_MESSAGE_MAX_CHARS],
+            severity,
+            int(occurrences),
+            1 if notified else 0,
+            session_id,
+            int(duplicate_of or 0),
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
 def record_intercepted_event(
     cluster: str,
     namespace: str,
@@ -1014,6 +1285,8 @@ def record_intercepted_event(
     occurrences: int,
     notified: bool,
     session_id: str = "",
+    duplicate_of: int = 0,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> Optional[int]:
     """Append one forwarded event to the ledger the daily recap reads.
 
@@ -1052,33 +1325,348 @@ def record_intercepted_event(
     than on the way out. The reader's 120-character cut is a display choice and
     leaves the row itself unbounded, and the row is what the shared session PVC
     has to hold once a storm is writing one per sighting.
+
+    `duplicate_of` is the id of the admitted row this event was folded into
+    by the workload window (`INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV`), or 0. A
+    duplicate is written with `notified=False`: nothing was sent for it, and
+    the recap must not count it as an alert.
     """
+    if conn is not None:
+        try:
+            return _insert_intercepted_event_row(
+                conn,
+                cluster,
+                namespace,
+                workload,
+                object_uid,
+                object_kind,
+                reason,
+                message,
+                severity,
+                occurrences,
+                notified,
+                session_id,
+                duplicate_of,
+            )
+        except Exception as exc:
+            logger.error(f"Failed to record intercepted event for {namespace}/{workload}: {exc}")
+            return None
     try:
-        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
-            with conn:
-                cursor = conn.execute(
-                    "INSERT INTO intercepted_events "
-                    "(cluster, namespace, workload, object_uid, object_kind, reason, message, severity, "
-                    "occurrences, notified, session_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        cluster,
-                        namespace,
-                        workload,
-                        object_uid,
-                        object_kind,
-                        reason,
-                        message[:LEDGER_MESSAGE_MAX_CHARS],
-                        severity,
-                        int(occurrences),
-                        1 if notified else 0,
-                        session_id,
-                    ),
+        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as local_conn:
+            with local_conn:
+                return _insert_intercepted_event_row(
+                    local_conn,
+                    cluster,
+                    namespace,
+                    workload,
+                    object_uid,
+                    object_kind,
+                    reason,
+                    message,
+                    severity,
+                    occurrences,
+                    notified,
+                    session_id,
+                    duplicate_of,
                 )
-                return cursor.lastrowid
     except Exception as exc:
         logger.error(f"Failed to record intercepted event for {namespace}/{workload}: {exc}")
     return None
+
+
+def _workload_dedup_seconds() -> int:
+    """The workload window, read per call so a test can set it.
+
+    Unset, empty, non-numeric and negative all read as off: the setting
+    arrives through the operator from a validated CRD field, so anything else
+    is a hand-set env the server should not guess at. Values above the CRD's
+    24-hour maximum are clamped to that ceiling with a warning.
+    """
+    raw = os.environ.get(INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, "").strip()
+    if not raw:
+        return INCIDENT_WORKLOAD_DEDUP_OFF
+    try:
+        seconds = int(raw)
+    except ValueError:
+        logger.warning(f"{INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV}={raw!r} is not an integer; workload window off")
+        return INCIDENT_WORKLOAD_DEDUP_OFF
+    if seconds <= INCIDENT_WORKLOAD_DEDUP_OFF:
+        return INCIDENT_WORKLOAD_DEDUP_OFF
+    if seconds > INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS:
+        logger.warning(
+            f"{INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV}={seconds} exceeds the maximum "
+            f"{INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS}s; clamping to {INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS}s"
+        )
+        return INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS
+    return seconds
+
+
+def _recent_delivered_event(
+    cluster: str,
+    namespace: str,
+    workload: str,
+    window_seconds: int,
+    object_kind: str = "",
+    severity: str = "",
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[int]:
+    """The newest admitted ledger row for this workload inside the window, or None.
+
+    Admitted means the inject route answered "injected" and started the
+    triage turn: (`notified >= 1` or `delivery_error != ''`) with
+    `duplicate_of = 0`. `notified = 1` is an alert posted to chat,
+    `notified = 2` (`NOTIFIED_HEADLESS`) is an alert dispatched on a headless
+    install with no chat platform enabled, and the `delivery_error != ''` form
+    is a row :func:`mark_delivery_failed` corrected because the chat post
+    failed — and the chat post is the only thing that failed;
+    `trigger_agent_troubleshooter` goes on to create the gateway session and
+    run the turn, so the agent is working that incident whether or not chat
+    heard of it.
+
+    A row the ceiling suppressed, the severity gate filtered, the window
+    already folded (`duplicate_of > 0`), or whose triage session failed to
+    start (`duplicate_of = TRIAGE_ABORTED_SENTINEL`) does not anchor a
+    window of its own — otherwise a workload whose first event was refused or
+    never started a turn would silence its second. Non-watcher rows
+    (`OutOfBandChange`, `ControllerStall`) share `intercepted_events` and are
+    excluded so a drift or stall record never silences a pod Warning event.
+    A `Critical` event only folds into a `Critical` anchor so an escalation on
+    the same workload is not silenced by an earlier `Warning`.
+
+    Keyed on cluster, namespace, object kind and the cleaned workload name
+    rather than on the reason: kubelet reports one failing pod under several
+    reasons as it moves through pull, start and back-off, and the window exists
+    to treat those, and the same reason on a sibling replica, as one incident.
+
+    An empty workload name anchors nothing: `clean_workload_name` returns ''
+    for a payload with no object name, and a window keyed on '' would fold
+    unrelated nameless events together.
+
+    Best-effort like the writes around it: a read failure means no window,
+    which is the behaviour an install without the setting has.
+    """
+    if window_seconds <= INCIDENT_WORKLOAD_DEDUP_OFF or not workload:
+        return None
+    base_where = (
+        "WHERE cluster = ? AND namespace = ? AND workload = ? "
+        "AND (notified >= 1 OR delivery_error != '') AND duplicate_of = 0 "
+        "AND reason NOT IN (?, ?) "
+    )
+    base_params: list[Any] = [
+        cluster,
+        namespace,
+        workload,
+        DRIFT_LEDGER_REASON,
+        STALL_LEDGER_REASON,
+    ]
+    if object_kind:
+        kind_lower = object_kind.lower()
+        if kind_lower in ("pod", "deployment", "replicaset"):
+            base_where += "AND (object_kind = '' OR LOWER(object_kind) IN ('pod', 'deployment', 'replicaset')) "
+        else:
+            base_where += "AND (object_kind = '' OR LOWER(object_kind) = ?) "
+            base_params.append(kind_lower)
+    if severity == "Critical":
+        base_where += "AND severity = 'Critical' "
+    query = f"SELECT id FROM intercepted_events {base_where}AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT 1"
+    params = [*base_params, f"-{int(window_seconds)} seconds"]
+    try:
+        if conn is not None:
+            row = conn.execute(query, tuple(params)).fetchone()
+        else:
+            with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as local_conn:
+                row = local_conn.execute(query, tuple(params)).fetchone()
+        if row:
+            return int(row[0])
+    except Exception as exc:
+        logger.error(f"Workload window lookup failed for {namespace}/{workload}: {exc}")
+        return None
+    return None
+
+
+def mark_triage_aborted(event_row_id: Optional[int]) -> None:
+    """Release the workload window anchor when a triage turn failed to start.
+
+    Sets ``duplicate_of = TRIAGE_ABORTED_SENTINEL`` on the aborted anchor row,
+    and if any sibling events were folded into this anchor while its turn setup
+    was in flight, promotes the earliest folded sibling to ``duplicate_of = 0``,
+    re-points any remaining folded siblings at the promoted row, transfers any
+    chat thread routing already registered on the aborted anchor to the
+    promoted sibling's session, and starts the promoted sibling's triage turn.
+    """
+    if not event_row_id:
+        return
+    anchor_id = int(event_row_id)
+    headless = _headless_install()
+    promoted_args: Optional[Tuple[str, str, Dict[str, Any], int, Optional[str], Optional[str], bool]] = None
+    try:
+        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0, isolation_level=None)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                anchor_row = conn.execute(
+                    "SELECT session_id, notified, delivery_error FROM intercepted_events WHERE id = ?",
+                    (anchor_id,),
+                ).fetchone()
+                anchor_session_id = str(anchor_row[0] or "") if anchor_row else ""
+                anchor_notified = int(anchor_row[1] or 0) if anchor_row else 0
+                conn.execute(
+                    "UPDATE intercepted_events SET duplicate_of = ? WHERE id = ?",
+                    (TRIAGE_ABORTED_SENTINEL, anchor_id),
+                )
+                if anchor_session_id:
+                    _upsert_event_session_metadata(
+                        conn, anchor_session_id, anchor_id, {"triage_state": "aborted"}
+                    )
+
+                sib_row = conn.execute(
+                    "SELECT id, session_id, cluster, namespace, workload, object_kind, "
+                    "reason, message, severity "
+                    "FROM intercepted_events "
+                    "WHERE duplicate_of = ? AND notified = 0 "
+                    "ORDER BY id ASC LIMIT 1",
+                    (anchor_id,),
+                ).fetchone()
+                if sib_row is not None:
+                    (
+                        sib_id,
+                        sib_session_id,
+                        sib_cluster,
+                        sib_namespace,
+                        sib_workload,
+                        sib_kind,
+                        sib_reason,
+                        sib_message,
+                        sib_severity,
+                    ) = sib_row
+                    sib_id = int(sib_id)
+                    sib_session_id = str(sib_session_id or "")
+                    conn.execute(
+                        "UPDATE intercepted_events SET notified = 0, delivery_error = '' WHERE id = ?",
+                        (anchor_id,),
+                    )
+                    promoted_notified = NOTIFIED_HEADLESS if (headless or anchor_notified == NOTIFIED_HEADLESS) else 1
+                    conn.execute(
+                        "UPDATE intercepted_events SET duplicate_of = 0, notified = ? WHERE id = ?",
+                        (promoted_notified, sib_id),
+                    )
+                    conn.execute(
+                        "UPDATE intercepted_events SET duplicate_of = ? WHERE duplicate_of = ?",
+                        (sib_id, anchor_id),
+                    )
+                    sib_payload: Dict[str, Any] = {}
+                    if sib_session_id:
+                        sib_meta_row = conn.execute(
+                            "SELECT metadata FROM session_metadata WHERE session_id = ?",
+                            (sib_session_id,),
+                        ).fetchone()
+                        if sib_meta_row and sib_meta_row[0]:
+                            try:
+                                loaded = json.loads(sib_meta_row[0])
+                                if isinstance(loaded, dict):
+                                    ev_meta = _event_metadata_from_blob(loaded, sib_id)
+                                    if isinstance(ev_meta.get("folded_payload"), dict):
+                                        sib_payload = ev_meta["folded_payload"]
+                                    elif isinstance(loaded.get("folded_payload"), dict):
+                                        sib_payload = loaded["folded_payload"]
+                            except Exception:
+                                pass
+                    if not sib_payload:
+                        sib_payload = {
+                            "cluster": sib_cluster,
+                            "namespace": sib_namespace,
+                            "name": sib_workload,
+                            "kind_of_object": sib_kind or TRIAGE_DEFAULT_KIND,
+                            "reason": sib_reason,
+                            "message": sib_message,
+                            "type": "Normal" if sib_severity == FEED_FILTERED_SEVERITY else "Warning",
+                        }
+                    transfer_updates: Dict[str, Any] = {
+                        "triage_state": "pending",
+                        "pending_host": socket.gethostname(),
+                        "pending_at": time.time(),
+                    }
+                    reuse_routing = False
+                    if anchor_session_id:
+                        anchor_meta_row = conn.execute(
+                            "SELECT metadata FROM session_metadata WHERE session_id = ?",
+                            (anchor_session_id,),
+                        ).fetchone()
+                        if anchor_meta_row and anchor_meta_row[0]:
+                            try:
+                                anchor_meta = json.loads(anchor_meta_row[0])
+                                if isinstance(anchor_meta, dict):
+                                    anchor_ev_meta = _event_metadata_from_blob(anchor_meta, anchor_id)
+                                    if anchor_meta.get("thread_id"):
+                                        for key in ("platform", "chat_id", "thread_id", "platform_threads", ALERT_TITLE_KEY):
+                                            if key in anchor_meta:
+                                                transfer_updates[key] = anchor_meta[key]
+                                        reuse_routing = True
+                                    elif anchor_ev_meta.get("alert_sent_without_thread") or anchor_meta.get("alert_sent_without_thread"):
+                                        transfer_updates["alert_sent_without_thread"] = True
+                                        reuse_routing = True
+                            except Exception:
+                                pass
+                    if headless or anchor_notified == NOTIFIED_HEADLESS:
+                        reuse_routing = True
+                    if sib_session_id:
+                        _upsert_event_session_metadata(conn, sib_session_id, sib_id, transfer_updates)
+                        raw_msg = str(sib_payload.get("message") or sib_message or "")
+                        raw_reason = str(sib_payload.get("reason") or sib_reason or TRIAGE_DEFAULT_REASON)
+                        severity_emoji, severity_label = get_severity_details(
+                            str(sib_payload.get("type") or "Warning"),
+                            raw_reason,
+                        )
+                        clean_reason = clean_reason_label(raw_reason)
+                        clean_msg = clean_event_message(raw_msg)
+                        sib_alert_msg = (
+                            f"{severity_emoji} **{severity_label}:** {clean_reason} "
+                            f"`{sib_namespace}/{sib_workload}` — {clean_msg}\n"
+                            f"🌱 _Digging down to the root cause..._"
+                        )
+                        promoted_args = (
+                            sib_session_id,
+                            sib_alert_msg,
+                            sib_payload,
+                            sib_id,
+                            _slack_alert_message(sib_workload, sib_cluster, raw_reason, raw_msg),
+                            _alert_session_title(sib_workload, sib_cluster, raw_reason, raw_msg),
+                            reuse_routing,
+                        )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+    except Exception as exc:
+        logger.error(f"Failed to mark triage aborted for ledger row {event_row_id}: {exc}")
+        try:
+            with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as fallback_conn:
+                with fallback_conn:
+                    fallback_conn.execute(
+                        "UPDATE intercepted_events SET duplicate_of = ? WHERE id = ?",
+                        (TRIAGE_ABORTED_SENTINEL, anchor_id),
+                    )
+        except Exception:
+            pass
+        return
+    if promoted_args is not None:
+        (
+            sib_session_id,
+            sib_alert_msg,
+            sib_payload,
+            sib_id,
+            sib_slack_msg,
+            sib_alert_title,
+            reuse_routing,
+        ) = promoted_args
+        trigger_agent_troubleshooter(
+            sib_session_id,
+            sib_alert_msg,
+            sib_payload,
+            sib_id,
+            slack_alert_msg=sib_slack_msg,
+            alert_title=sib_alert_title,
+            _reuse_routing=reuse_routing,
+        )
 
 
 def mark_delivery_failed(event_row_id: Optional[int], detail: str) -> None:
@@ -1157,13 +1745,84 @@ def create_session() -> Dict[str, str]:
     return {"sessionID": session_id}
 
 
+def _payload_controller_ref(payload: Dict[str, Any]) -> str:
+    """Extract the watcher's resolved controller reference from an inject payload."""
+    context = payload.get("context")
+    if isinstance(context, dict):
+        ref = context.get("controller_ref") or context.get("controllerRef") or ""
+        if isinstance(ref, str) and ref.strip():
+            return ref.strip()
+    ref = payload.get("controller_ref") or payload.get("controllerRef") or ""
+    return ref.strip() if isinstance(ref, str) else ""
+
+
+def resolve_workload_identity(
+    kind: str,
+    name: str,
+    controller_ref: str = "",
+) -> tuple[str, str]:
+    """Return ``(workload_kind, workload_name)`` for an event payload.
+
+    When the watcher supplies ``context.controller_ref`` (e.g.
+    ``Deployment/billing``, ``Job/billing``, or ``Pod/billing-zwv24`` for a
+    standalone pod with no ``ownerReferences``), the workload identity is read
+    directly from that owner reference (after verifying that a Pod's name
+    matches the referenced controller prefix) so unrelated controllers that
+    share a name in the same namespace (``Deployment/billing`` vs
+    ``Job/billing``) do not fold into each other, and standalone pods whose
+    names end in five random characters are not stripped to a non-existent
+    parent. When ``controller_ref`` is absent (older watchers or pods deleted
+    before the GET completed), only unambiguous controller replica suffixes
+    (Deployment ``-<pod-template-hash>-<5-char>`` and StatefulSet ``-<ordinal>``
+    on Pods, or ``-<pod-template-hash>`` on ReplicaSets) are stripped so a
+    ref-less Job or standalone pod never folds into a same-named Deployment.
+    """
+    effective_kind = (kind or TRIAGE_DEFAULT_KIND).strip() or TRIAGE_DEFAULT_KIND
+    raw_name = (name or "").strip()
+    ref = (controller_ref or "").strip()
+    if ref:
+        if "/" in ref:
+            ref_kind, ref_name = ref.split("/", 1)
+            ref_kind = ref_kind.strip() or effective_kind
+            ref_name = ref_name.strip()
+        else:
+            ref_kind, ref_name = effective_kind, ref
+        if ref_name:
+            if (
+                effective_kind.lower() != "pod"
+                or ref_kind.lower() == "pod"
+                or raw_name == ref_name
+                or raw_name.startswith(f"{ref_name}-")
+            ):
+                if ref_kind.lower() == "replicaset":
+                    m = re.match(rf"^(.*?)-{_K8S_TEMPLATE_HASH_CHARS}{_K8S_TEMPLATE_HASH_WIDTH}$", ref_name)
+                    if m and m.group(1):
+                        return "Deployment", m.group(1)
+                return ref_kind, ref_name
+    if effective_kind.lower() == "replicaset" and raw_name:
+        m = re.match(rf"^(.*?)-{_K8S_TEMPLATE_HASH_CHARS}{_K8S_TEMPLATE_HASH_WIDTH}$", raw_name)
+        if m and m.group(1):
+            return "Deployment", m.group(1)
+    if effective_kind.lower() == "pod" and raw_name:
+        m = re.match(rf"^(.*?)-{_K8S_TEMPLATE_HASH_CHARS}{_K8S_TEMPLATE_HASH_WIDTH}-[a-z0-9]{{5}}$", raw_name)
+        if m and m.group(1):
+            return "Deployment", m.group(1)
+        m = re.match(r"^(.*?-[0-9]{8,10})-[a-z0-9]{5}$", raw_name)
+        if m and m.group(1):
+            return "Pod", m.group(1)
+        m = re.match(r"^(.*?)-[0-9]+$", raw_name)
+        if m and m.group(1):
+            return "StatefulSet", m.group(1)
+    return effective_kind, raw_name
+
+
 def clean_workload_name(kind: str, name: str) -> str:
     if kind.lower() == "pod":
         # Match pattern of deployment replica (e.g. -6cfdb6b98b-zwv24)
         m = re.match(r"^(.*?)-[a-f0-9]{8,10}-[a-z0-9]{5}$", name)
         if m:
             return m.group(1)
-        # Match pattern of statefulset/job/pod replica (e.g. -0 or -abcde)
+        # Match pattern of daemonset/job/statefulset pod (e.g. -zwv24 or -0)
         m = re.match(r"^(.*?)-[a-z0-9]{5}$", name)
         if m:
             return m.group(1)
@@ -1501,6 +2160,11 @@ def _no_chat_route_error() -> str:
     return NO_CHAT_ROUTE_ERROR
 
 
+def _headless_install() -> bool:
+    """True when no chat platform is enabled on this install."""
+    return enabled_chat_platforms() == [DEFAULT_CHAT_PLATFORM] and _chat_platforms_disabled()
+
+
 def get_active_platform(platforms: Optional[list[str]] = None) -> str:
     """The one platform a single-destination caller posts to.
 
@@ -1604,7 +2268,29 @@ def _post_initial_alert(active_platform: str, alert_msg: str, session_id: str = 
     return None
 
 
-def _claim_alert_quota(severity: str) -> tuple[bool, int]:
+def _claim_alert_quota_on_conn(conn: sqlite3.Connection, day: str, severity: str, limit: int) -> tuple[bool, int]:
+    conn.execute(
+        "INSERT OR IGNORE INTO alert_quota (day, severity) VALUES (?, ?)",
+        (day, severity),
+    )
+    sent, suppressed = conn.execute(
+        "SELECT sent, suppressed FROM alert_quota WHERE day = ? AND severity = ?",
+        (day, severity),
+    ).fetchone()
+    if sent < limit:
+        conn.execute(
+            "UPDATE alert_quota SET sent = sent + 1 WHERE day = ? AND severity = ?",
+            (day, severity),
+        )
+        return True, suppressed
+    conn.execute(
+        "UPDATE alert_quota SET suppressed = suppressed + 1 WHERE day = ? AND severity = ?",
+        (day, severity),
+    )
+    return False, suppressed + 1
+
+
+def _claim_alert_quota(severity: str, conn: Optional[sqlite3.Connection] = None) -> tuple[bool, int]:
     """Spend one of today's alerts for `severity`.
 
     Returns `(allowed, suppressed_today)`. `allowed` is False once the day's
@@ -1622,39 +2308,23 @@ def _claim_alert_quota(severity: str) -> tuple[bool, int]:
 
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
+        if conn is not None:
+            return _claim_alert_quota_on_conn(conn, day, severity, limit)
         # isolation_level=None hands transaction control to us so the BEGIN
         # IMMEDIATE below is the real thing rather than sqlite3's implicit
         # deferred transaction.
-        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0, isolation_level=None)) as conn:
+        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0, isolation_level=None)) as local_conn:
             # IMMEDIATE takes the write lock before the read. A deferred
             # transaction would let two alerts arriving together both read
             # `sent` at limit-1 and both conclude they are within budget, which
             # is the one bug a cap must not have.
-            conn.execute("BEGIN IMMEDIATE")
+            local_conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.execute(
-                    "INSERT OR IGNORE INTO alert_quota (day, severity) VALUES (?, ?)",
-                    (day, severity),
-                )
-                sent, suppressed = conn.execute(
-                    "SELECT sent, suppressed FROM alert_quota WHERE day = ? AND severity = ?",
-                    (day, severity),
-                ).fetchone()
-                if sent < limit:
-                    conn.execute(
-                        "UPDATE alert_quota SET sent = sent + 1 WHERE day = ? AND severity = ?",
-                        (day, severity),
-                    )
-                    conn.execute("COMMIT")
-                    return True, suppressed
-                conn.execute(
-                    "UPDATE alert_quota SET suppressed = suppressed + 1 WHERE day = ? AND severity = ?",
-                    (day, severity),
-                )
-                conn.execute("COMMIT")
-                return False, suppressed + 1
+                allowed, count = _claim_alert_quota_on_conn(local_conn, day, severity, limit)
+                local_conn.execute("COMMIT")
+                return allowed, count
             except Exception:
-                conn.execute("ROLLBACK")
+                local_conn.execute("ROLLBACK")
                 raise
     except Exception as exc:
         logger.error(f"Alert quota check failed for severity {severity} (allowing the alert through): {exc}")
@@ -2015,41 +2685,16 @@ def _incident_triage_opens_pull_request() -> bool:
     return os.environ.get(INCIDENT_TRIAGE_OPEN_PR_ENV, "").strip().lower() == INCIDENT_TRIAGE_OPEN_PR_ON
 
 
-def _incident_branch_workload(kind: str, raw_name: str, controller_ref: str = "") -> tuple[str, str]:
-    """Return ``(kind, workload)`` for an incident's pull-request branch.
-
-    Prefers ``context.controller_ref`` (``Kind/Name``) when present and matching
-    the pod's name prefix. Without one, strips only unambiguous controller
-    replica suffixes on Pods — Deployment ``-<template-hash>-<5-char-suffix>``
-    and StatefulSet ``-<ordinal>`` — rather than ``clean_workload_name``'s
-    display heuristic, which strips any trailing five-character word and would
-    merge distinct bare pods (``redis-cache`` and ``redis-proxy``) onto one
-    branch while leaving StatefulSet replicas (``cache-0`` and ``cache-1``)
-    split across branches.
-    """
-    ref = (controller_ref or "").strip()
-    if "/" in ref:
-        ref_kind, ref_name = ref.split("/", 1)
-        ref_kind, ref_name = ref_kind.strip(), ref_name.strip()
-        if ref_kind and ref_name:
-            if kind.lower() != "pod" or ref_kind.lower() == "pod" or raw_name == ref_name or raw_name.startswith(f"{ref_name}-"):
-                return ref_kind, ref_name
-    if (kind or TRIAGE_DEFAULT_KIND).lower() == "pod" and raw_name:
-        match = _INCIDENT_BRANCH_REPLICA_RE.match(raw_name)
-        if match and match.group(1):
-            return kind, match.group(1)
-    return kind, raw_name
-
-
 def _incident_branch(session_id: str, payload: Dict[str, Any]) -> str:
     """The branch an incident's pull request is opened on, one per incident.
 
     Keyed to the event's coordinates (cluster, namespace, kind, workload name
-    with Deployment replica suffixes and StatefulSet ordinals stripped, and
-    reason) rather than the per-inject ``session_id``: the watcher mints a new
-    ``k8s-evt-<hex>`` session whenever an incident's dedup window rolls over or
-    its snapshot is lost, in ``--mode=shared`` every incident shares one
-    session, and ``_incident_branch_workload`` collapses Deployment replica and
+    with Deployment replica suffixes and StatefulSet ordinals stripped via
+    :func:`resolve_workload_identity`, and reason) rather than the per-inject
+    ``session_id``: the watcher mints a new ``k8s-evt-<hex>`` session whenever
+    an incident's dedup window rolls over or its snapshot is lost, in
+    ``--mode=shared`` every incident shares one session, and
+    :func:`resolve_workload_identity` collapses Deployment replica and
     StatefulSet ordinal pod suffixes while keeping distinct bare pods apart so
     one workload fault shares one branch. ``session_id`` is used only when the
     payload carries no coordinates.
@@ -2063,9 +2708,16 @@ def _incident_branch(session_id: str, payload: Dict[str, Any]) -> str:
     """
     raw_kind = str(payload.get("kind_of_object") or payload.get("kindOfObject") or "")
     raw_name = str(payload.get("name") or "")
-    ctx = payload.get("context")
-    controller_ref = str(ctx.get("controller_ref") or "") if isinstance(ctx, dict) else ""
-    kind, workload = _incident_branch_workload(raw_kind, raw_name, controller_ref) if raw_name else (raw_kind, "")
+    controller_ref = _payload_controller_ref(payload)
+    if raw_name:
+        resolved_kind, workload = resolve_workload_identity(
+            raw_kind or TRIAGE_DEFAULT_KIND,
+            raw_name,
+            controller_ref,
+        )
+        kind = resolved_kind if controller_ref else raw_kind
+    else:
+        kind, workload = raw_kind, ""
     coords = (
         str(payload.get("cluster") or ""),
         str(payload.get("namespace") or ""),
@@ -2906,8 +3558,13 @@ def _stall_agent_query(payload: Dict[str, Any]) -> str:
     )
 
 
-def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[str, str]) -> None:
-    """Post the agent query request to execute the diagnostic reasoning loop."""
+def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[str, str]) -> bool:
+    """Post the agent query request to execute the diagnostic reasoning loop.
+
+    Returns ``True`` when the gateway accepted the turn (or timed out while the
+    turn is still running), and ``False`` when the gateway rejected or failed
+    to start the turn before accepting it.
+    """
     try:
         req = urllib.request.Request(
             f"{api_url}/api/sessions/{session_id}/chat",
@@ -2918,8 +3575,20 @@ def _start_agent_turn(api_url: str, session_id: str, query: str, headers: Dict[s
         with urllib.request.urlopen(req, timeout=300.0) as resp:
             if resp.status != 200:
                 logger.error(f"Gateway API chat execution failed (status {resp.status})")
+                return False
+            return True
+    except urllib.error.HTTPError as exc:
+        logger.error(f"Failed to call gateway API chat execution: {exc}")
+        return False
+    except urllib.error.URLError as exc:
+        logger.error(f"Failed to call gateway API chat execution: {exc}")
+        return False
+    except TimeoutError as exc:
+        logger.warning(f"Gateway API chat execution timed out waiting for turn completion: {exc}")
+        return True
     except Exception as exc:
         logger.error(f"Failed to call gateway API chat execution: {exc}")
+        return False
 
 
 def trigger_agent_troubleshooter(
@@ -2929,6 +3598,8 @@ def trigger_agent_troubleshooter(
     event_row_id: Optional[int] = None,
     slack_alert_msg: Optional[str] = None,
     alert_title: Optional[str] = None,
+    *,
+    _reuse_routing: bool = False,
 ) -> None:
     """Post warning alert to Chat, configure thread mapping, and trigger the agent loop in background.
 
@@ -2958,7 +3629,9 @@ def trigger_agent_troubleshooter(
     #    refused, so on an install whose first leg accepts, nothing would say
     #    the second was skipped.
     platforms = enabled_chat_platforms()
-    if platforms == [DEFAULT_CHAT_PLATFORM] and _chat_platforms_disabled():
+    if _reuse_routing:
+        pass
+    elif platforms == [DEFAULT_CHAT_PLATFORM] and _chat_platforms_disabled():
         mark_delivery_headless(event_row_id)
     else:
         active_platform = get_active_platform(platforms)
@@ -2973,6 +3646,20 @@ def trigger_agent_troubleshooter(
                 # trying the next platform would post it to a second channel to
                 # chase a thread id. Fall into the `else` below, which records the
                 # delivery as unconfirmed rather than lost — the honest reading.
+                if session_id:
+                    try:
+                        with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
+                            with conn:
+                                _upsert_event_session_metadata(
+                                    conn,
+                                    session_id,
+                                    event_row_id,
+                                    {"alert_sent_without_thread": True},
+                                )
+                    except Exception as exc:
+                        logger.warning(
+                            f"Failed to record alert_sent_without_thread for {session_id}: {exc}"
+                        )
                 active_platform, thread_id = candidate, None
                 break
             if thread_id:
@@ -3029,12 +3716,28 @@ def trigger_agent_troubleshooter(
     #    own agent; see _build_agent_query.
     session_created = _create_gateway_session(api_url, session_id, headers)
     if not session_created:
+        mark_triage_aborted(event_row_id)
         logger.error(f"Aborting troubleshooting trigger: session creation failed for {session_id}")
         return
 
+    if session_id:
+        try:
+            with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=5.0)) as conn:
+                with conn:
+                    _upsert_event_session_metadata(
+                        conn,
+                        session_id,
+                        event_row_id,
+                        {"triage_state": "started"},
+                    )
+        except Exception as exc:
+            logger.warning(f"Failed to record triage_state=started for {session_id}: {exc}")
+
     # 5. Formulate instructions query and execute the agent turn
     agent_query = _build_agent_query(payload, session_id)
-    _start_agent_turn(api_url, session_id, agent_query, headers)
+    if _start_agent_turn(api_url, session_id, agent_query, headers) is False:
+        mark_triage_aborted(event_row_id)
+        return
 
 
 # --------------------------------------------------------------------------
@@ -4474,7 +5177,16 @@ def inject_message(
 
     severity_emoji, severity_label = get_severity_details(event_type, event_reason)
 
-    clean_name = clean_workload_name(object_kind, object_name)
+    window_seconds = _workload_dedup_seconds()
+    if window_seconds > INCIDENT_WORKLOAD_DEDUP_OFF:
+        workload_kind, clean_name = resolve_workload_identity(
+            object_kind,
+            object_name,
+            _payload_controller_ref(payload),
+        )
+    else:
+        workload_kind = object_kind
+        clean_name = clean_workload_name(object_kind, object_name)
     clean_reason = clean_reason_label(event_reason)
     clean_msg = clean_event_message(message)
 
@@ -4512,28 +5224,105 @@ def inject_message(
     # `BackOff`s can exhaust it and cap-drop the node event behind them.
     quota_denied = False
     suppressed_today = 0
-    if not suppressed:
-        allowed, suppressed_today = _claim_alert_quota(severity_label)
-        quota_denied = not allowed
+    # The workload window sits between the severity gate and the ceiling: an
+    # Info event never anchors or spends anything, and a duplicate must not
+    # draw on the day's budget either — it is the same incident the budget
+    # already paid for. Checked before the ledger write so the row carries
+    # the verdict, and before the quota so the claim is skipped.
+    duplicate_of = None
+    if window_seconds > INCIDENT_WORKLOAD_DEDUP_OFF and not suppressed:
+        with _inject_admission_transaction() as admission_conn:
+            duplicate_of = _recent_delivered_event(
+                event_cluster,
+                namespace,
+                clean_name,
+                window_seconds,
+                object_kind=workload_kind,
+                severity=severity_label,
+                conn=admission_conn,
+            )
+            if duplicate_of is None:
+                allowed, suppressed_today = _claim_alert_quota(severity_label, conn=admission_conn)
+                quota_denied = not allowed
 
-    # One ledger row per forwarded event, whatever became of it, with
-    # `notified` carrying the outcome — that invariant is what lets the daily
-    # recap report a suppressed event as a number rather than lose it. A
-    # cap-dropped alert is written here too: it is the case the recap most
-    # needs to show, since nothing about it reaches chat at all.
-    event_row_id = record_intercepted_event(
-        cluster=event_cluster,
-        namespace=namespace,
-        workload=clean_name,
-        object_uid=object_uid,
-        object_kind=object_kind,
-        reason=event_reason,
-        message=clean_msg,
-        severity=severity_label,
-        occurrences=count,
-        notified=not (suppressed or quota_denied),
-        session_id=session_id,
-    )
+            event_row_id = record_intercepted_event(
+                cluster=event_cluster,
+                namespace=namespace,
+                workload=clean_name,
+                object_uid=object_uid,
+                object_kind=workload_kind,
+                reason=event_reason,
+                message=clean_msg,
+                severity=severity_label,
+                occurrences=count,
+                notified=not (quota_denied or duplicate_of is not None),
+                session_id=session_id,
+                duplicate_of=duplicate_of or 0,
+                conn=admission_conn,
+            )
+            if admission_conn is not None and session_id:
+                try:
+                    if duplicate_of is not None:
+                        _upsert_event_session_metadata(
+                            admission_conn,
+                            session_id,
+                            event_row_id,
+                            {
+                                "triage_state": "folded",
+                                "folded_payload": _bounded_folded_payload(payload),
+                            },
+                        )
+                    elif not quota_denied:
+                        _upsert_event_session_metadata(
+                            admission_conn,
+                            session_id,
+                            event_row_id,
+                            {
+                                "triage_state": "pending",
+                                "pending_host": socket.gethostname(),
+                                "pending_at": time.time(),
+                            },
+                        )
+                except Exception as exc:
+                    logger.warning(f"Failed to persist triage_state for {session_id}: {exc}")
+    else:
+        if not suppressed:
+            allowed, suppressed_today = _claim_alert_quota(severity_label)
+            quota_denied = not allowed
+
+        # One ledger row per forwarded event, whatever became of it, with
+        # `notified` carrying the outcome — that invariant is what lets the daily
+        # recap report a suppressed event as a number rather than lose it. A
+        # cap-dropped alert is written here too: it is the case the recap most
+        # needs to show, since nothing about it reaches chat at all.
+        event_row_id = record_intercepted_event(
+            cluster=event_cluster,
+            namespace=namespace,
+            workload=clean_name,
+            object_uid=object_uid,
+            object_kind=workload_kind,
+            reason=event_reason,
+            message=clean_msg,
+            severity=severity_label,
+            occurrences=count,
+            notified=not (suppressed or quota_denied),
+            session_id=session_id,
+            duplicate_of=0,
+        )
+
+    if duplicate_of is not None:
+        # "folded", deliberately distinct from both "suppressed" (which drops
+        # the watcher's dedup entry) and "filtered" (which calls
+        # MarkPolicyFiltered so the next Warning on the same pod reopens the
+        # entry and re-injects on every kubelet resync). Both a watcher that
+        # recognizes "folded" and an older watcher that treats unknown 2xx
+        # statuses as accepted keep the dedup entry closed without marking it
+        # policy-filtered.
+        logger.info(
+            f"Folded {severity_label} event {event_reason} for {namespace}/{clean_name} "
+            f"into ledger row {duplicate_of} (workload window {window_seconds}s); no triage session"
+        )
+        return {"status": "folded", "duplicate_of": str(duplicate_of)}
 
     if suppressed:
         # "filtered", deliberately not the "suppressed" the ceiling answers
@@ -4915,16 +5704,24 @@ def _validate_non_negative_int64(value: int, name: str) -> int:
     return value
 
 
-def _feed_status(notified: int, severity: str, delivery_error: str) -> str:
+def _feed_status(notified: int, severity: str, delivery_error: str, duplicate_of: int = 0) -> str:
     """What became of a ledger row, in the inject route's own words.
 
-    Derived rather than stored, from the three columns that already decide it:
-    `notified` is non-zero (`1` when posted to chat, or `NOTIFIED_HEADLESS = 2`
-    when dispatched on a headless install where `_chat_platforms_disabled`
-    skips chat delivery) only for an alert admitted past the severity gate and
-    daily quota, an Info row is the one the severity gate filters, and
-    `delivery_error` is written only when a chat post was attempted and failed.
+    Derived rather than stored, from the four columns that already decide it:
+    `duplicate_of > 0` marks a row folded into an existing workload-window
+    anchor, `duplicate_of == TRIAGE_ABORTED_SENTINEL` marks an anchor whose
+    triage session failed to start, `notified` is non-zero (`1` when posted to
+    chat, or `NOTIFIED_HEADLESS = 2` when dispatched on a headless install where
+    `_chat_platforms_disabled` skips chat delivery) only for an alert admitted
+    past the severity gate and daily quota, an Info row is the one the severity
+    gate filters, and `delivery_error` is written only when a chat post was
+    attempted and failed.
     """
+    dup = int(duplicate_of or 0)
+    if dup > 0:
+        return FEED_STATUS_FOLDED
+    if dup == TRIAGE_ABORTED_SENTINEL:
+        return FEED_STATUS_UNDELIVERED
     if notified:
         return FEED_STATUS_INJECTED
     if delivery_error:
@@ -4952,7 +5749,7 @@ def list_intercepted_events(
     limit = _clamp_limit(limit, FEED_EVENTS_MAX_LIMIT)
     columns = (
         "id, session_id, created_at, cluster, namespace, object_kind, workload, "
-        "reason, severity, notified, delivery_error, message"
+        "reason, severity, notified, delivery_error, duplicate_of, message"
     )
     with closing(_read_only(SESSION_KV_DB_PATH)) as conn:
         if since_id is not None:
@@ -4976,7 +5773,12 @@ def list_intercepted_events(
             "name": row["workload"],
             "reason": row["reason"],
             "severity": row["severity"],
-            "status": _feed_status(row["notified"], row["severity"], row["delivery_error"]),
+            "status": _feed_status(
+                row["notified"],
+                row["severity"],
+                row["delivery_error"],
+                row["duplicate_of"],
+            ),
             "message": row["message"],
         }
         for row in rows[:limit]
