@@ -206,6 +206,21 @@ approvals:
   cron_mode: approve
   cron_scan: true
 
+# Session titles. Hermes names every new session with one extra model call
+# (agent/title_generator.py) that asks for the lowest reasoning setting
+# (`reasoning_config: {enabled: false}`, which Hermes translates to
+# `reasoning_effort: "minimal"`). On Vertex AI Gemini 3.x Flash, LiteLLM maps
+# that to `thinkingLevel: "minimal"`, which the endpoint rejects with HTTP 400
+# ("Thinking level is unsupported: THINKING_LEVEL_MINIMAL"), failing on both
+# the primary and fallback aliases. On Anthropic Claude Sonnet/Opus, LiteLLM
+# maps `"minimal"` to `budget_tokens: 1024` (or `effort: "low"`), burning up
+# to 1,024 reasoning tokens and an extra round-trip per session. Nothing here
+# reads a session title: there is no TUI and the chat adapters do not show it.
+# Off until Hermes lets the title call follow the profile's reasoning setting.
+auxiliary:
+  title_generation:
+    enabled: false
+
 # Enable DuckDuckGo web search
 web:
   backend: "ddgs"
