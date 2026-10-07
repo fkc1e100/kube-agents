@@ -2806,6 +2806,8 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
             expected_branch,
         )
         self.assertIn("keyed to this workload", body)
+        self.assertIn("Implement ONLY the option marked", body)
+        self.assertIn("over unapplied Terraform", body)
         self.assertIn("kanban_list(status='in_progress')", body)
         self.assertIn("prepare --force", body)
         self.assertIn("push nothing", body)
