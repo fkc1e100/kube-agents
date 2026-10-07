@@ -113,6 +113,17 @@ WORKER_PROMPT_PREFIX = "work kanban task "
 HERMES_JSON_CONTENT_PREFIX = "\x00json:"
 HERMES_STATE_DB_FILENAME = "state.db"
 WORKER_STEP_WITHHELD = "[withheld: redactor unavailable]"
+PRE_KANBAN_TASK_PREFIX = "pre-kanban:"
+PRE_KANBAN_ASSIGNEE = "incident-triage"
+PRE_KANBAN_PRIORITY = "high"
+PRE_KANBAN_STATUS_IN_PROGRESS = "in_progress"
+PRE_KANBAN_STATUS_COMPLETED = "completed"
+PRE_KANBAN_STATUS_FAILED = "failed"
+# Matches `_start_agent_turn`'s 300s gateway timeout: if a routing turn was
+# never closed in `sessions.ended_at` and its last recorded timestamp is older
+# than this window, treat it as terminated rather than permanently `in_progress`.
+PRE_KANBAN_STALE_AFTER_SECONDS = 300.0
+PRE_KANBAN_STALE_ERROR = "front-door routing turn ended without creating a kanban task"
 _REDACTOR_CANDIDATES = (
     Path("/opt/defaults/plugins/common/redactor.py"),
     Path(__file__).resolve().parents[2] / "chat" / "defaults" / "plugins" / "common" / "redactor.py",
@@ -4215,9 +4226,21 @@ def list_session_tasks(session_id: str, limit: int = FEED_TASKS_DEFAULT_LIMIT) -
     triage the front door filed; later ones are whatever that work spawned
     under the same session. Each card also carries `live_steps` and
     `steps_truncated` from the worker's Hermes session (`state.db`).
+
+    When an intercepted event session has no kanban card yet, a synthetic entry
+    (`id = pre-kanban:<session_id>`, `assignee = "incident-triage"`) is built
+    from the default profile's `state.db` (`status = "in_progress"` while the
+    front-door routing turn is active, or terminal `"completed"` / `"failed"`
+    once `sessions.ended_at` is set or the routing turn ages past the gateway
+    timeout without filing a card).
     """
     limit = _clamp_limit(limit, FEED_TASKS_MAX_LIMIT)
     result = _read_kanban(lambda conn: _session_task_rows(conn, session_id, limit))
+    board_exists = result is not None
+    if result is None or not result["tasks"]:
+        pre_task = _read_pre_kanban_session_task(session_id)
+        if pre_task is not None:
+            return {"tasks": [pre_task][:limit], "truncated": False, "board": board_exists}
     return {**result, "board": True} if result is not None else _empty_task_feed()
 
 
@@ -4395,6 +4418,154 @@ def _extract_steps_from_conn(
             res_text = _decode_hermes_content(m["content"])
             steps.append(_make_worker_step("tool_result", str(m["tool_name"] or ""), res_text, ts))
     return steps, rows_clipped
+
+
+def _is_intercepted_event_session(session_id: str) -> bool:
+    """True when `session_id` was recorded by the event-injection ledger."""
+    if not session_id or not os.path.isfile(SESSION_KV_DB_PATH):
+        return False
+    try:
+        with closing(_read_only(SESSION_KV_DB_PATH)) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM intercepted_events WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            return row is not None
+    except sqlite3.Error:
+        return False
+
+
+def _timestamp_epoch_seconds(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def _read_pre_kanban_session_task(session_id: str) -> Optional[Dict[str, Any]]:
+    """Synthesize a front-door task from `default` profile `state.db` before `kanban_create` runs.
+
+    Scoped strictly to sessions recorded in `intercepted_events` so arbitrary
+    chat conversations in the front-door `state.db` cannot be queried by
+    `session_id`. When `sessions.ended_at` is set, or the session was never
+    closed by Hermes and its last timestamp is older than
+    `PRE_KANBAN_STALE_AFTER_SECONDS`, returns a terminal status (`completed`
+    when the front door produced a reply, or `failed` when an unclosed routing
+    turn timed out without filing a card) instead of staying `in_progress`.
+    """
+    if not _is_intercepted_event_session(session_id):
+        return None
+    db_path = _profile_state_db(_feed_data_root(), DEFAULT_PROFILE)
+    if db_path is None:
+        return None
+    window_size = TASK_DETAIL_MAX_STEPS * TASK_STEP_ROW_MULTIPLIER
+    steps: list[Dict[str, Any]] = []
+    rows_clipped = False
+    title = f"Triage {session_id}"
+    created_at: Any = None
+    ended_at: Any = None
+    has_session = False
+    try:
+        with closing(_read_only(str(db_path))) as sconn:
+            msg_cols = {r[1] for r in sconn.execute("PRAGMA table_info(messages)")}
+            steps, rows_clipped = _extract_steps_from_conn(
+                sconn, msg_cols, session_id, window_size
+            )
+            has_session = bool(steps)
+            sess_cols = {r[1] for r in sconn.execute("PRAGMA table_info(sessions)")}
+            if "id" in sess_cols:
+                title_col = "title" if "title" in sess_cols else "NULL AS title"
+                started_col = "started_at" if "started_at" in sess_cols else "NULL AS started_at"
+                ended_col = "ended_at" if "ended_at" in sess_cols else "NULL AS ended_at"
+                srow = sconn.execute(
+                    f"SELECT {title_col}, {started_col}, {ended_col} FROM sessions WHERE id = ? LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if srow is not None:
+                    has_session = True
+                    if srow["title"]:
+                        title = str(srow["title"])
+                    created_at = srow["started_at"]
+                    ended_at = srow["ended_at"]
+            if not has_session and "session_id" in msg_cols:
+                mrow = sconn.execute(
+                    "SELECT timestamp FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                if mrow is not None:
+                    has_session = True
+                    created_at = mrow["timestamp"]
+    except sqlite3.Error:
+        return None
+    if not has_session:
+        return None
+    steps_truncated = rows_clipped or len(steps) > TASK_DETAIL_MAX_STEPS
+    if len(steps) > TASK_DETAIL_MAX_STEPS:
+        steps = steps[-TASK_DETAIL_MAX_STEPS:]
+    updated_at = steps[-1].get("at") if steps else created_at
+    reply_step = next((s for s in reversed(steps) if s.get("kind") == "reply"), None)
+    reply_result = (reply_step.get("detail") or reply_step.get("preview")) if reply_step else None
+    reply_summary = reply_step.get("preview") if reply_step else None
+
+    status = PRE_KANBAN_STATUS_IN_PROGRESS
+    completed_at: Any = None
+    summary: Optional[str] = None
+    result: Optional[str] = None
+    error: Optional[str] = None
+
+    has_ended = ended_at is not None and str(ended_at).strip() != ""
+    updated_epoch = _timestamp_epoch_seconds(updated_at)
+    is_stale = (
+        not has_ended
+        and updated_epoch is not None
+        and (time.time() - updated_epoch) > PRE_KANBAN_STALE_AFTER_SECONDS
+    )
+    if has_ended:
+        status = PRE_KANBAN_STATUS_COMPLETED
+        completed_at = ended_at
+        summary = reply_summary
+        result = reply_result
+    elif is_stale:
+        completed_at = updated_at
+        if reply_step is not None:
+            status = PRE_KANBAN_STATUS_COMPLETED
+            summary = reply_summary
+            result = reply_result
+        else:
+            status = PRE_KANBAN_STATUS_FAILED
+            error = PRE_KANBAN_STALE_ERROR
+
+    return {
+        "id": f"{PRE_KANBAN_TASK_PREFIX}{session_id}",
+        "title": title,
+        "assignee": PRE_KANBAN_ASSIGNEE,
+        "status": status,
+        "priority": PRE_KANBAN_PRIORITY,
+        "session_id": session_id,
+        "created_at": created_at,
+        "started_at": created_at,
+        "completed_at": completed_at,
+        "updated_at": completed_at if completed_at is not None else updated_at,
+        "summary": summary,
+        "result": result,
+        "error": error,
+        "live_steps": steps,
+        "steps_truncated": steps_truncated,
+    }
 
 
 class _WorkerStepReader:

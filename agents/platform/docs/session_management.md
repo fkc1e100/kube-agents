@@ -370,7 +370,7 @@ CREATE TABLE intercepted_events(
 );
 ```
 
-For installs with no chat platform enabled or external consoles, `session_kv_server.py` also exposes `SESSION_KV_API_KEY`-authenticated read-only feed endpoints (`GET /v1/intercepted-events`, `GET /v1/sessions/{session_id}/tasks`, `GET /v1/tasks`, and `GET /v1/tasks/{task_id}`) that open `session_kv.db`, `kanban.db`, and the Hermes session stores (`<agent_home>/state.db` and `<agent_home>/profiles/<profile>/state.db`) with `?mode=ro`, scrubbing worker step text through `AuditRedactor` before returning it.
+For installs with no chat platform enabled or external consoles, `session_kv_server.py` also exposes `SESSION_KV_API_KEY`-authenticated read-only feed endpoints (`GET /v1/intercepted-events`, `GET /v1/sessions/{session_id}/tasks`, `GET /v1/tasks`, and `GET /v1/tasks/{task_id}`) that open `session_kv.db`, `kanban.db`, and the Hermes session stores (`<agent_home>/state.db` and `<agent_home>/profiles/<profile>/state.db`) with `?mode=ro`, scrubbing worker step text through `AuditRedactor` before returning it. When `GET /v1/sessions/{session_id}/tasks` is called for an `intercepted_events` session before the front door has filed a kanban card, it returns a synthetic `pre-kanban:<session_id>` task (`in_progress` while the front-door turn is active, or terminal `completed` / `failed` once `sessions.ended_at` is set or the turn ages past the 300 s gateway timeout).
 
 ##### Two bounds, not one
 

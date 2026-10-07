@@ -5554,11 +5554,37 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        self.kv_db_path = self.root / "session_kv.db"
+        kv_patcher = patch.object(session_kv_server, "SESSION_KV_DB_PATH", str(self.kv_db_path))
+        kv_patcher.start()
+        self.addCleanup(kv_patcher.stop)
+        session_kv_server.init_db()
+
         os.environ["SESSION_KV_API_KEY"] = API_KEY
         self.addCleanup(lambda: os.environ.pop("SESSION_KV_API_KEY", None))
         self.client = TestClient(session_kv_server.app, headers=AUTH_HEADERS)
 
-    def _write_profile_store(self, profile: str, rows: list[tuple]):
+    def _record_ledger_session(self, session_id: str):
+        session_kv_server.record_intercepted_event(
+            cluster="prod-us",
+            namespace="default",
+            workload="payments-api",
+            object_uid="uid-1",
+            object_kind="Pod",
+            reason="BackOff",
+            message="Back-off restarting failed container",
+            severity="Warning",
+            occurrences=1,
+            notified=True,
+            session_id=session_id,
+        )
+
+    def _write_profile_store(
+        self,
+        profile: str,
+        rows: list[tuple],
+        sessions: list[tuple] | None = None,
+    ):
         import sqlite3
 
         if not profile or profile == "default":
@@ -5567,6 +5593,16 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
             db_path = self.root / "profiles" / profile / "state.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS sessions ("
+                "id TEXT PRIMARY KEY, title TEXT, started_at REAL, ended_at REAL)"
+            )
+            if sessions:
+                for sid, title, started_at, ended_at in sessions:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO sessions (id, title, started_at, ended_at) VALUES (?, ?, ?, ?)",
+                        (sid, title, started_at, ended_at),
+                    )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS messages ("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
@@ -5746,6 +5782,92 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
         self.assertEqual(tasks[1]["live_steps"][0]["preview"], "Second card reply")
         profile_opens = [p for p in opened_paths if p.endswith("state.db")]
         self.assertEqual(len(profile_opens), 1)
+
+    def test_pre_kanban_live_session_synthesized_when_no_card_exists_yet(self):
+        now = time.time()
+        self._record_ledger_session("k8s-evt-pre")
+        self._write_profile_store(
+            "default",
+            [
+                ("k8s-evt-pre", "user", "A Kubernetes Warning event needs triage...", None, None, now - 2.0, None),
+                (
+                    "k8s-evt-pre",
+                    "assistant",
+                    None,
+                    None,
+                    [{"function": {"name": "kanban_create", "arguments": '{"assignee":"cluster-gke","title":"Triage"}'}}],
+                    now - 1.0,
+                    "Routing the warning event to the cluster specialist.",
+                ),
+            ],
+            sessions=[("k8s-evt-pre", "Triage default/Pod/payments-api (BackOff)", now - 2.0, None)],
+        )
+
+        resp = self.client.get("/v1/sessions/k8s-evt-pre/tasks")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["board"])
+        self.assertEqual(len(body["tasks"]), 1)
+        task = body["tasks"][0]
+        self.assertEqual(task["id"], "pre-kanban:k8s-evt-pre")
+        self.assertEqual(task["title"], "Triage default/Pod/payments-api (BackOff)")
+        self.assertEqual(task["assignee"], "incident-triage")
+        self.assertEqual(task["status"], "in_progress")
+        self.assertEqual(task["session_id"], "k8s-evt-pre")
+        self.assertIsNone(task["completed_at"])
+        self.assertEqual([s["kind"] for s in task["live_steps"]], ["thinking", "tool_call"])
+        self.assertEqual(task["live_steps"][1]["tool"], "kanban_create")
+        self.assertFalse(task["steps_truncated"])
+
+        unknown_resp = self.client.get("/v1/sessions/k8s-evt-nonexistent/tasks")
+        self.assertEqual(unknown_resp.status_code, 200)
+        self.assertEqual(unknown_resp.json()["tasks"], [])
+
+    def test_pre_kanban_ended_or_stale_session_reports_terminal_status(self):
+        now = time.time()
+        self._record_ledger_session("k8s-evt-ended")
+        self._record_ledger_session("k8s-evt-stale")
+        final_prose = "## What's wrong\n\nContainer failed liveness probe due to port mismatch."
+        self._write_profile_store(
+            "default",
+            [
+                ("k8s-evt-ended", "user", "A Kubernetes Warning event needs triage...", None, None, now - 10.0, None),
+                ("k8s-evt-ended", "assistant", final_prose, None, None, now - 5.0, "Diagnosing directly."),
+                ("k8s-evt-stale", "user", "A Kubernetes Warning event needs triage...", None, None, now - 600.0, None),
+                ("k8s-evt-stale", "assistant", None, None, None, now - 595.0, "Starting routing turn..."),
+            ],
+            sessions=[
+                ("k8s-evt-ended", "Triage ended session", now - 10.0, now - 4.0),
+                ("k8s-evt-stale", "Triage stale session", now - 600.0, None),
+            ],
+        )
+
+        ended_task = self.client.get("/v1/sessions/k8s-evt-ended/tasks").json()["tasks"][0]
+        self.assertEqual(ended_task["status"], "completed")
+        self.assertEqual(ended_task["completed_at"], now - 4.0)
+        self.assertEqual(ended_task["result"], final_prose)
+        self.assertEqual(ended_task["summary"], final_prose)
+        self.assertIsNone(ended_task["error"])
+
+        stale_task = self.client.get("/v1/sessions/k8s-evt-stale/tasks").json()["tasks"][0]
+        self.assertEqual(stale_task["status"], "failed")
+        self.assertEqual(stale_task["completed_at"], now - 595.0)
+        self.assertEqual(stale_task["error"], session_kv_server.PRE_KANBAN_STALE_ERROR)
+
+    def test_pre_kanban_rejects_non_ledger_front_door_chat_session(self):
+        now = time.time()
+        self._write_profile_store(
+            "default",
+            [
+                ("slack-thread-123", "user", "Can you check our staging secret?", None, None, now - 2.0, None),
+                ("slack-thread-123", "assistant", "Here is the chat reply.", None, None, now - 1.0, None),
+            ],
+            sessions=[("slack-thread-123", "Slack conversation", now - 2.0, None)],
+        )
+
+        resp = self.client.get("/v1/sessions/slack-thread-123/tasks")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["tasks"], [])
 
 
 
