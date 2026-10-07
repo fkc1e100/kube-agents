@@ -97,6 +97,15 @@ FEED_TASKS_MAX_LIMIT = 200
 TASK_DETAIL_MAX_RUNS = 100
 TASK_DETAIL_MAX_EVENTS = 500
 TASK_DETAIL_MAX_COMMENTS = 200
+TASK_DETAIL_MAX_STEPS = 100
+TASK_STEP_PREVIEW_MAX_CHARS = 240
+TASK_STEP_DETAIL_MAX_CHARS = 4000
+# The user prompt the kanban dispatcher starts a worker session with
+# (`hermes -p <profile> chat -q "work kanban task <id>"`). Used to map a card
+# to its worker session in the profile's `state.db` when `task_runs.metadata`
+# does not record `worker_session_id`.
+WORKER_PROMPT_PREFIX = "work kanban task "
+HERMES_JSON_CONTENT_PREFIX = "\x00json:"
 # The `status` a feed row reports, derived from what the ledger stored. The
 # first three are the inject route's own answers. `undelivered` is the fourth
 # outcome the ledger can hold: injected, then the chat post failed and
@@ -3859,14 +3868,186 @@ def list_tasks(since: int = 0, limit: int = FEED_TASKS_DEFAULT_LIMIT, assignee: 
     return {**result, "board": True} if result is not None else _empty_task_feed()
 
 
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _profile_state_db(data_root: Path, profile: str) -> Optional[Path]:
+    """Return the read-only `state.db` path for `profile` under `data_root`."""
+    try:
+        root_resolved = data_root.resolve()
+        if not profile or profile == "default":
+            candidate = (data_root / "state.db").resolve()
+        else:
+            candidate = (data_root / "profiles" / profile / "state.db").resolve()
+        if not candidate.is_relative_to(root_resolved) or not candidate.is_file():
+            return None
+        return candidate
+    except OSError:
+        return None
+
+
+def _decode_hermes_content(content: Any) -> str:
+    if isinstance(content, str) and content.startswith(HERMES_JSON_CONTENT_PREFIX):
+        try:
+            content = json.loads(content[len(HERMES_JSON_CONTENT_PREFIX):])
+        except ValueError:
+            return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return json.dumps(content, default=str)
+
+
+def _parse_tool_calls(raw: Any) -> list[Dict[str, Any]]:
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _make_worker_step(kind: str, tool: str, text: str, at: Any) -> Dict[str, Any]:
+    cleaned = text.strip()
+    if len(cleaned) <= TASK_STEP_PREVIEW_MAX_CHARS:
+        preview = cleaned
+        detail = ""
+    else:
+        preview = cleaned[:TASK_STEP_PREVIEW_MAX_CHARS].rstrip() + "…"
+        detail = cleaned[:TASK_STEP_DETAIL_MAX_CHARS]
+    step: Dict[str, Any] = {"kind": kind, "preview": preview}
+    if tool:
+        step["tool"] = tool
+    if detail:
+        step["detail"] = detail
+    if at is not None:
+        step["at"] = at
+    return step
+
+
+def _read_task_worker_steps(
+    task_id: str,
+    assignee: str,
+    runs: Sequence[Dict[str, Any]],
+) -> tuple[list[Dict[str, Any]], bool]:
+    """Read the worker's live reasoning and tool calls from its profile `state.db`.
+
+    Best-effort: an absent or locked profile store yields no steps rather than
+    failing the card detail read.
+    """
+    data_root = Path(KANBAN_DB_PATH).parent
+    sessions: list[tuple[str, str]] = []
+    seen_sids: set[str] = set()
+
+    for run in runs:
+        raw_meta = run.get("metadata")
+        try:
+            meta = json.loads(raw_meta) if isinstance(raw_meta, str) and raw_meta else {}
+        except ValueError:
+            meta = {}
+        sid = meta.get("worker_session_id") if isinstance(meta, dict) else None
+        prof = str(run.get("profile") or assignee or "")
+        if isinstance(sid, str) and sid and sid not in seen_sids:
+            seen_sids.add(sid)
+            sessions.append((sid, prof))
+
+    profiles = list(dict.fromkeys([str(r.get("profile") or assignee or "") for r in runs] + [str(assignee or "")]))
+    exact_prompt = re.compile(re.escape(WORKER_PROMPT_PREFIX + task_id) + r"(?![\w-])")
+    for profile in profiles:
+        if not profile:
+            continue
+        db_path = _profile_state_db(data_root, profile)
+        if db_path is None:
+            continue
+        try:
+            with closing(_read_only(str(db_path))) as sconn:
+                rows = sconn.execute(
+                    "SELECT session_id, content FROM messages WHERE role = 'user' "
+                    "AND content LIKE ? ESCAPE '\\' ORDER BY id ASC",
+                    (f"%{WORKER_PROMPT_PREFIX}{_like_escape(task_id)}%",),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        for row in rows:
+            sid = row["session_id"]
+            content = _decode_hermes_content(row["content"])
+            if isinstance(sid, str) and sid and sid not in seen_sids and exact_prompt.search(content):
+                seen_sids.add(sid)
+                sessions.append((sid, profile))
+
+    steps: list[Dict[str, Any]] = []
+    row_ceiling = TASK_DETAIL_MAX_STEPS * 2 + 1
+    for sid, profile in sessions:
+        db_path = _profile_state_db(data_root, profile)
+        if db_path is None:
+            continue
+        try:
+            with closing(_read_only(str(db_path))) as sconn:
+                cols = {r[1] for r in sconn.execute("PRAGMA table_info(messages)")}
+                if not cols:
+                    continue
+                reasoning_col = "reasoning" if "reasoning" in cols else "NULL AS reasoning"
+                active_clause = " AND COALESCE(active, 1) = 1" if "active" in cols else ""
+                msg_rows = sconn.execute(
+                    f"SELECT id, role, content, tool_name, tool_calls, timestamp, {reasoning_col} "
+                    f"FROM messages WHERE session_id = ?{active_clause} ORDER BY id DESC LIMIT ?",
+                    (sid, row_ceiling),
+                ).fetchall()
+        except sqlite3.Error:
+            continue
+        for m in reversed(msg_rows):
+            role = m["role"]
+            ts = m["timestamp"]
+            if role == "assistant":
+                reasoning = str(m["reasoning"] or "").strip()
+                if reasoning:
+                    steps.append(_make_worker_step("thinking", "", reasoning, ts))
+                tcalls = _parse_tool_calls(m["tool_calls"])
+                for tc in tcalls:
+                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+                    name = str(fn.get("name") or "")
+                    raw_args = fn.get("arguments")
+                    args_str = (
+                        raw_args
+                        if isinstance(raw_args, str)
+                        else (json.dumps(raw_args, default=str) if raw_args is not None else "")
+                    )
+                    steps.append(_make_worker_step("tool_call", name, args_str, ts))
+                if not tcalls:
+                    reply = _decode_hermes_content(m["content"]).strip()
+                    if reply:
+                        steps.append(_make_worker_step("reply", "", reply, ts))
+            elif role == "tool":
+                res_text = _decode_hermes_content(m["content"])
+                steps.append(_make_worker_step("tool_result", str(m["tool_name"] or ""), res_text, ts))
+
+    steps_truncated = len(steps) > TASK_DETAIL_MAX_STEPS
+    if steps_truncated:
+        steps = steps[-TASK_DETAIL_MAX_STEPS:]
+    return steps, steps_truncated
+
+
 @app.get("/v1/tasks/{task_id}", dependencies=[Depends(verify_api_key)])
 def get_task(task_id: str) -> Dict[str, Any]:
-    """One card with its body, report, runs, events and comments.
+    """One card with its body, report, runs, events, comments and worker steps.
 
     Mirrors the admin console's `task_detail`, less two of its parts: chat
     delivery rows (`kanban_notify_subs` holds chat and user ids) and
-    attachments. Each child list keeps its newest rows under its ceiling, and
-    its `*_truncated` flag says when older ones were cut.
+    attachments. Also reads the worker's Hermes session (`steps`: reasoning,
+    tool calls and tool results) from the assigned profile's `state.db` when
+    present. Each child list keeps its newest rows under its ceiling, and its
+    `*_truncated` flag says when older ones were cut.
     """
 
     def read(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -3883,11 +4064,19 @@ def get_task(task_id: str) -> Dict[str, Any]:
             rows.reverse()
             return rows, truncated
 
-        runs, runs_truncated = newest(
-            "SELECT id, profile, status, started_at, ended_at, outcome, summary, error "
+        run_cols = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
+        meta_select = ", metadata" if "metadata" in run_cols else ", NULL AS metadata"
+        raw_runs, runs_truncated = newest(
+            f"SELECT id, profile, status, started_at, ended_at, outcome, summary, error{meta_select} "
             "FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT ?",
             TASK_DETAIL_MAX_RUNS,
         )
+        steps, steps_truncated = _read_task_worker_steps(
+            str(task["id"]),
+            str(task["assignee"] or ""),
+            raw_runs,
+        )
+        runs = [{k: v for k, v in r.items() if k != "metadata"} for r in raw_runs]
         events, events_truncated = newest(
             "SELECT id, run_id, kind, payload, created_at FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT ?",
             TASK_DETAIL_MAX_EVENTS,
@@ -3904,6 +4093,8 @@ def get_task(task_id: str) -> Dict[str, Any]:
             "events_truncated": events_truncated,
             "comments": comments,
             "comments_truncated": comments_truncated,
+            "steps": steps,
+            "steps_truncated": steps_truncated,
         }
 
     result = _read_kanban(read)
