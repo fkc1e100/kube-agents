@@ -4853,7 +4853,6 @@ class TestDriftInject(unittest.TestCase):
         self.assertIn(f'injectKindDrift = "{session_kv_server.INJECT_KIND_DRIFT}"', source)
 
 
-
 class TestStallInject(unittest.TestCase):
     """The `controller-stall` half of /sessions/{id}/inject."""
 
@@ -5480,6 +5479,273 @@ class TestReadOnlyActivityFeed(unittest.TestCase):
                     session_kv_server._kanban_db_path(),
                     "/custom/home/kanban.db",
                 )
+
+
+
+class TestTaskWorkerStepsFeed(unittest.TestCase):
+    """`GET /v1/tasks/{id}` and `GET /v1/sessions/{sid}/tasks` return the worker's live Hermes steps from `state.db`."""
+
+    def setUp(self):
+        import sqlite3
+        from fastapi.testclient import TestClient
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+        self.root = Path(self._tmpdir.name)
+        self.kanban_path = self.root / "kanban.db"
+
+        with sqlite3.connect(self.kanban_path) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    title TEXT,
+                    body TEXT,
+                    assignee TEXT,
+                    status TEXT,
+                    priority INTEGER,
+                    session_id TEXT,
+                    created_at REAL,
+                    started_at REAL,
+                    completed_at REAL,
+                    last_heartbeat_at REAL,
+                    result TEXT,
+                    last_failure_error TEXT
+                );
+                CREATE TABLE task_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    profile TEXT,
+                    status TEXT,
+                    started_at REAL,
+                    ended_at REAL,
+                    outcome TEXT,
+                    summary TEXT,
+                    error TEXT,
+                    metadata TEXT
+                );
+                CREATE TABLE task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    run_id INTEGER,
+                    kind TEXT,
+                    payload TEXT,
+                    created_at REAL
+                );
+                CREATE TABLE task_comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT,
+                    author TEXT,
+                    body TEXT,
+                    created_at REAL
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, title, body, assignee, status, priority, session_id, created_at) "
+                "VALUES ('t_d1c3323e', 'Open GitOps PR', 'body', 'platform', 'running', 1, 'k8s-evt-1', 100.0)"
+            )
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, metadata) "
+                "VALUES ('t_d1c3323e', 'platform', 'running', 101.0, '{}')"
+            )
+
+        patcher = patch.object(session_kv_server, "KANBAN_DB_PATH", str(self.kanban_path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        os.environ["SESSION_KV_API_KEY"] = API_KEY
+        self.addCleanup(lambda: os.environ.pop("SESSION_KV_API_KEY", None))
+        self.client = TestClient(session_kv_server.app, headers=AUTH_HEADERS)
+
+    def _write_profile_store(self, profile: str, rows: list[tuple]):
+        import sqlite3
+
+        if not profile or profile == "default":
+            db_path = self.root / "state.db"
+        else:
+            db_path = self.root / "profiles" / profile / "state.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS messages ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
+                "content TEXT, tool_name TEXT, tool_calls TEXT, timestamp REAL, "
+                "reasoning TEXT, active INTEGER DEFAULT 1)"
+            )
+            for sid, role, content, tool_name, tool_calls, ts, reasoning in rows:
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, tool_name, tool_calls, timestamp, reasoning) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        sid,
+                        role,
+                        content,
+                        tool_name,
+                        json.dumps(tool_calls) if tool_calls is not None else None,
+                        ts,
+                        reasoning,
+                    ),
+                )
+
+    def test_worker_steps_are_matched_by_dispatcher_prompt_and_returned_in_order(self):
+        long_output = "diff --git a/deployment.yaml b/deployment.yaml\n" + ("+line\n" * 80)
+        self._write_profile_store(
+            "platform",
+            [
+                ("sess-other", "user", "work kanban task t_d1c3323e_other", None, None, 90.0, None),
+                (
+                    "sess-other",
+                    "assistant",
+                    None,
+                    None,
+                    [{"function": {"name": "terminal", "arguments": '{"command":"wrong"}'}}],
+                    91.0,
+                    None,
+                ),
+                ("sess-worker", "user", "work kanban task t_d1c3323e", None, None, 101.0, None),
+                (
+                    "sess-worker",
+                    "assistant",
+                    None,
+                    None,
+                    [{"function": {"name": "terminal", "arguments": '{"command":"submit_suggestion.py prepare"}'}}],
+                    102.0,
+                    "Checking the triage options and preparing the suggestion branch.",
+                ),
+                ("sess-worker", "tool", long_output, "terminal", None, 103.0, None),
+                ("sess-worker", "assistant", "Opened Pull Request #1.", None, None, 104.0, None),
+            ],
+        )
+
+        resp = self.client.get("/v1/tasks/t_d1c3323e")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertFalse(body["steps_truncated"])
+        steps = body["steps"]
+        self.assertEqual([s["kind"] for s in steps], ["thinking", "tool_call", "tool_result", "reply"])
+        self.assertEqual(steps[0]["preview"], "Checking the triage options and preparing the suggestion branch.")
+        self.assertEqual(steps[1]["tool"], "terminal")
+        self.assertIn("submit_suggestion.py prepare", steps[1]["preview"])
+        self.assertEqual(steps[2]["tool"], "terminal")
+        self.assertTrue(steps[2]["preview"].endswith("…"))
+        self.assertIn("+line", steps[2]["detail"])
+        self.assertEqual(steps[3]["preview"], "Opened Pull Request #1.")
+
+        sess_resp = self.client.get("/v1/sessions/k8s-evt-1/tasks")
+        self.assertEqual(sess_resp.status_code, 200)
+        sess_tasks = sess_resp.json()["tasks"]
+        self.assertEqual(len(sess_tasks), 1)
+        self.assertEqual([s["kind"] for s in sess_tasks[0]["live_steps"]], ["thinking", "tool_call", "tool_result", "reply"])
+        self.assertFalse(sess_tasks[0]["steps_truncated"])
+
+    def test_missing_profile_store_returns_empty_steps_without_failing(self):
+        resp = self.client.get("/v1/tasks/t_d1c3323e")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["steps"], [])
+        self.assertFalse(body["steps_truncated"])
+
+    def test_worker_steps_redact_credentials_and_withhold_when_redactor_unavailable(self):
+        secret_tok = "ghp_" + "A" * 36
+        self._write_profile_store(
+            "platform",
+            [
+                ("sess-sec", "user", "work kanban task t_d1c3323e", None, None, 101.0, None),
+                (
+                    "sess-sec",
+                    "assistant",
+                    None,
+                    None,
+                    [
+                        {
+                            "function": {
+                                "name": "terminal",
+                                "arguments": json.dumps({"command": f"curl -H 'Authorization: Bearer {secret_tok}'"}),
+                            }
+                        }
+                    ],
+                    102.0,
+                    f"Using token {secret_tok} to inspect endpoint.",
+                ),
+                (
+                    "sess-sec",
+                    "tool",
+                    f"apiVersion: v1\nkind: Secret\ndata:\n  token: {secret_tok}\n",
+                    "terminal",
+                    None,
+                    103.0,
+                    None,
+                ),
+                ("sess-sec", "assistant", f"Checked {secret_tok} successfully.", None, None, 104.0, None),
+            ],
+        )
+
+        body = self.client.get("/v1/tasks/t_d1c3323e").json()
+        serialized = json.dumps(body["steps"])
+        self.assertNotIn(secret_tok, serialized)
+        self.assertIn("[REDACTED_SECRET]", serialized)
+
+        with patch.object(session_kv_server, "_get_audit_redactor", return_value=None):
+            fallback = self.client.get("/v1/tasks/t_d1c3323e").json()["steps"]
+            by_kind = {s["kind"]: s["preview"] for s in fallback}
+            self.assertEqual(by_kind["tool_call"], session_kv_server.WORKER_STEP_WITHHELD)
+            self.assertEqual(by_kind["tool_result"], session_kv_server.WORKER_STEP_WITHHELD)
+
+    def test_steps_truncated_is_true_when_sql_row_window_clips_older_rows(self):
+        rows: list[tuple] = [
+            ("sess-win", "user", "work kanban task t_d1c3323e", None, None, 1.0, None),
+            ("sess-win", "assistant", "Old step that will be clipped", None, None, 2.0, None),
+        ]
+        window = session_kv_server.TASK_DETAIL_MAX_STEPS * session_kv_server.TASK_STEP_ROW_MULTIPLIER
+        for idx in range(window):
+            rows.append(("sess-win", "user", f"user-turn-{idx}", None, None, float(10 + idx), None))
+        rows.append(("sess-win", "assistant", "Final visible reply", None, None, 999.0, None))
+        self._write_profile_store("platform", rows)
+
+        body = self.client.get("/v1/tasks/t_d1c3323e").json()
+        self.assertTrue(body["steps_truncated"])
+        self.assertEqual(len(body["steps"]), 1)
+        self.assertEqual(body["steps"][0]["preview"], "Final visible reply")
+
+    def test_session_tasks_reuses_single_profile_connection_across_multiple_cards(self):
+        import sqlite3
+
+        with sqlite3.connect(self.kanban_path) as conn:
+            conn.execute(
+                "INSERT INTO tasks (id, title, body, assignee, status, priority, session_id, created_at) "
+                "VALUES ('t_second', 'Second task', 'body2', 'platform', 'running', 1, 'k8s-evt-1', 105.0)"
+            )
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, metadata) "
+                "VALUES ('t_second', 'platform', 'running', 106.0, '{}')"
+            )
+        self._write_profile_store(
+            "platform",
+            [
+                ("sess-1", "user", "work kanban task t_d1c3323e", None, None, 101.0, None),
+                ("sess-1", "assistant", "First card reply", None, None, 102.0, None),
+                ("sess-2", "user", "work kanban task t_second", None, None, 106.0, None),
+                ("sess-2", "assistant", "Second card reply", None, None, 107.0, None),
+            ],
+        )
+
+        real_read_only = session_kv_server._read_only
+        opened_paths: list[str] = []
+
+        def counting_read_only(path: str):
+            opened_paths.append(path)
+            return real_read_only(path)
+
+        with patch.object(session_kv_server, "_read_only", side_effect=counting_read_only):
+            resp = self.client.get("/v1/sessions/k8s-evt-1/tasks")
+        self.assertEqual(resp.status_code, 200)
+        tasks = resp.json()["tasks"]
+        self.assertEqual([t["id"] for t in tasks], ["t_d1c3323e", "t_second"])
+        self.assertEqual(tasks[0]["live_steps"][0]["preview"], "First card reply")
+        self.assertEqual(tasks[1]["live_steps"][0]["preview"], "Second card reply")
+        profile_opens = [p for p in opened_paths if p.endswith("state.db")]
+        self.assertEqual(len(profile_opens), 1)
 
 
 

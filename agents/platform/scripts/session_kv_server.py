@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, NamedTuple, Optional, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 import logging
@@ -100,6 +101,24 @@ FEED_TASKS_MAX_LIMIT = 200
 TASK_DETAIL_MAX_RUNS = 100
 TASK_DETAIL_MAX_EVENTS = 500
 TASK_DETAIL_MAX_COMMENTS = 200
+TASK_DETAIL_MAX_STEPS = 100
+TASK_STEP_ROW_MULTIPLIER = 2
+TASK_STEP_PREVIEW_MAX_CHARS = 240
+TASK_STEP_DETAIL_MAX_CHARS = 4000
+# The user prompt the kanban dispatcher starts a worker session with
+# (`hermes -p <profile> chat -q "work kanban task <id>"`). Used to map a card
+# to its worker session in the profile's `state.db` when `task_runs.metadata`
+# does not record `worker_session_id`.
+WORKER_PROMPT_PREFIX = "work kanban task "
+HERMES_JSON_CONTENT_PREFIX = "\x00json:"
+HERMES_STATE_DB_FILENAME = "state.db"
+WORKER_STEP_WITHHELD = "[withheld: redactor unavailable]"
+_REDACTOR_CANDIDATES = (
+    Path("/opt/defaults/plugins/common/redactor.py"),
+    Path(__file__).resolve().parents[2] / "chat" / "defaults" / "plugins" / "common" / "redactor.py",
+)
+_AUDIT_REDACTOR: Any = None
+_AUDIT_REDACTOR_LOADED = False
 # The `status` a feed row reports, derived from what the ledger stored. The
 # first three are the inject route's own answers. `undelivered` is the fourth
 # outcome the ledger can hold on an install with chat enabled: injected, then
@@ -2928,15 +2947,32 @@ def _slack_audit_headline(
     return AuditHeadline(text, issue, ref)
 
 
+def _profile_home(profile: str, data_root: Optional[Path] = None) -> Optional[Path]:
+    """Return the validated directory for `profile` under `data_root` (or `agent_home()`)."""
+    if not _PROFILE_SEGMENT_RE.match(profile):
+        return None
+    root = data_root if data_root is not None else Path(gitops_workspace.agent_home())
+    try:
+        root_resolved = root.resolve()
+        candidate = (
+            root_resolved
+            if profile == DEFAULT_PROFILE
+            else (root_resolved / PROFILES_DIR / profile).resolve()
+        )
+        if candidate != root_resolved and not candidate.is_relative_to(root_resolved):
+            return None
+        return candidate
+    except OSError:
+        return None
+
+
 def _is_fleet_audit_job(profile: str, job_id: str) -> bool:
     """Whether `job_id` in `profile`'s cron roster runs fleet-audit; False when it cannot be read."""
-    if not _PROFILE_SEGMENT_RE.match(profile):
+    home = _profile_home(profile)
+    if home is None:
         return False
     try:
-        from gitops_workspace import agent_home
-
-        base = agent_home() if profile == DEFAULT_PROFILE else os.path.join(agent_home(), PROFILES_DIR, profile)
-        with open(os.path.join(base, *CRON_ROSTER), encoding="utf-8") as handle:
+        with open(home.joinpath(*CRON_ROSTER), encoding="utf-8") as handle:
             store = json.load(handle)
     except Exception as exc:
         logger.warning(f"Audit headline skipped: {profile} cron roster unreadable: {exc}")
@@ -3966,14 +4002,17 @@ def get_alert_quota(day: str = "") -> Dict[str, Any]:
 # the pod (docs/designs/admin-console.md); these are the authenticated reads
 # that path can move onto.
 #
-# Every connection here opens with `mode=ro`, so a bug in a query cannot write
-# to either database. Task rows are returned column by column rather than as
-# `t.*`: Hermes' `tasks` table also carries the claim lock, worker pid and
-# workspace path, which are dispatcher state rather than activity, and a new
-# column upstream does not reach a caller until it is named here. Text fields
-# (`body`, `result`, run summaries, comments, event payloads) are returned as
-# the board holds them; they are model-written and can quote cluster objects,
-# so a caller that renders them treats them as untrusted text.
+# Every connection here opens `session_kv.db`, `kanban.db`, and the Hermes
+# session stores (`<agent_home>/state.db` and `<agent_home>/profiles/<profile>/state.db`)
+# with `mode=ro`, so a bug in a query cannot write to any of those databases.
+# Task rows are returned column by column rather than as `t.*`: Hermes' `tasks`
+# table also carries the claim lock, worker pid and workspace path, which are
+# dispatcher state rather than activity, and a new column upstream does not
+# reach a caller until it is named here. Worker step text (`thinking`,
+# `tool_call`, `tool_result`, `reply`) is scrubbed through `AuditRedactor` (and
+# `tool_call`/`tool_result` text is withheld if the redactor cannot be loaded)
+# before leaving the pod; callers that render text fields still treat them as
+# untrusted text.
 # --------------------------------------------------------------------------
 
 
@@ -4134,18 +4173,51 @@ def _empty_task_feed() -> Dict[str, Any]:
     return {"tasks": [], "truncated": False, "board": False}
 
 
+def _feed_data_root() -> Path:
+    """The agent data root where `state.db` and `profiles/<profile>/state.db` live."""
+    if KANBAN_DB_PATH:
+        return Path(KANBAN_DB_PATH).parent
+    return Path(gitops_workspace.agent_home())
+
+
+def _session_task_rows(conn: sqlite3.Connection, session_id: str, limit: int) -> Dict[str, Any]:
+    feed = _task_rows(conn, "WHERE t.session_id = ?", (session_id,), "t.created_at, t.id", limit)
+    if not feed["tasks"]:
+        return feed
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
+    meta_select = ", metadata" if "metadata" in run_cols else ", NULL AS metadata"
+    with _WorkerStepReader(_feed_data_root()) as reader:
+        for task in feed["tasks"]:
+            raw_runs = [
+                dict(r)
+                for r in conn.execute(
+                    f"SELECT id, profile, status, started_at, ended_at, outcome, summary, error{meta_select} "
+                    "FROM task_runs WHERE task_id = ? ORDER BY id ASC LIMIT ?",
+                    (str(task["id"]), TASK_DETAIL_MAX_RUNS),
+                )
+            ]
+            steps, steps_truncated = _read_task_worker_steps(
+                str(task["id"]),
+                str(task.get("assignee") or ""),
+                raw_runs,
+                reader=reader,
+            )
+            task["live_steps"] = steps
+            task["steps_truncated"] = steps_truncated
+    return feed
+
+
 @app.get("/v1/sessions/{session_id}/tasks", dependencies=[Depends(verify_api_key)])
 def list_session_tasks(session_id: str, limit: int = FEED_TASKS_DEFAULT_LIMIT) -> Dict[str, Any]:
     """The kanban cards filed from one session, oldest first.
 
     For an event, `session_id` is the ledger row's, and the first card is the
     triage the front door filed; later ones are whatever that work spawned
-    under the same session.
+    under the same session. Each card also carries `live_steps` and
+    `steps_truncated` from the worker's Hermes session (`state.db`).
     """
     limit = _clamp_limit(limit, FEED_TASKS_MAX_LIMIT)
-    result = _read_kanban(
-        lambda conn: _task_rows(conn, "WHERE t.session_id = ?", (session_id,), "t.created_at, t.id", limit)
-    )
+    result = _read_kanban(lambda conn: _session_task_rows(conn, session_id, limit))
     return {**result, "board": True} if result is not None else _empty_task_feed()
 
 
@@ -4171,14 +4243,300 @@ def list_tasks(since: int = 0, limit: int = FEED_TASKS_DEFAULT_LIMIT, assignee: 
     return {**result, "board": True} if result is not None else _empty_task_feed()
 
 
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _profile_state_db(data_root: Path, profile: str) -> Optional[Path]:
+    """Return the read-only `state.db` path for `profile` under `data_root`."""
+    home = _profile_home(profile or DEFAULT_PROFILE, data_root)
+    if home is None:
+        return None
+    candidate = home / HERMES_STATE_DB_FILENAME
+    try:
+        return candidate if candidate.is_file() else None
+    except OSError:
+        return None
+
+
+def _get_audit_redactor() -> Any:
+    """Lazily load `AuditRedactor` from the image or checkout plugin directory."""
+    global _AUDIT_REDACTOR, _AUDIT_REDACTOR_LOADED
+    if _AUDIT_REDACTOR_LOADED:
+        return _AUDIT_REDACTOR
+    _AUDIT_REDACTOR_LOADED = True
+    module_name = "kube_agents_session_kv_redactor"
+    for candidate in _REDACTOR_CANDIDATES:
+        if not candidate.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, candidate)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+            _AUDIT_REDACTOR = getattr(module, "AuditRedactor", None)
+            if _AUDIT_REDACTOR is not None:
+                return _AUDIT_REDACTOR
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Could not load AuditRedactor from {candidate}: {exc}")
+    return None
+
+
+def _scrub_worker_step_text(kind: str, text: str) -> str:
+    """Scrub worker step text with `AuditRedactor.redact`; withhold tool args/results if unavailable."""
+    redactor = _get_audit_redactor()
+    if redactor is None:
+        if kind in ("tool_call", "tool_result"):
+            return WORKER_STEP_WITHHELD
+        return text
+    return str(redactor.redact(text))
+
+
+def _decode_hermes_content(content: Any) -> str:
+    if isinstance(content, str) and content.startswith(HERMES_JSON_CONTENT_PREFIX):
+        try:
+            content = json.loads(content[len(HERMES_JSON_CONTENT_PREFIX):])
+        except ValueError:
+            return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    return json.dumps(content, default=str)
+
+
+def _parse_tool_calls(raw: Any) -> list[Dict[str, Any]]:
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _make_worker_step(kind: str, tool: str, text: str, at: Any) -> Dict[str, Any]:
+    cleaned = _scrub_worker_step_text(kind, text).strip()
+    if len(cleaned) <= TASK_STEP_PREVIEW_MAX_CHARS:
+        preview = cleaned
+        detail = ""
+    else:
+        preview = cleaned[:TASK_STEP_PREVIEW_MAX_CHARS].rstrip() + "…"
+        detail = cleaned[:TASK_STEP_DETAIL_MAX_CHARS]
+    step: Dict[str, Any] = {"kind": kind, "preview": preview}
+    if tool:
+        step["tool"] = tool
+    if detail:
+        step["detail"] = detail
+    if at is not None:
+        step["at"] = at
+    return step
+
+
+_WORKER_PROMPT_TASK_RE = re.compile(re.escape(WORKER_PROMPT_PREFIX) + r"([\w-]+)(?![\w-])")
+
+
+def _extract_steps_from_conn(
+    sconn: sqlite3.Connection,
+    cols: set[str],
+    session_id: str,
+    window_size: int,
+) -> tuple[list[Dict[str, Any]], bool]:
+    """Read up to `window_size` newest message rows for `session_id` and return `(steps, rows_clipped)`."""
+    if not cols:
+        return [], False
+    reasoning_col = "reasoning" if "reasoning" in cols else "NULL AS reasoning"
+    active_clause = " AND COALESCE(active, 1) = 1" if "active" in cols else ""
+    try:
+        msg_rows = sconn.execute(
+            f"SELECT id, role, content, tool_name, tool_calls, timestamp, {reasoning_col} "
+            f"FROM messages WHERE session_id = ?{active_clause} ORDER BY id DESC LIMIT ?",
+            (session_id, window_size + 1),
+        ).fetchall()
+    except sqlite3.Error:
+        return [], False
+    rows_clipped = len(msg_rows) > window_size
+    if rows_clipped:
+        msg_rows = msg_rows[:window_size]
+    steps: list[Dict[str, Any]] = []
+    for m in reversed(msg_rows):
+        role = m["role"]
+        ts = m["timestamp"]
+        if role == "assistant":
+            reasoning = str(m["reasoning"] or "").strip()
+            if reasoning:
+                steps.append(_make_worker_step("thinking", "", reasoning, ts))
+            tcalls = _parse_tool_calls(m["tool_calls"])
+            for tc in tcalls:
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+                name = str(fn.get("name") or "")
+                raw_args = fn.get("arguments")
+                args_str = (
+                    raw_args
+                    if isinstance(raw_args, str)
+                    else (json.dumps(raw_args, default=str) if raw_args is not None else "")
+                )
+                steps.append(_make_worker_step("tool_call", name, args_str, ts))
+            if not tcalls:
+                reply = _decode_hermes_content(m["content"]).strip()
+                if reply:
+                    steps.append(_make_worker_step("reply", "", reply, ts))
+        elif role == "tool":
+            res_text = _decode_hermes_content(m["content"])
+            steps.append(_make_worker_step("tool_result", str(m["tool_name"] or ""), res_text, ts))
+    return steps, rows_clipped
+
+
+class _WorkerStepReader:
+    """Per-request reader caching profile `state.db` paths, open read-only
+    connections, `messages` schemas, and dispatcher prompt -> session maps."""
+
+    def __init__(self, data_root: Path) -> None:
+        self.data_root = data_root
+        self._stack = ExitStack()
+        self._conns: Dict[str, Optional[sqlite3.Connection]] = {}
+        self._cols: Dict[str, set[str]] = {}
+        self._prompt_index: Dict[str, Dict[str, list[str]]] = {}
+
+    def close(self) -> None:
+        self._stack.close()
+
+    def __enter__(self) -> "_WorkerStepReader":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.close()
+
+    def conn_for(self, profile: str) -> tuple[Optional[sqlite3.Connection], set[str]]:
+        if profile in self._conns:
+            return self._conns[profile], self._cols[profile]
+        db_path = _profile_state_db(self.data_root, profile)
+        if db_path is None:
+            self._conns[profile] = None
+            self._cols[profile] = set()
+            return None, set()
+        try:
+            conn = self._stack.enter_context(closing(_read_only(str(db_path))))
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+        except sqlite3.Error:
+            self._conns[profile] = None
+            self._cols[profile] = set()
+            return None, set()
+        self._conns[profile] = conn
+        self._cols[profile] = cols
+        return conn, cols
+
+    def sessions_by_prompt(self, profile: str, task_id: str) -> list[str]:
+        conn, cols = self.conn_for(profile)
+        if conn is None or not cols:
+            return []
+        if profile not in self._prompt_index:
+            index: Dict[str, list[str]] = {}
+            try:
+                rows = conn.execute(
+                    "SELECT session_id, content FROM messages WHERE role = 'user' "
+                    "AND content LIKE ? ESCAPE '\\' ORDER BY id ASC",
+                    (f"%{WORKER_PROMPT_PREFIX}%",),
+                ).fetchall()
+            except sqlite3.Error:
+                rows = []
+            for row in rows:
+                sid = row["session_id"]
+                if not isinstance(sid, str) or not sid:
+                    continue
+                content = _decode_hermes_content(row["content"])
+                for matched_task in _WORKER_PROMPT_TASK_RE.findall(content):
+                    bucket = index.setdefault(matched_task, [])
+                    if sid not in bucket:
+                        bucket.append(sid)
+            self._prompt_index[profile] = index
+        return list(self._prompt_index[profile].get(task_id, ()))
+
+
+def _read_task_worker_steps(
+    task_id: str,
+    assignee: str,
+    runs: Sequence[Dict[str, Any]],
+    *,
+    reader: Optional[_WorkerStepReader] = None,
+) -> tuple[list[Dict[str, Any]], bool]:
+    """Read the worker's live reasoning and tool calls from its profile `state.db`.
+
+    Best-effort: an absent or locked profile store yields no steps rather than
+    failing the card detail read.
+    """
+    if reader is None:
+        with _WorkerStepReader(_feed_data_root()) as owned_reader:
+            return _read_task_worker_steps(task_id, assignee, runs, reader=owned_reader)
+
+    sessions: list[tuple[str, str]] = []
+    seen_sids: set[str] = set()
+    missing_run_session = not runs
+
+    for run in runs:
+        raw_meta = run.get("metadata")
+        try:
+            meta = json.loads(raw_meta) if isinstance(raw_meta, str) and raw_meta else {}
+        except ValueError:
+            meta = {}
+        sid = meta.get("worker_session_id") if isinstance(meta, dict) else None
+        prof = str(run.get("profile") or assignee or "")
+        if isinstance(sid, str) and sid:
+            if sid not in seen_sids:
+                seen_sids.add(sid)
+                sessions.append((sid, prof))
+        else:
+            missing_run_session = True
+
+    if missing_run_session:
+        profiles = list(
+            dict.fromkeys([str(r.get("profile") or assignee or "") for r in runs] + [str(assignee or "")])
+        )
+        for profile in profiles:
+            if not profile:
+                continue
+            for sid in reader.sessions_by_prompt(profile, task_id):
+                if sid not in seen_sids:
+                    seen_sids.add(sid)
+                    sessions.append((sid, profile))
+
+    steps: list[Dict[str, Any]] = []
+    rows_clipped = False
+    window_size = TASK_DETAIL_MAX_STEPS * TASK_STEP_ROW_MULTIPLIER
+    for sid, profile in sessions:
+        sconn, cols = reader.conn_for(profile)
+        if sconn is None or not cols:
+            continue
+        sess_steps, sess_clipped = _extract_steps_from_conn(sconn, cols, sid, window_size)
+        steps.extend(sess_steps)
+        rows_clipped = rows_clipped or sess_clipped
+
+    steps_truncated = rows_clipped or len(steps) > TASK_DETAIL_MAX_STEPS
+    if len(steps) > TASK_DETAIL_MAX_STEPS:
+        steps = steps[-TASK_DETAIL_MAX_STEPS:]
+    return steps, steps_truncated
+
+
 @app.get("/v1/tasks/{task_id}", dependencies=[Depends(verify_api_key)])
 def get_task(task_id: str) -> Dict[str, Any]:
-    """One card with its body, report, runs, events and comments.
+    """One card with its body, report, runs, events, comments and worker steps.
 
     Mirrors the admin console's `task_detail`, less two of its parts: chat
     delivery rows (`kanban_notify_subs` holds chat and user ids) and
-    attachments. Each child list keeps its newest rows under its ceiling, and
-    its `*_truncated` flag says when older ones were cut.
+    attachments. Also reads the worker's Hermes session (`steps`: reasoning,
+    tool calls and tool results) from the assigned profile's `state.db` when
+    present. Each child list keeps its newest rows under its ceiling, and its
+    `*_truncated` flag says when older ones were cut.
     """
 
     def read(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -4195,11 +4553,19 @@ def get_task(task_id: str) -> Dict[str, Any]:
             rows.reverse()
             return rows, truncated
 
-        runs, runs_truncated = newest(
-            "SELECT id, profile, status, started_at, ended_at, outcome, summary, error "
+        run_cols = {r[1] for r in conn.execute("PRAGMA table_info(task_runs)")}
+        meta_select = ", metadata" if "metadata" in run_cols else ", NULL AS metadata"
+        raw_runs, runs_truncated = newest(
+            f"SELECT id, profile, status, started_at, ended_at, outcome, summary, error{meta_select} "
             "FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT ?",
             TASK_DETAIL_MAX_RUNS,
         )
+        steps, steps_truncated = _read_task_worker_steps(
+            str(task["id"]),
+            str(task["assignee"] or ""),
+            raw_runs,
+        )
+        runs = [{k: v for k, v in r.items() if k != "metadata"} for r in raw_runs]
         events, events_truncated = newest(
             "SELECT id, run_id, kind, payload, created_at FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT ?",
             TASK_DETAIL_MAX_EVENTS,
@@ -4216,6 +4582,8 @@ def get_task(task_id: str) -> Dict[str, Any]:
             "events_truncated": events_truncated,
             "comments": comments,
             "comments_truncated": comments_truncated,
+            "steps": steps,
+            "steps_truncated": steps_truncated,
         }
 
     result = _read_kanban(read)
