@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -226,8 +227,15 @@ func TestChatUsesHermesContract(t *testing.T) {
 	if !sessionIDPattern.MatchString(got.SessionID) {
 		t.Errorf("session id %q does not carry the console prefix", got.SessionID)
 	}
+	if got.BeforeID != 0 || got.ReplyID != 4 {
+		t.Errorf("turn IDs = (before=%d, reply=%d), want (0, 4)", got.BeforeID, got.ReplyID)
+	}
+	second := decode[chatResponse](t, serve(h, chatReq(`{"message":"again","session_id":"`+got.SessionID+`"}`)))
+	if second.BeforeID != 4 || second.ReplyID != 8 {
+		t.Errorf("second turn IDs = (before=%d, reply=%d), want (4, 8)", second.BeforeID, second.ReplyID)
+	}
 	_, chats := fake.state()
-	if len(chats) != 1 || chats[0]["message"] != "check pods" {
+	if len(chats) != 2 || chats[0]["message"] != "check pods" {
 		t.Fatalf("upstream chat body = %v, want {\"message\": \"check pods\"}", chats)
 	}
 	if _, has := chats[0]["content"]; has {
@@ -569,5 +577,151 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 		if !strings.Contains(string(page), rule) {
 			t.Errorf("index.html is missing %q", rule)
 		}
+	}
+}
+
+// TestPageSettleAndWakeLogic executes the embedded script from static/index.html
+// in Node's vm module against stubbed DOM and fetch globals, verifying:
+//  1. A failed settle fetch still advances the mark to replyId so the next
+//     poll does not replay the turn's own assistant reply as an "update".
+//  2. Results that landed before the turn, a card wake that landed mid-turn
+//     (followed by an intermediate assistant row of the typed turn), and
+//     results that landed after the reply are each shown once while the typed
+//     turn's own assistant messages are not duplicated.
+func TestPageSettleAndWakeLogic(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not in PATH")
+	}
+	cmd := exec.Command(node, "--input-type=module", "-e", `
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import vm from "node:vm";
+
+const html = fs.readFileSync("static/index.html", "utf8");
+const match = html.match(/<script>([\s\S]*?)<\/script>/);
+assert.ok(match, "static/index.html has no <script> block");
+const scriptSource = match[1];
+
+function makeContext(fetchImpl, initialStorage = {}) {
+  const store = new Map(Object.entries(initialStorage));
+  const appended = [];
+  const makeEl = () => ({
+    className: "",
+    innerHTML: "",
+    innerText: "",
+    value: "",
+    title: "",
+    hidden: false,
+    disabled: false,
+    scrollTop: 0,
+    scrollHeight: 0,
+    dataset: {},
+    addEventListener() {},
+    appendChild() {},
+    remove() {},
+  });
+  const ctx = {
+    console,
+    Date,
+    Number,
+    String,
+    JSON,
+    encodeURIComponent,
+    setInterval() {},
+    sessionStorage: {
+      getItem: k => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: k => store.delete(k),
+    },
+    document: {
+      getElementById: () => makeEl(),
+      createElement: () => makeEl(),
+      querySelectorAll: () => [],
+    },
+    fetch: fetchImpl,
+    appended,
+    store,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(scriptSource + "\n;appendMessage = (role, text, tag) => { appended.push({role, text, tag}); return { remove() {} }; };", ctx);
+  return ctx;
+}
+
+// Case 1: failed settle fetch advances lastSeenId to replyId so the next poll
+// does not replay the turn's own assistant reply as an "update".
+{
+  let pollCalls = [];
+  const ctx = makeContext(async (url) => {
+    if (!String(url).includes("/messages")) {
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    }
+    pollCalls.push(String(url));
+    if (pollCalls.length === 1) {
+      return { ok: false, status: 502, text: async () => "bad gateway" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ latest_id: 8, messages: [] }),
+    };
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  pollCalls = [];
+  await vm.runInContext("settleAfterReply('again', 'pods are healthy', 4, 8)", ctx);
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "8", "failed settle must advance mark to replyId");
+  await vm.runInContext("pollMessages()", ctx);
+  assert.ok(pollCalls[1].endsWith("?after=8"), "next poll must request ?after=8, got " + pollCalls[1]);
+  assert.deepEqual(ctx.appended, [], "turn reply must not be replayed as an update");
+}
+
+// Case 2: pre-turn result, mid-turn wake (with a subsequent intermediate
+// assistant row on the typed turn), and post-reply result.
+{
+  let settleReady = false;
+  const messages = [
+    { id: 5, role: "user", content: "[kanban] card 1 done" },
+    { id: 6, role: "assistant", content: "pre-turn delegated result" },
+    { id: 7, role: "user", content: "check cluster" },
+    { id: 8, role: "assistant", content: "intermediate note before wake" },
+    { id: 9, role: "user", content: "[kanban] card 2 done mid-turn" },
+    { id: 10, role: "assistant", content: "mid-turn wake result" },
+    { id: 11, role: "assistant", content: "intermediate note after wake" },
+    { id: 12, role: "assistant", content: "final turn reply" },
+    { id: 13, role: "user", content: "[kanban] card 3 done" },
+    { id: 14, role: "assistant", content: "post-reply delegated result" },
+  ];
+  const ctx = makeContext(async (url) => {
+    if (!String(url).includes("/messages") || !settleReady) {
+      return { ok: false, status: 503, text: async () => "" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ latest_id: 14, messages }),
+    };
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "b".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  settleReady = true;
+  await vm.runInContext("settleAfterReply('check cluster', 'final turn reply', 4, 12)", ctx);
+  assert.equal(
+    JSON.stringify(ctx.appended),
+    JSON.stringify([
+      { role: "agent", text: "pre-turn delegated result", tag: "update" },
+      { role: "agent", text: "mid-turn wake result", tag: "update" },
+      { role: "agent", text: "post-reply delegated result", tag: "update" },
+    ]),
+    "only delegated results (pre-turn, mid-turn wake, post-reply) should be shown as updates"
+  );
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "14");
+}
+`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node page test failed: %v\n%s", err, out)
 	}
 }

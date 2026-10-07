@@ -913,8 +913,6 @@ parse_args() {
       --enable-hermes-dashboard|--enable-hermes-dashboard=*)
         PARAM_ENABLE_WEBUI="$(flag_bool_value "$1")"
         validate_bool_flag_value "${1%%=*}" "$PARAM_ENABLE_WEBUI"; shift ;;
-      # Validated here and again in main(), for the reason given above
-      # --enable-hermes-dashboard: the default is applied with ${VAR:-...}.
       --enable-web-console|--enable-web-console=*)
         PARAM_ENABLE_WEB_CONSOLE="$(flag_bool_value "$1")"
         validate_bool_flag_value "${1%%=*}" "$PARAM_ENABLE_WEB_CONSOLE"; shift ;;
@@ -1863,7 +1861,7 @@ bootstrap_install_env_file() {
       "${PARAM_ENABLE_WEB_CONSOLE:-}" \
       "A later run without it re-reads the recorded value and renders the web console to match it, adding or removing it." \
       true \
-      "every later install.sh, upgrade.sh and --menu run"
+      "every later install.sh run"
     # Five consequence strings, unlike every other call here, which take one.
     # This key is the only one whose consequence varies, and it varies on
     # three things at once.
@@ -5495,10 +5493,6 @@ main() {
   require_scope_max_projects "$scope_max_projects" || exit 1
   if [[ ! "$PARAM_ENABLE_WEBUI" =~ ^(true|false)$ ]]; then
     print_error "--enable-hermes-dashboard must be either true or false."
-    exit 1
-  fi
-  if [ -n "${PARAM_ENABLE_WEB_CONSOLE:-}" ] && [[ ! "$PARAM_ENABLE_WEB_CONSOLE" =~ ^(true|false)$ ]]; then
-    print_error "--enable-web-console must be either true or false."
     exit 1
   fi
   # The remaining --enable-* toggles are checked in parse_args, not here.

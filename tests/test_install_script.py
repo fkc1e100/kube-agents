@@ -5134,7 +5134,10 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
             out = self._bootstrap_over(tmp, "PROJECT_ID=p\n", "PARAM_ENABLE_WEB_CONSOLE=true")
         self.assertIn("--enable-web-console=true applies to this run only", out)
         self.assertIn("records no WEB_CONSOLE_ENABLED", out)
-        self.assertIn("Set WEB_CONSOLE_ENABLED=true in", out)
+        self.assertIn(
+            "or repeat --enable-web-console on every later install.sh run.",
+            out,
+        )
         with tempfile.TemporaryDirectory() as tmp:
             quiet = self._bootstrap_over(tmp, "WEB_CONSOLE_ENABLED=true\n", "PARAM_ENABLE_WEB_CONSOLE=true")
         self.assertNotIn("applies to this run only", quiet)
@@ -8759,6 +8762,7 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         "--enable-pubsub-platform": "ENABLE_PUBSUB_PLATFORM",
         "--enable-stockout-investigator": "ENABLE_STOCKOUT_INVESTIGATOR",
         "--enable-drift-detector": "ENABLE_DRIFT_DETECTOR",
+        "--enable-web-console": "WEB_CONSOLE_ENABLED",
         "--litellm-redaction": "LITELLM_REDACTION_ENABLED",
         "--scoped-sa-pool-enabled": "SCOPED_SA_POOL_ENABLED",
     }
