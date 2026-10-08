@@ -2577,6 +2577,15 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertIn("`kanban_show` this card's parent", body)
         self.assertIn("Never change the live cluster directly", body)
         self.assertIn("open nothing", body)
+        self.assertIn("do NOT run `gitops_workspace.py sync` first", body)
+        self.assertIn("Implement ONLY the option marked '✅ Recommended'", body)
+
+    def test_on_triage_footer_gives_project_and_manifest_path_guidance(self):
+        payload = dict(self.PAYLOAD, project="qwiklabs-gcp-01-abc")
+        body = session_kv_server._triage_task_body(payload, open_pull_request=True)
+        self.assertIn("`--project qwiklabs-gcp-01-abc`", body)
+        self.assertIn("exact repository-relative manifest file path", body)
+        self.assertIn("never pass raw `http://` URLs in shell commands", body)
 
     def test_the_branch_is_stable_and_one_safe_segment(self):
         first = session_kv_server._incident_branch(self.SESSION, self.PAYLOAD)

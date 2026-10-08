@@ -1629,7 +1629,7 @@ def _triage_task_body(payload: Dict[str, Any], open_pull_request: bool = False) 
                    or os.environ.get("GCP_PROJECT") or "")
     workloads_project_query = f"?project={gcp_project}" if gcp_project else ""
     logs_project_query = f";project={gcp_project}" if gcp_project else ""
-    who_acts = _triage_who_acts(open_pull_request)
+    who_acts = _triage_who_acts(open_pull_request, gcp_project=gcp_project)
 
     return (
         f"Analyze the following Kubernetes event warning on GKE cluster '{cluster_name}'.\n\n"
@@ -1680,7 +1680,7 @@ def _triage_task_body(payload: Dict[str, Any], open_pull_request: bool = False) 
     )
 
 
-def _triage_who_acts(open_pull_request: bool) -> str:
+def _triage_who_acts(open_pull_request: bool, gcp_project: str = "") -> str:
     """The triage card's footer: who turns the report into a pull request.
 
     Off, a human picks an option and replies, and the agent that holds the
@@ -1689,6 +1689,7 @@ def _triage_who_acts(open_pull_request: bool) -> str:
     Agent reading this card opens nothing: its persona forbids
     ``submit-suggestion``, and the card worker holds no GitOps write path.
     """
+    project_flag = f"`--project {gcp_project}`" if gcp_project else "`--project <project_id>` from `USER.md`"
     if not open_pull_request:
         return (
             "A human reads your options and the agent that holds the GitOps write path opens the Pull Request — not you, and not from this card. "
@@ -1700,11 +1701,14 @@ def _triage_who_acts(open_pull_request: bool) -> str:
         "This install opens the Pull Request for the recommended fix without waiting for a reply. A follow-up card assigned to the "
         "Platform Agent, the agent that holds the GitOps write path, starts when you complete this card, reads your report, and opens "
         "the Pull Request for the option you marked ✅ Recommended, or for the single Proposed fix — not you, and not from this card. "
-        "Your job is to make that possible: name the manifest change each option needs precisely enough that the Pull Request can be "
-        "opened from your report alone, and with two or more options mark exactly one Recommended. Keep the 'To authorize:' bullet as "
+        "Your job is to make that possible: name the exact repository-relative manifest file path (for example `manifests/domains/<domain>/deployment.yaml`) "
+        "and the exact YAML fields to change so the Pull Request can be opened from your report alone without searching the repository, "
+        "and with two or more options mark exactly one Recommended. Keep the 'To authorize:' bullet as "
         "the template writes it: a reader who prefers another option still replies to pick it. "
-        "Two things are true whoever acts on it — the fix ships as a Pull Request against the GitOps repository, and nothing is written "
-        "to the live cluster directly (no `kubectl scale`, `patch`, or `apply`)."
+        f"During your diagnosis, always pass {project_flag} to any `gcloud` command (never rely on the default project), "
+        "never pass raw `http://` URLs in shell commands (the shell security scanner blocks plain HTTP URLs), "
+        "and remember that your Kubernetes access is strictly read-only (`get`, `describe`, `logs`, `events` only — "
+        "never run `kubectl scale`, `patch`, `apply`, or `--dry-run`)."
     )
 
 
@@ -1841,7 +1845,10 @@ def _triage_pr_task_body(payload: Dict[str, Any], session_id: str) -> str:
         f"same workload that nobody has merged yet), `prepare` hands that one back and you revise it rather than opening a "
         f"second. If that open Pull Request already makes the recommended change, push nothing: complete this card "
         f"with its URL and say it is still waiting for review. With one managed GitOps repository, leave `--repo` off and `prepare` "
-        f"finds it; then pass the `repo` value `prepare` prints as `--repo` to every later command.\n"
+        f"finds it; then pass the `repo` value `prepare` prints as `--repo` to every later command. "
+        f"**Fast path:** do NOT run `gitops_workspace.py sync` first (`prepare` clones the repository directly and prints JSON with `workspace` and `repo`), "
+        f"edit the target manifest file inside `<workspace>/...` directly using `patch` (do not run `find_by_name` or `search_files` when the parent report already names the manifest path), "
+        f"and write the PR body to `/opt/data/scratch/` and run `submit_suggestion.py submit` in a single shell command.\n"
         f"4. **Never change the live cluster directly** — no `kubectl apply`, `patch`, `scale`, `edit` or `delete`, and no "
         f"write outside the Pull Request.\n"
         f"5. **Finish with `kanban_complete(result=..., summary=...)`.** `result` gives the Pull Request URL, the option it "
