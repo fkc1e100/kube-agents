@@ -1302,12 +1302,13 @@ def _github_entries(
     for entry in entries:
         url = entry.get("url", "")
         if entry.get("type") != GITHUB_REPO_TYPE:
-            LOGGER.warning(
-                "Skipping %s repository %r: no provider for type %r.",
-                key,
-                url,
-                entry.get("type"),
-            )
+            if entry.get("type") not in SWEEPABLE_REPO_TYPES:
+                LOGGER.warning(
+                    "Skipping %s repository %r: no provider for type %r.",
+                    key,
+                    url,
+                    entry.get("type"),
+                )
             continue
         slug = extract_github_slug(url)
         found = None if slug else github_enterprise_ref(url, install_host)
