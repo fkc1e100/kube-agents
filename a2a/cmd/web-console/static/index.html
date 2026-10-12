@@ -610,6 +610,16 @@
       let pollInFlight = false;
       let markKnown = sessionStorage.getItem(MARK_KEY) !== null;
       let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
+      let unsettledTurn = null;
+
+      function newSessionId() {
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        return (
+          "web-console-" +
+          Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
+        );
+      }
 
       function advanceMark(id) {
         if (typeof id !== "number" || id <= lastSeenId) return;
@@ -618,9 +628,19 @@
         sessionStorage.setItem(MARK_KEY, String(lastSeenId));
       }
 
+      function initNewSession(id) {
+        currentSessionId = id;
+        sessionStorage.setItem(SESSION_KEY, currentSessionId);
+        lastSeenId = 0;
+        markKnown = true;
+        sessionStorage.setItem(MARK_KEY, "0");
+        unsettledTurn = null;
+      }
+
       function resetMark() {
         lastSeenId = 0;
         markKnown = false;
+        unsettledTurn = null;
         sessionStorage.removeItem(MARK_KEY);
       }
 
@@ -652,13 +672,21 @@
       }
 
       // Periodic poll between turns. On a tab that has no mark yet (a reload
-      // of an older session), the first poll only sets the mark.
+      // of an older session), the first poll only sets the mark. When a turn's
+      // post-turn reads both failed, the first successful poll settles that
+      // turn by content instead of replaying its reply as an update.
       async function pollMessages() {
         if (!currentSessionId || turnInFlight || pollInFlight) return;
         pollInFlight = true;
         try {
           const data = await fetchNewMessages();
           if (!data) return;
+          if (unsettledTurn) {
+            const u = unsettledTurn;
+            unsettledTurn = null;
+            applySettleData(data, u.typed, u.reply, u.beforeId, u.replyId);
+            return;
+          }
           if (markKnown) showUpdates(data.messages);
           advanceMark(data.latest_id);
         } finally {
@@ -666,18 +694,7 @@
         }
       }
 
-      // Runs once a turn's reply is on screen. The session holds three runs of
-      // messages above the mark: results that landed before this turn started
-      // (shown), the turn itself from the typed message to its reply (already
-      // on screen, so only marked), and results that landed after the reply
-      // (shown). Even when the follow-up fetch fails, replyId from the turn
-      // response moves the mark past the reply so the next poll never replays it.
-      async function settleAfterReply(typed, reply, beforeId, replyId) {
-        const data = await fetchNewMessages();
-        if (!data) {
-          if (typeof replyId === "number" && replyId > 0) advanceMark(replyId);
-          return;
-        }
+      function applySettleData(data, typed, reply, beforeId, replyId) {
         const messages = data.messages || [];
         const same = (a, b) => (a || "").trim() === (b || "").trim();
         let turnAt = -1;
@@ -740,6 +757,28 @@
         advanceMark(data.latest_id);
       }
 
+      // Runs once a turn's reply is on screen. The session holds three runs of
+      // messages above the mark: results that landed before this turn started
+      // (shown), the turn itself from the typed message to its reply (already
+      // on screen, so only marked), and results that landed after the reply
+      // (shown). When the follow-up fetch fails, replyId moves the mark past
+      // the reply if present; when neither read supplied an ID, unsettledTurn
+      // holds the turn so the next poll settles by content instead of replaying.
+      async function settleAfterReply(typed, reply, beforeId, replyId) {
+        const data = await fetchNewMessages();
+        if (!data) {
+          if (typeof replyId === "number" && replyId > 0) {
+            advanceMark(replyId);
+            unsettledTurn = null;
+          } else {
+            unsettledTurn = { typed, reply, beforeId, replyId };
+          }
+          return;
+        }
+        unsettledTurn = null;
+        applySettleData(data, typed, reply, beforeId, replyId);
+      }
+
       function escapeHtml(text) {
         const map = {
           "&": "&amp;",
@@ -761,10 +800,20 @@
         });
       }
 
-      // Inline formatting for text outside code fences.
+      // Inline formatting for text outside code fences. Matches equal-length
+      // backtick delimiter runs so double-backtick spans can quote a backtick.
       function renderInline(text) {
         let html = escapeHtml(text);
-        html = html.replace(/`+([^`\n]+)`+/g, "<code>$1</code>");
+        html = html.replace(/(`+)((?:(?!\1)[^\n])+)\1/g, (_, ticks, inner) => {
+          const code =
+            inner.length >= 2 &&
+            inner.startsWith(" ") &&
+            inner.endsWith(" ") &&
+            inner.trim().length > 0
+              ? inner.slice(1, -1)
+              : inner;
+          return `<code>${code}</code>`;
+        });
         html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
         return html
           .split(/\n{2,}/)
@@ -772,21 +821,32 @@
           .join("");
       }
 
-      // Splits on line-opening ``` fences first, so code keeps its blank lines
-      // and is never run through the inline rules; mid-line backticks stay in
-      // the surrounding prose, and the info string after the opening fence
-      // (```yaml) is dropped rather than rendered as the first line.
+      // Splits on line-opening backtick fences (three or more backticks,
+      // optionally indented inside a list item) first, so code keeps its blank
+      // lines and is never run through the inline rules; mid-line backticks
+      // stay in the surrounding prose, and the info string after the opening
+      // fence (```yaml) is dropped rather than rendered as the first line.
       function renderMarkdown(text) {
         if (!text) return "";
         const fence =
-          /(?:^|\n)```([^\n`]*)\n([\s\S]*?)(?:\n```(?=\s*(?:\n|$))|$)/g;
+          /(?:^|\n)([ ]*)(`{3,})([^\n`]*)\n([\s\S]*?)(?:\n[ ]*\2+ *(?=\n|$)|$)/g;
         let html = "";
         let last = 0;
         let match;
         while ((match = fence.exec(text)) !== null) {
           const before = text.slice(last, match.index);
           if (before.trim()) html += renderInline(before.trim());
-          html += `<pre><code>${escapeHtml(match[2].replace(/\n$/, ""))}</code></pre>`;
+          const indent = match[1].length;
+          const code = match[4]
+            .replace(/\n$/, "")
+            .split("\n")
+            .map((line) => {
+              let k = 0;
+              while (k < indent && line[k] === " ") k++;
+              return line.slice(k);
+            })
+            .join("\n");
+          html += `<pre><code>${escapeHtml(code)}</code></pre>`;
           last = fence.lastIndex;
         }
         const tail = text.slice(last);
@@ -841,6 +901,9 @@
         if (turnInFlight) return;
         text = (text || "").trim();
         if (!text) return;
+        if (!currentSessionId) {
+          initNewSession(newSessionId());
+        }
         appendMessage("user", text);
         setBusy(true);
         const pending = appendMessage("agent", "Working on it…", "pending");
@@ -858,9 +921,7 @@
           });
           const data = await readBody(resp);
           if (data.session_id && data.session_id !== currentSessionId) {
-            currentSessionId = data.session_id;
-            sessionStorage.setItem(SESSION_KEY, currentSessionId);
-            resetMark();
+            initNewSession(data.session_id);
           }
           pending.remove();
           if (resp.ok) {

@@ -652,9 +652,12 @@ function makeContext(fetchImpl, initialStorage = {}) {
   });
   const ctx = {
     console,
+    crypto,
     Date,
     Number,
     String,
+    Uint8Array,
+    Array,
     JSON,
     encodeURIComponent,
     setInterval() {},
@@ -706,6 +709,47 @@ function makeContext(fetchImpl, initialStorage = {}) {
   assert.deepEqual(ctx.appended, [], "turn reply must not be replayed as an update");
 }
 
+// Case 1b: when both post-turn reads fail (replyId is undefined and the settle
+// fetch fails), the next successful poll settles by content instead of replaying
+// the turn's own reply as an "update", and still shows post-reply updates.
+{
+  let pollCalls = [];
+  const ctx = makeContext(async (url) => {
+    if (!String(url).includes("/messages")) {
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    }
+    pollCalls.push(String(url));
+    if (pollCalls.length === 1) {
+      return { ok: false, status: 502, text: async () => "bad gateway" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 10,
+        messages: [
+          { id: 7, role: "user", content: "again" },
+          { id: 8, role: "assistant", content: "pods are healthy" },
+          { id: 9, role: "user", content: "[kanban] card done" },
+          { id: 10, role: "assistant", content: "delegated result after outage" },
+        ],
+      }),
+    };
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  pollCalls = [];
+  await vm.runInContext("settleAfterReply('again', 'pods are healthy', 4, undefined)", ctx);
+  await vm.runInContext("pollMessages()", ctx);
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "10", "poll after failed settle must advance mark past turn and post-reply update");
+  assert.equal(
+    JSON.stringify(ctx.appended),
+    JSON.stringify([{ role: "agent", text: "delegated result after outage", tag: "update" }]),
+    "poll after failed settle must not replay turn reply and must show post-reply update"
+  );
+}
+
 // Case 2: pre-turn result, two mid-turn wakes (with intermediate assistant rows
 // on the typed turn), and a post-reply result, even when replyId points at the
 // post-reply wake row (id 16) rather than the turn's own reply row (id 14).
@@ -753,15 +797,79 @@ function makeContext(fetchImpl, initialStorage = {}) {
   assert.equal(ctx.store.get("kube-agents-web-console-mark"), "16");
 }
 
-// Case 3: renderMarkdown splits only on line-opening fences and keeps mid-line
-// triple backticks intact in inline prose.
+// Case 3: renderMarkdown handles column-0 fences, indented list fences,
+// indented closers, four-backtick fences, mid-line backticks, and double-backtick
+// inline code spans quoting a single backtick.
 {
   const ctx = makeContext(async () => ({ ok: false, status: 503, text: async () => "" }));
   const fenced = vm.runInContext("renderMarkdown('Before\\n\\x60\\x60\\x60yaml\\nkind: Pod\\n\\x60\\x60\\x60\\nAfter')", ctx);
   assert.equal(fenced, "<p>Before</p><pre><code>kind: Pod</code></pre><p>After</p>");
+  const indentedListFence = vm.runInContext(
+    "renderMarkdown('- Apply:\\n  \\x60\\x60\\x60yaml\\n  kind: Pod\\n\\n  spec: {}\\n  \\x60\\x60\\x60\\n- Done')",
+    ctx
+  );
+  assert.equal(
+    indentedListFence,
+    "<p>- Apply:</p><pre><code>kind: Pod\n\nspec: {}</code></pre><p>- Done</p>"
+  );
+  const indentedCloser = vm.runInContext(
+    "renderMarkdown('\\x60\\x60\\x60yaml\\nkind: Pod\\n  \\x60\\x60\\x60\\nAfter that, apply it.')",
+    ctx
+  );
+  assert.equal(
+    indentedCloser,
+    "<pre><code>kind: Pod</code></pre><p>After that, apply it.</p>"
+  );
+  const fourBacktick = vm.runInContext(
+    "renderMarkdown('\\x60\\x60\\x60\\x60\\n\\x60\\x60\\x60\\nnested\\n\\x60\\x60\\x60\\n\\x60\\x60\\x60\\x60')",
+    ctx
+  );
+  assert.equal(fourBacktick, "<pre><code>\x60\x60\x60\nnested\n\x60\x60\x60</code></pre>");
+  const doubleBacktickSpan = vm.runInContext(
+    "renderMarkdown('Use \\x60\\x60a \\x60 b\\x60\\x60 inline.')",
+    ctx
+  );
+  assert.equal(doubleBacktickSpan, "<p>Use <code>a \x60 b</code> inline.</p>");
   const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
   assert.ok(inline.includes("Use <code>yaml on its own line, not </code>inline"), "mid-line backticks must not drop surrounding prose: " + inline);
   assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
+}
+
+// Case 4: first turn on a fresh tab mints the session and sets markKnown=true
+// before the request, so a 504 timeout or a dropped connection preserves the
+// session and displays the late reply on the next poll.
+{
+  let chatSessionId = "";
+  const ctx = makeContext(async (url, opts) => {
+    if (String(url) === "/api/chat") {
+      chatSessionId = JSON.parse(opts.body).session_id;
+      throw new Error("socket hang up");
+    }
+    if (String(url).includes("/messages")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          latest_id: 2,
+          messages: [
+            { id: 1, role: "user", content: "first question" },
+            { id: 2, role: "assistant", content: "late reply after drop" },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+  });
+  ctx.appended.length = 0;
+  await vm.runInContext("submitMessage('first question')", ctx);
+  assert.ok(/^web-console-[0-9a-f]{32}$/.test(chatSessionId), "first turn must send a minted session ID: " + chatSessionId);
+  assert.equal(ctx.store.get("kube-agents-web-console-session"), chatSessionId);
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "0");
+  await vm.runInContext("pollMessages()", ctx);
+  assert.ok(
+    ctx.appended.some(m => m.role === "agent" && m.text === "late reply after drop" && m.tag === "update"),
+    "poll after dropped first turn must display late reply: " + JSON.stringify(ctx.appended)
+  );
 }
 `)
 	out, err := cmd.CombinedOutput()

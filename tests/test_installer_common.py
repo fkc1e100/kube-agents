@@ -240,6 +240,8 @@ class InstallerCommonTest(unittest.TestCase):
                     "SCOPED_SA_POOL_MAX_ACCOUNTS": "",
                     # And the mode, refused on a value outside the CRD's enum.
                     "PLATFORM_AGENT_MODE": "",
+                    "WEB_CONSOLE_ENABLED": "",
+                    "ACCEPT_NO_NETWORK_POLICY": "",
                     **(env or {}),
                 },
                 bin_dir=str(bin_dir),

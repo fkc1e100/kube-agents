@@ -168,7 +168,7 @@ on_error() {
   # `bash`; both read as the script by name.
   local source_file="${BASH_SOURCE[1]:-}"
   case "$source_file" in
-    ""|main) source_file="$INSTALL_SCRIPT_NAME" ;;
+    ""|main|bash) source_file="$INSTALL_SCRIPT_NAME" ;;
   esac
   local func_name="${FUNCNAME[1]:-main}"
   echo -e "\n\033[91m\033[1m✗ Error encountered at ${source_file}:${line_no} in ${func_name} (exit code ${exit_code}): ${bash_cmd}\033[0m" >&2
@@ -4241,6 +4241,23 @@ prompt_network_policy_choice() {
   local cluster_name="$1"
   local np_choice=""
   print_warning "Existing cluster '$cluster_name' enforces no NetworkPolicy (neither Dataplane V2 nor the legacy Calico addon)."
+  if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+    print_info "The web console (--enable-web-console) requires NetworkPolicy enforcement, so installing without enforcement is not available on this run."
+    print_info "  e) enable the legacy Calico addon and enforcement now: a control-plane update that may recreate node pools and restart workloads unrelated to kube-agents"
+    print_info "  n) stop here, changing nothing"
+    prompt_read "Choose (e/N)" np_choice "n"
+    case "$np_choice" in
+      [Ee])
+        PARAM_ENABLE_NETWORK_POLICY="true"
+        PARAM_ACCEPT_NO_NETWORK_POLICY="false"
+        ;;
+      *)
+        PARAM_ENABLE_NETWORK_POLICY="false"
+        PARAM_ACCEPT_NO_NETWORK_POLICY="false"
+        ;;
+    esac
+    return 0
+  fi
   print_info "  e) enable the legacy Calico addon and enforcement now: a control-plane update that may recreate node pools and restart workloads unrelated to kube-agents"
   print_info "  a) install without NetworkPolicy enforcement: the cluster is not modified, and every policy kube-agents ships stays inert, including the ones confining the agent's shell sandbox"
   print_info "  n) stop here, changing nothing"
@@ -4316,7 +4333,11 @@ ensure_existing_cluster_network_policy() {
   if ! is_truthy "${PARAM_ENABLE_NETWORK_POLICY:-${ENABLE_NETWORK_POLICY:-false}}"; then
     print_error "Existing cluster '$cluster_name' has neither Dataplane V2 nor legacy Calico NetworkPolicy."
     print_info "Enabling Calico may recreate nodes and restart workloads; installing without enforcement leaves the agent sandbox unconfined on the network. The cluster's owner decides which."
-    print_info "Explicit opt-in was not provided (--enable-network-policy or --accept-no-network-policy). Refusing to proceed."
+    if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+      print_info "The web console requires NetworkPolicy enforcement; pass --enable-network-policy (or disable the web console with --enable-web-console=false). Refusing to proceed."
+    else
+      print_info "Explicit opt-in was not provided (--enable-network-policy or --accept-no-network-policy). Refusing to proceed."
+    fi
     return 1
   fi
 
@@ -4560,9 +4581,15 @@ check_existing_cluster_network_policy_preflight() {
   if ! is_truthy "${PARAM_ENABLE_NETWORK_POLICY:-${ENABLE_NETWORK_POLICY:-false}}"; then
     print_error "Existing cluster '$cluster_name' enforces no NetworkPolicy (neither Dataplane V2 nor legacy Calico)."
     print_info "kube-agents ships NetworkPolicies that isolate the agent's execution sandbox; on this cluster they would be accepted and inert, and the Terraform apply refuses the plan."
-    print_info "Two ways forward, and the cluster's owner chooses:"
-    print_info "  --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon: a control-plane update that may recreate node pools and restart workloads unrelated to kube-agents."
-    print_info "  --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true) installs without enforcement: the cluster is not modified, and the agent sandbox is unconfined on the network. Recorded in the report and on the PlatformAgent."
+    if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+      print_info "The web console (--enable-web-console / WEB_CONSOLE_ENABLED=true) requires NetworkPolicy enforcement, so --accept-no-network-policy cannot be used:"
+      print_info "  --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon: a control-plane update that may recreate node pools and restart workloads unrelated to kube-agents."
+      print_info "  Or pass --enable-web-console=false (WEB_CONSOLE_ENABLED=false) to disable the web console."
+    else
+      print_info "Two ways forward, and the cluster's owner chooses:"
+      print_info "  --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon: a control-plane update that may recreate node pools and restart workloads unrelated to kube-agents."
+      print_info "  --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true) installs without enforcement: the cluster is not modified, and the agent sandbox is unconfined on the network. Recorded in the report and on the PlatformAgent."
+    fi
     print_info "Neither was given. Aborting before making any cluster changes."
     write_json_report "REFUSED_MISSING_NETWORK_POLICY"
     exit 1
@@ -7828,7 +7855,11 @@ main() {
           print_info "Dry-run: skipping terraform plan because Calico has not yet been applied to the live cluster (a real run enables Calico prior to apply)."
         else
           print_warning "Dry-run: skipping terraform plan because existing cluster '$cluster_name' enforces no NetworkPolicy (postcondition would fail)."
-          print_info "A real run will abort unless told which way to go: --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon, a control-plane update that may recreate nodes; --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true) installs without enforcement and leaves the cluster as it is."
+          if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+            print_info "A real run will abort unless NetworkPolicy enforcement is enabled: --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon, a control-plane update that may recreate nodes (--accept-no-network-policy cannot be combined with --enable-web-console)."
+          else
+            print_info "A real run will abort unless told which way to go: --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon, a control-plane update that may recreate nodes; --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true) installs without enforcement and leaves the cluster as it is."
+          fi
           print_info "To enable enforcement by hand beforehand, run these two commands in this order:"
           print_info "  gcloud container clusters update $cluster_name --location $region --project $project_id --update-addons=NetworkPolicy=ENABLED"
           print_info "  gcloud container clusters update $cluster_name --location $region --project $project_id --enable-network-policy"
