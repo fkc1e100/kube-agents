@@ -132,7 +132,7 @@ class AgentAPIProxyTest(unittest.TestCase):
                     self.end_headers()
                     self.wfile.write(f"{len(first):x}\r\n".encode("ascii") + first + b"\r\n")
                     self.wfile.flush()
-                    owner.release_second_chunk.wait(timeout=5)
+                    owner.second_chunk_released = owner.release_second_chunk.wait(timeout=30)
                     self.wfile.write(f"{len(second):x}\r\n".encode("ascii") + second + b"\r\n0\r\n\r\n")
                     self.wfile.flush()
                     return
@@ -146,6 +146,7 @@ class AgentAPIProxyTest(unittest.TestCase):
                 return
 
         self.release_second_chunk = threading.Event()
+        self.second_chunk_released = False
         self.upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
         AgentAPIProxyHandler.external_key = "external-secret"
         AgentAPIProxyHandler.upstream_key = "internal-sentinel"
@@ -399,9 +400,9 @@ class AgentAPIProxyTest(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as response:
             first_line = response.readline()
             self.assertEqual(b"event: run.started\n", first_line)
-            self.assertFalse(self.release_second_chunk.is_set())
             self.release_second_chunk.set()
             rest = response.read()
+        self.assertTrue(self.second_chunk_released)
         self.assertIn(b"event: done\n", rest)
 
 
