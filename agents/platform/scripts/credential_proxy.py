@@ -3188,6 +3188,8 @@ GIT_CONFIG_WRITE_ACTIONS = frozenset(
         "--unset-all",
         "--rename-section",
         "--remove-section",
+        "--edit",
+        "-e",
     }
 )
 
@@ -3203,7 +3205,6 @@ GIT_CONFIG_OPTIONS_WITH_VALUE = frozenset(
         "--url",
         "--file",
         "-f",
-        "--expiry-date",
     }
 )
 
@@ -4111,6 +4112,12 @@ def _git_config_violation(argv: list[str]) -> str | None:
     if actions & {"--rename-section", "--remove-section"}:
         return (
             "`git config` section mutation is refused: only author identity configuration "
+            "(user.name, user.email) and query options are permitted."
+        )
+
+    if actions & {"--edit", "-e"}:
+        return (
+            "`git config --edit` is refused: only author identity configuration "
             "(user.name, user.email) and query options are permitted."
         )
 

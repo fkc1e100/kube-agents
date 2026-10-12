@@ -1535,6 +1535,18 @@ class GitHardeningTest(unittest.TestCase):
         self.assertIsNotNone(
             git_argument_violation(["git", "config", "--rename-s", "user", "other"])
         )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "--edit"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "-e"])
+        )
+        self.assertIsNotNone(
+            git_argument_violation(["git", "config", "--expiry-date", "alias.zz", "now"])
+        )
+        self.assertIsNone(
+            git_argument_violation(["git", "config", "--expiry-date", "user.name"])
+        )
         # --attr-source is skipped by _git_plan and refused by git_argument_violation.
         self.assertEqual(
             ("difftool", []),
