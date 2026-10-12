@@ -145,6 +145,19 @@ class WebConsoleChartTest(unittest.TestCase):
             r"(?m)^check_toggle webConsole --set webConsole\.enabled=true$",
         )
 
+    def test_image_pull_secrets_helper_is_not_double_wrapped(self) -> None:
+        # kube-agents.imagePullSecrets already emits `imagePullSecrets:`, so
+        # wrapping it in a second `imagePullSecrets:` key nests a map under a
+        # list field and breaks Deployment rendering when pull secrets are set.
+        deployment = self.docs["Deployment"]
+        self.assertIn(
+            '{{- with (include "kube-agents.imagePullSecrets" .) }}\n'
+            "      {{- . | nindent 6 }}\n"
+            "      {{- end }}",
+            deployment,
+        )
+        self.assertNotRegex(deployment, r"(?m)^\s*imagePullSecrets:\s*$")
+
 
 class WebConsoleImageTest(unittest.TestCase):
     """The image the chart pulls is built, signed, inventoried and released."""

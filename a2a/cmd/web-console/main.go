@@ -538,7 +538,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	replyID := s.latestMessageID(r.Context(), sid)
+	replyID := s.replyMessageID(r.Context(), sid, beforeID, reply)
 	writeJSON(w, http.StatusOK, chatResponse{SessionID: sid, Reply: reply, BeforeID: beforeID, ReplyID: replyID})
 }
 
@@ -553,6 +553,46 @@ func (s *server) latestMessageID(parent context.Context, sid string) int64 {
 		return 0
 	}
 	return listed[len(listed)-1].ID
+}
+
+// replyMessageID finds the row ID of the assistant reply that just finished
+// after beforeID by matching its text, so a wake that landed between the end
+// of runTurn and this read is not mistaken for the turn's own reply. Falls
+// back to the newest row ID when no assistant row matches.
+func (s *server) replyMessageID(parent context.Context, sid string, beforeID int64, reply string) int64 {
+	ctx, cancel := context.WithTimeout(parent, messagesTimeout)
+	defer cancel()
+	want := strings.TrimSpace(reply)
+	var newestID int64
+	var matchedID int64
+	for page := 0; page < messagesMaxPages; page++ {
+		path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=%d",
+			url.PathEscape(sid), messagesPageLimit, page*messagesPageLimit)
+		listed, failure := s.fetchMessagesPage(ctx, path)
+		if failure != nil || len(listed) == 0 {
+			break
+		}
+		if page == 0 {
+			newestID = listed[len(listed)-1].ID
+		}
+		for i := len(listed) - 1; i >= 0; i-- {
+			m := listed[i]
+			if m.ID <= beforeID {
+				break
+			}
+			if m.Role == roleAssistant && m.Content != nil && strings.TrimSpace(*m.Content) == want {
+				matchedID = m.ID
+				break
+			}
+		}
+		if matchedID > 0 || len(listed) < messagesPageLimit || listed[0].ID <= beforeID {
+			break
+		}
+	}
+	if matchedID > 0 {
+		return matchedID
+	}
+	return newestID
 }
 
 func (s *server) claim(sid string) bool {

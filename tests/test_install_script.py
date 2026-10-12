@@ -1346,6 +1346,16 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("install.env", proc.stderr + proc.stdout)
 
+    def test_validate_existing_cluster_opt_in_flags_refuses_web_console_without_network_policy(self):
+        for cmd, env in (
+            ("parse_args --accept-no-network-policy --enable-web-console; validate_existing_cluster_opt_in_flags", {}),
+            ("validate_existing_cluster_opt_in_flags", {"ACCEPT_NO_NETWORK_POLICY": "true", "WEB_CONSOLE_ENABLED": "True"}),
+        ):
+            with self.subTest(cmd=cmd, env=env):
+                proc = self._run_install_func(cmd, env=env)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("cannot be combined with --accept-no-network-policy", proc.stderr + proc.stdout)
+
     def test_validate_existing_cluster_opt_in_flags_rejects_typos(self):
         cmd = 'parse_args --enable-network-policy=ture; validate_existing_cluster_opt_in_flags'
         proc = self._run_install_func(cmd)
@@ -10959,19 +10969,47 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
 
         Every PARAM_* these flags write is also seeded from the loaded
         configuration before parse_args runs. Judging the seeded value with
-        ^(true|false)$ would abort a re-run over a spelling the rest of the
-        pipeline honours, naming a flag the operator never passed — and CI
-        exports three of these keys from GitHub vars.
+        ^(true|false)$ in parse_args or later in main() would abort a re-run
+        over a spelling the rest of the pipeline honours, naming a flag the
+        operator never passed — and CI exports four of these keys from GitHub
+        vars.
         """
         for flag, key in self.SEEDED_TOGGLE_ENV_KEYS.items():
             for value in ("True", "yes", "on", "1"):
                 with self.subTest(flag=flag, value=value):
-                    proc = self._parse_args(**{key: value})
+                    script = (
+                        f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                        f'source "{_REPO_ROOT}/scripts/installer/installer_common.sh"\n'
+                        "parse_args\n"
+                        "resolve_shared_defaults\n"
+                        "validate_existing_cluster_opt_in_flags\n"
+                        'echo "PASSED"\n'
+                    )
+                    env = get_isolated_test_env()
+                    env[key] = value
+                    proc = subprocess.run(
+                        ["bash", "-c", script],
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        cwd=str(_REPO_ROOT),
+                    )
                     self.assertIn(
                         "PASSED",
                         proc.stdout,
                         f"{key}={value} was rejected: {proc.stdout + proc.stderr}",
                     )
+        # And main() itself must not re-judge any of these seeded PARAM_*
+        # variables with `=~ ^(true|false)$` after resolve_shared_defaults.
+        main_body = _INSTALL_SH.read_text().split("\nmain() {\n", 1)[1]
+        judged_in_main = set(
+            re.findall(r'\[\[\s*!\s*"\$([A-Za-z0-9_]+)"\s*=~\s*\^\(true\|false\)\$\s*\]\]', main_body)
+        )
+        self.assertEqual(
+            judged_in_main,
+            {"enable_gvisor", "PARAM_ENABLE_WEBUI", "vertex_manage_serving_project"},
+            f"main() must not regex-judge seeded toggle PARAMs: {judged_in_main}",
+        )
 
     def test_every_toggle_refuses_an_empty_value_against_a_seed(self):
         """`--enable-slack=` with SLACK_ENABLED=true recorded is the bad case.

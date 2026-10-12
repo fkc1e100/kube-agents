@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,15 +43,16 @@ const testKey = "test-api-key"
 // in insertion order; errors are OpenAI-shaped {"error":{"message":...}}.
 // Every route requires the bearer key, as the agent's auth sidecar does.
 type fakeHermes struct {
-	mu        sync.Mutex
-	sessions  map[string]bool
-	messages  map[string][]map[string]any
-	nextID    int64
-	lastQuery string
-	chats     []map[string]any
-	reply     string
-	chatDelay time.Duration
-	chatCode  int
+	mu           sync.Mutex
+	sessions     map[string]bool
+	messages     map[string][]map[string]any
+	nextID       int64
+	lastQuery    string
+	chats        []map[string]any
+	reply        string
+	postTurnWake string
+	chatDelay    time.Duration
+	chatCode     int
 }
 
 func newFakeHermes() *fakeHermes {
@@ -129,6 +131,10 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.post(sid, "assistant", nil)
 		f.post(sid, "tool", "pod list")
 		f.post(sid, "assistant", reply)
+		if f.postTurnWake != "" {
+			f.post(sid, "user", "[kanban] card completed")
+			f.post(sid, "assistant", f.postTurnWake)
+		}
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"object":     "hermes.session.chat.completion",
@@ -234,8 +240,18 @@ func TestChatUsesHermesContract(t *testing.T) {
 	if second.BeforeID != 4 || second.ReplyID != 8 {
 		t.Errorf("second turn IDs = (before=%d, reply=%d), want (4, 8)", second.BeforeID, second.ReplyID)
 	}
+	// When a delegated wake lands between the turn's assistant row (12) and
+	// the post-turn replyMessageID read (rows 13 and 14), ReplyID still names
+	// the turn's own assistant row (12) so the page shows row 14 as an update.
+	fake.mu.Lock()
+	fake.postTurnWake = "delegated card finished right after turn"
+	fake.mu.Unlock()
+	third := decode[chatResponse](t, serve(h, chatReq(`{"message":"third","session_id":"`+got.SessionID+`"}`)))
+	if third.BeforeID != 8 || third.ReplyID != 12 {
+		t.Errorf("third turn IDs with post-turn wake = (before=%d, reply=%d), want (8, 12)", third.BeforeID, third.ReplyID)
+	}
 	_, chats := fake.state()
-	if len(chats) != 2 || chats[0]["message"] != "check pods" {
+	if len(chats) != 3 || chats[0]["message"] != "check pods" {
 		t.Fatalf("upstream chat body = %v, want {\"message\": \"check pods\"}", chats)
 	}
 	if _, has := chats[0]["content"]; has {
@@ -573,9 +589,19 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rule := range []string{"grid-template-rows: minmax(0, 1fr);", "min-height: 0;"} {
-		if !strings.Contains(string(page), rule) {
-			t.Errorf("index.html is missing %q", rule)
+	html := string(page)
+	for _, tc := range []struct {
+		name    string
+		pattern string
+	}{
+		{"main grid row", `(?s)\bmain\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\);`},
+		{"main min-height", `(?s)\bmain\s*\{[^}]*min-height:\s*0;`},
+		{"chat-section min-height", `(?s)\.chat-section\s*\{[^}]*min-height:\s*0;`},
+		{"sidebar min-height", `(?s)\.sidebar\s*\{[^}]*min-height:\s*0;`},
+		{"sidebar-content scroll", `(?s)\.sidebar-content\s*\{[^}]*overflow-y:\s*auto;`},
+	} {
+		if !regexp.MustCompile(tc.pattern).MatchString(html) {
+			t.Errorf("index.html is missing %s (%s)", tc.name, tc.pattern)
 		}
 	}
 }
@@ -584,10 +610,13 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 // in Node's vm module against stubbed DOM and fetch globals, verifying:
 //  1. A failed settle fetch still advances the mark to replyId so the next
 //     poll does not replay the turn's own assistant reply as an "update".
-//  2. Results that landed before the turn, a card wake that landed mid-turn
-//     (followed by an intermediate assistant row of the typed turn), and
+//  2. Results that landed before the turn, multiple card wakes that landed
+//     mid-turn (followed by intermediate assistant rows of the typed turn), and
 //     results that landed after the reply are each shown once while the typed
-//     turn's own assistant messages are not duplicated.
+//     turn's own assistant messages are not duplicated, even if replyId raced
+//     and points at a post-reply wake row.
+//  3. renderMarkdown formats line-opening fenced code blocks while keeping
+//     mid-line triple backticks intact in inline prose.
 func TestPageSettleAndWakeLogic(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -677,8 +706,9 @@ function makeContext(fetchImpl, initialStorage = {}) {
   assert.deepEqual(ctx.appended, [], "turn reply must not be replayed as an update");
 }
 
-// Case 2: pre-turn result, mid-turn wake (with a subsequent intermediate
-// assistant row on the typed turn), and post-reply result.
+// Case 2: pre-turn result, two mid-turn wakes (with intermediate assistant rows
+// on the typed turn), and a post-reply result, even when replyId points at the
+// post-reply wake row (id 16) rather than the turn's own reply row (id 14).
 {
   let settleReady = false;
   const messages = [
@@ -687,11 +717,13 @@ function makeContext(fetchImpl, initialStorage = {}) {
     { id: 7, role: "user", content: "check cluster" },
     { id: 8, role: "assistant", content: "intermediate note before wake" },
     { id: 9, role: "user", content: "[kanban] card 2 done mid-turn" },
-    { id: 10, role: "assistant", content: "mid-turn wake result" },
-    { id: 11, role: "assistant", content: "intermediate note after wake" },
-    { id: 12, role: "assistant", content: "final turn reply" },
-    { id: 13, role: "user", content: "[kanban] card 3 done" },
-    { id: 14, role: "assistant", content: "post-reply delegated result" },
+    { id: 10, role: "assistant", content: "first mid-turn wake result" },
+    { id: 11, role: "assistant", content: "intermediate note between wakes" },
+    { id: 12, role: "user", content: "[kanban] card 3 done mid-turn" },
+    { id: 13, role: "assistant", content: "second mid-turn wake result" },
+    { id: 14, role: "assistant", content: "final turn reply" },
+    { id: 15, role: "user", content: "[kanban] card 4 done" },
+    { id: 16, role: "assistant", content: "post-reply delegated result" },
   ];
   const ctx = makeContext(async (url) => {
     if (!String(url).includes("/messages") || !settleReady) {
@@ -700,24 +732,36 @@ function makeContext(fetchImpl, initialStorage = {}) {
     return {
       ok: true,
       status: 200,
-      json: async () => ({ latest_id: 14, messages }),
+      json: async () => ({ latest_id: 16, messages }),
     };
   }, {
     "kube-agents-web-console-session": "web-console-" + "b".repeat(32),
     "kube-agents-web-console-mark": "4",
   });
   settleReady = true;
-  await vm.runInContext("settleAfterReply('check cluster', 'final turn reply', 4, 12)", ctx);
+  await vm.runInContext("settleAfterReply('check cluster', 'final turn reply', 4, 16)", ctx);
   assert.equal(
     JSON.stringify(ctx.appended),
     JSON.stringify([
       { role: "agent", text: "pre-turn delegated result", tag: "update" },
-      { role: "agent", text: "mid-turn wake result", tag: "update" },
+      { role: "agent", text: "first mid-turn wake result", tag: "update" },
+      { role: "agent", text: "second mid-turn wake result", tag: "update" },
       { role: "agent", text: "post-reply delegated result", tag: "update" },
     ]),
-    "only delegated results (pre-turn, mid-turn wake, post-reply) should be shown as updates"
+    "all delegated results (pre-turn, both mid-turn wakes, post-reply) must be shown once"
   );
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "14");
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "16");
+}
+
+// Case 3: renderMarkdown splits only on line-opening fences and keeps mid-line
+// triple backticks intact in inline prose.
+{
+  const ctx = makeContext(async () => ({ ok: false, status: 503, text: async () => "" }));
+  const fenced = vm.runInContext("renderMarkdown('Before\\n\\x60\\x60\\x60yaml\\nkind: Pod\\n\\x60\\x60\\x60\\nAfter')", ctx);
+  assert.equal(fenced, "<p>Before</p><pre><code>kind: Pod</code></pre><p>After</p>");
+  const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
+  assert.ok(inline.includes("Use <code>yaml on its own line, not </code>inline"), "mid-line backticks must not drop surrounding prose: " + inline);
+  assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
 }
 `)
 	out, err := cmd.CombinedOutput()
