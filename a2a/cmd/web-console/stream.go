@@ -110,11 +110,20 @@ const (
 // hermesStreamEvent is the part of a Hermes stream event's data the relay
 // reads.
 type hermesStreamEvent struct {
-	ToolName string `json:"tool_name"`
-	Preview  string `json:"preview"`
-	Delta    string `json:"delta"`
-	Content  string `json:"content"`
-	Message  string `json:"message"`
+	ToolName   string `json:"tool_name"`
+	CallID     string `json:"call_id"`
+	ToolCallID string `json:"tool_call_id"`
+	Preview    string `json:"preview"`
+	Delta      string `json:"delta"`
+	Content    string `json:"content"`
+	Message    string `json:"message"`
+}
+
+func (e hermesStreamEvent) callKey() string {
+	if id := strings.TrimSpace(e.CallID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(e.ToolCallID)
 }
 
 type statusEvent struct {
@@ -172,12 +181,17 @@ func (e *sseWriter) send(name string, v any) {
 func (e *sseWriter) keepalive() { e.write(sseKeepalive) }
 
 func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
-	sid, msg, agentSession, ok := s.beginTurn(w, r)
+	sid, msg, agentSession, created, ok := s.beginTurn(w, r)
 	if !ok {
 		return
 	}
 	// Released when Hermes' stream ends, which may be after the browser left.
 	defer s.release(sid)
+
+	var beforeID int64
+	if !created {
+		beforeID = s.latestMessageID(r.Context(), sid)
+	}
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.streamCeiling)
 	defer cancel()
@@ -196,12 +210,13 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, errSessionNotFound) && !agentSession {
 		// Same recovery as /api/chat: the agent pod lost the session. A
 		// session the cluster opened is never recreated here.
+		beforeID = 0
 		if err = s.createSession(ctx, sid); err == nil {
 			resp, err = s.openTurnStream(ctx, sid, msg)
 		}
 	}
 	if err != nil {
-		out.send(eventError, s.streamFailure(err, sid))
+		out.send(eventError, s.streamFailure(ctx, err, sid))
 		return
 	}
 	defer drainAndClose(resp)
@@ -212,20 +227,23 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		out.send(eventError, s.streamFailure(err, sid))
+		out.send(eventError, s.streamFailure(ctx, err, sid))
 		return
 	}
-	out.send(eventReply, chatResponse{SessionID: sid, Reply: reply})
+	replyID := s.replyMessageID(ctx, sid, beforeID, reply)
+	out.send(eventReply, chatResponse{SessionID: sid, Reply: reply, BeforeID: beforeID, ReplyID: replyID})
 }
 
-// streamFailure is turnFailure's body, except when the turn ceiling fired:
-// the console then closed Hermes' stream, which interrupts the run.
-func (s *server) streamFailure(err error, sid string) errorResponse {
-	if errors.Is(err, context.DeadlineExceeded) {
+// streamFailure is turnFailure's body, except when the stream's own turn
+// ceiling fired: the console then closed Hermes' stream, which interrupts
+// the run. A shorter sub-context deadline (such as sessionCreateTimeout on
+// recreate) leaves streamCtx uncancelled and falls through to turnFailure.
+func (s *server) streamFailure(streamCtx context.Context, err error, sid string) errorResponse {
+	if errors.Is(streamCtx.Err(), context.DeadlineExceeded) {
 		return errorResponse{Error: "turn_interrupted", SessionID: sid,
 			Detail: fmt.Sprintf("The agent did not finish within %s, so the console stopped reading the turn and the agent interrupted it. Ask again, or ask for a smaller piece of the work.", s.streamCeiling)}
 	}
-	_, body := turnFailure(err, sid)
+	_, body := turnFailure(streamCtx, err, sid)
 	return body
 }
 
@@ -265,6 +283,9 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 		haveReply, done, writing             bool
 		toolCounts                           = map[string]int{}
 		openTools                            = map[string][]stepEvent{}
+		openByID                             = map[string]stepEvent{}
+		overflowTools                        = map[string]int{}
+		cappedByID                           = map[string]bool{}
 		thinkCount, stepsOpened              int
 	)
 	dispatch := func() {
@@ -285,21 +306,56 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 			done = true
 			return
 		case hermesToolStarted:
-			if tool := clip(ev.ToolName, statusFragmentRunes); tool != "" && stepsOpened < maxStepsPerTurn {
-				stepsOpened++
-				toolCounts[ev.ToolName]++
-				st := stepEvent{
-					ID:     fmt.Sprintf("%s#%d", tool, toolCounts[ev.ToolName]),
-					Kind:   stepKindTool,
-					Title:  "Running " + tool,
-					Detail: clip(ev.Preview, statusFragmentRunes),
-					State:  stepStateRunning,
+			if tool := clip(ev.ToolName, statusFragmentRunes); tool != "" {
+				key := ev.callKey()
+				if stepsOpened < maxStepsPerTurn {
+					stepsOpened++
+					toolCounts[ev.ToolName]++
+					st := stepEvent{
+						ID:     fmt.Sprintf("%s#%d", tool, toolCounts[ev.ToolName]),
+						Kind:   stepKindTool,
+						Title:  "Running " + tool,
+						Detail: clip(ev.Preview, statusFragmentRunes),
+						State:  stepStateRunning,
+					}
+					openTools[ev.ToolName] = append(openTools[ev.ToolName], st)
+					if key != "" {
+						openByID[key] = st
+					}
+					out.send(eventStep, st)
+				} else if key != "" {
+					cappedByID[key] = true
+				} else {
+					overflowTools[ev.ToolName]++
 				}
-				openTools[ev.ToolName] = append(openTools[ev.ToolName], st)
-				out.send(eventStep, st)
 			}
 		case hermesToolCompleted, hermesToolFailed:
-			if queue := openTools[ev.ToolName]; len(queue) > 0 {
+			key := ev.callKey()
+			if key != "" && cappedByID[key] {
+				delete(cappedByID, key)
+			} else if key != "" {
+				if st, ok := openByID[key]; ok {
+					delete(openByID, key)
+					queue := openTools[ev.ToolName]
+					for i := range queue {
+						if queue[i].ID == st.ID {
+							openTools[ev.ToolName] = append(queue[:i], queue[i+1:]...)
+							break
+						}
+					}
+					tool := clip(ev.ToolName, statusFragmentRunes)
+					if name == hermesToolFailed {
+						st.State = stepStateFailed
+						st.Title = tool + " failed"
+					} else {
+						st.State = stepStateDone
+						st.Title = "Finished " + tool
+					}
+					out.send(eventStep, st)
+				}
+			} else if overflowTools[ev.ToolName] > 0 {
+				overflowTools[ev.ToolName]--
+			} else if queue := openTools[ev.ToolName]; len(queue) > 0 {
 				st := queue[0]
 				openTools[ev.ToolName] = queue[1:]
 				tool := clip(ev.ToolName, statusFragmentRunes)

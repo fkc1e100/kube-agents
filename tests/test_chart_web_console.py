@@ -30,6 +30,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -257,6 +258,15 @@ class WebConsoleChartTest(unittest.TestCase):
         )
         self.assertNotRegex(deployment, r"(?m)^\s*imagePullSecrets:\s*$")
 
+    def test_peers_service_truncates_release_name_before_suffix(self) -> None:
+        # Truncating the full "<release>-web-console-litellm-peers" string at
+        # 63 characters turns a 50- or 51-character release name into
+        # "<release>-web-console", colliding with the console's own Service.
+        self.assertIn(
+            '{{- $peersName := printf "%s-web-console-litellm-peers" (.Release.Name | trunc 37 | trimSuffix "-") }}',
+            self.template,
+        )
+
 
 @unittest.skipUnless(shutil.which("helm"), "helm is not installed")
 class WebConsoleRenderTest(unittest.TestCase):
@@ -302,17 +312,26 @@ class WebConsoleRenderTest(unittest.TestCase):
             self.assertNotIn(name, without)
 
     def test_long_release_name_keeps_the_peers_service_a_dns_label(self) -> None:
-        # 50 characters plus "-web-console-litellm-peers" is 76, over the
-        # 63-character limit. The cut lands after "-web-console-", and the
-        # trailing "-" is trimmed.
-        release = "r" * 47 + "-ab"
-        docs = self._render("--set", "webConsole.enabled=true", release=release)
-        (service,) = self._headless(docs)
-        name = service["metadata"]["name"]
-        self.assertEqual(name, f"{release}-web-console")
-        deployment = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == f"{release}-web-console")
-        env = {e["name"]: e.get("value") for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
-        self.assertEqual(env["LITELLM_PEERS_HOST"], f"{name}.ns.svc.cluster.local")
+        # 50- and 51-character release names plus "-web-console-litellm-peers"
+        # exceed 63 characters; truncating the release prefix to 37 characters
+        # keeps the peers Service a valid DNS label distinct from the console's
+        # own "<release>-web-console" Service.
+        for release in ("r" * 47 + "-ab", "r" * 48 + "-ab"):
+            with self.subTest(release=release):
+                docs = self._render("--set", "webConsole.enabled=true", release=release)
+                (service,) = self._headless(docs)
+                name = service["metadata"]["name"]
+                self.assertLessEqual(len(name), 63)
+                self.assertTrue(name.endswith("-web-console-litellm-peers"))
+                self.assertNotEqual(name, f"{release}-web-console")
+                console_services = [
+                    d for d in docs
+                    if d["kind"] == "Service" and d["metadata"]["name"] == f"{release}-web-console"
+                ]
+                self.assertEqual(len(console_services), 1)
+                deployment = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == f"{release}-web-console")
+                env = {e["name"]: e.get("value") for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+                self.assertEqual(env["LITELLM_PEERS_HOST"], f"{name}.ns.svc.cluster.local")
 
     def test_console_and_litellm_name_the_same_model(self) -> None:
         docs = self._render("--set", "webConsole.enabled=true", "--set", "litellm.modelDefaultName=my-model")

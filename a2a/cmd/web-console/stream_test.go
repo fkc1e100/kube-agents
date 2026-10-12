@@ -476,10 +476,17 @@ func TestChatStreamStepPairingAndCap(t *testing.T) {
 	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_get\", \"preview\": \"nodes\"}\n\n")
 	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_get\", \"preview\": \"secret-output\"}\n\n")
 	b.WriteString("event: tool.failed\ndata: {\"tool_name\": \"kubectl_get\", \"error\": \"forbidden\"}\n\n")
-	// Push past maxStepsPerTurn; updates to already-started steps still go through.
+	// Two calls with explicit call_id complete out of order (second finishes first).
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_describe\", \"call_id\": \"c1\", \"preview\": \"pod/a\"}\n\n")
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_describe\", \"tool_call_id\": \"c2\", \"preview\": \"pod/b\"}\n\n")
+	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_describe\", \"tool_call_id\": \"c2\", \"preview\": \"secret-output\"}\n\n")
+	b.WriteString("event: tool.failed\ndata: {\"tool_name\": \"kubectl_describe\", \"call_id\": \"c1\", \"error\": \"boom\"}\n\n")
+	// Push past maxStepsPerTurn; a tool started after the cap is not emitted on start or completion.
 	for i := 0; i < maxStepsPerTurn+5; i++ {
 		b.WriteString("event: tool.progress\ndata: {\"tool_name\": \"_thinking\", \"delta\": \"step\"}\n\n")
 	}
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_logs\", \"call_id\": \"over1\", \"preview\": \"pod/c\"}\n\n")
+	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_logs\", \"call_id\": \"over1\", \"preview\": \"secret-output\"}\n\n")
 	b.WriteString("event: assistant.completed\ndata: {\"content\": \"done\"}\n\nevent: done\ndata: {}\n\n")
 	fake.mu.Lock()
 	fake.stream = b.String()
@@ -498,7 +505,7 @@ func TestChatStreamStepPairingAndCap(t *testing.T) {
 		}
 		id := e.data["id"].(string)
 		seenIDs[id] = true
-		if strings.HasPrefix(id, "kubectl_get#") {
+		if strings.HasPrefix(id, "kubectl_get#") || strings.HasPrefix(id, "kubectl_describe#") || strings.HasPrefix(id, "kubectl_logs#") {
 			detail, _ := e.data["detail"].(string)
 			updates = append(updates, id+":"+e.data["state"].(string)+":"+detail)
 		}
@@ -508,11 +515,31 @@ func TestChatStreamStepPairingAndCap(t *testing.T) {
 		"kubectl_get#2:running:nodes",
 		"kubectl_get#1:done:pods",
 		"kubectl_get#2:failed:nodes",
+		"kubectl_describe#1:running:pod/a",
+		"kubectl_describe#2:running:pod/b",
+		"kubectl_describe#2:done:pod/b",
+		"kubectl_describe#1:failed:pod/a",
 	}
 	if strings.Join(updates, "|") != strings.Join(wantUpdates, "|") {
 		t.Errorf("tool step updates = %q, want %q", updates, wantUpdates)
 	}
 	if len(seenIDs) != maxStepsPerTurn {
 		t.Errorf("distinct step IDs = %d, want cap %d", len(seenIDs), maxStepsPerTurn)
+	}
+}
+
+func TestStreamFailureDistinguishesCreateTimeoutFromStreamCeiling(t *testing.T) {
+	srv := newServer(config{})
+	// Sub-request timeout (e.g. 15s createSession) while streamCtx is still alive
+	// must report agent_error rather than turn_interrupted.
+	got := srv.streamFailure(context.Background(), context.DeadlineExceeded, "web-console-1")
+	if got.Error != "agent_error" {
+		t.Errorf("sub-request timeout with live streamCtx: error = %q, want agent_error", got.Error)
+	}
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	gotCeiling := srv.streamFailure(expired, expired.Err(), "web-console-1")
+	if gotCeiling.Error != "turn_interrupted" {
+		t.Errorf("streamCtx deadline exceeded: error = %q, want turn_interrupted", gotCeiling.Error)
 	}
 }

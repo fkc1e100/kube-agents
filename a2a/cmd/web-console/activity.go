@@ -111,7 +111,7 @@ var (
 	eventResourcePattern  = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Resource|Object):\*{0,2}\s*(.+)$`)
 	eventReasonPattern    = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Event Reason|What):\*{0,2}\s*(.+)$`)
 	eventWarningPattern   = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Warning Message|Who):\*{0,2}\s*(.+)$`)
-	kanbanHeaderPattern   = regexp.MustCompile(`^\[kanban\] Task (t_[0-9a-zA-Z_-]+) ([a-z_]+)\.`)
+	kanbanHeaderPattern   = regexp.MustCompile(`^\[kanban\] Task (t_[0-9a-zA-Z_-]+) ([^\r\n]+?)\.?\s*(?:\r?\n|$)`)
 	kanbanTitlePattern    = regexp.MustCompile(`(?m)^Title:\s*(.+)$`)
 	kanbanAssigneePattern = regexp.MustCompile(`(?m)^Assignee:\s*(.+)$`)
 	kanbanResultPattern   = regexp.MustCompile(`(?ms)\n(?:Result|Reason):\s*(.+?)(?:\n\nThis is an automatic task-status notification|\z)`)
@@ -343,7 +343,7 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 		return n >= transcriptMaxRows
 	}
-	rows, failure := s.pageMessages(ctx, sid, 0, textRows)
+	rows, reachedStart, failure := s.pageMessages(ctx, sid, 0, textRows)
 	if failure != nil {
 		writeError(w, failure.status, failure.code, failure.message)
 		return
@@ -358,7 +358,7 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 			textMessages = append(textMessages, m)
 		}
 	}
-	truncatedHead := false
+	truncatedHead := !reachedStart
 	if len(textMessages) > transcriptMaxRows {
 		textMessages = textMessages[len(textMessages)-transcriptMaxRows:]
 		truncatedHead = true

@@ -169,9 +169,11 @@ func (s *server) currentUsage(ctx context.Context) usageInfo {
 	s.usage.mu.Unlock()
 
 	v := s.readUsage(ctx)
-	s.usage.mu.Lock()
-	s.usage.value, s.usage.readAt = v, time.Now()
-	s.usage.mu.Unlock()
+	if v.Error == "" && ctx.Err() == nil {
+		s.usage.mu.Lock()
+		s.usage.value, s.usage.readAt = v, time.Now()
+		s.usage.mu.Unlock()
+	}
 	return v
 }
 

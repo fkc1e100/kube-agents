@@ -214,3 +214,25 @@ func TestFetchPeerMetrics(t *testing.T) {
 		t.Errorf("oversized body: usage = %+v", got)
 	}
 }
+
+func TestInsightsDoesNotCacheFailedOrCancelledUsageRead(t *testing.T) {
+	resolver := &fakeResolver{err: errors.New("temporary DNS outage")}
+	cfg := config{LiteLLMPeersHost: "peers"}
+	s := insightsServer(cfg, resolver, map[string]string{"10.0.0.1": replicaMetrics(1)}, nil)
+	h := s.routes()
+
+	first := decode[insightsResponse](t, serve(h, insightsReq())).Usage
+	if !strings.Contains(first.Error, "temporary DNS outage") {
+		t.Fatalf("first usage = %+v, want DNS error", first)
+	}
+	// Once DNS recovers inside the cache TTL, the next request must retry
+	// instead of serving the cached failure.
+	resolver.mu.Lock()
+	resolver.err = nil
+	resolver.addrs = []string{"10.0.0.1"}
+	resolver.mu.Unlock()
+	second := decode[insightsResponse](t, serve(h, insightsReq())).Usage
+	if second.Error != "" || second.ReplicasRead != 1 || second.InputTokens != 150 {
+		t.Errorf("second usage after DNS recovery = %+v, want fresh healthy read", second)
+	}
+}

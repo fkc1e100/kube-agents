@@ -336,4 +336,66 @@ func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
 		sched.Messages[0].Card == nil || sched.Messages[0].Card.Subject != "Run the policy sweep" {
 		t.Errorf("scheduled transcript = %+v", sched.Messages)
 	}
+
+	srv := newServer(config{})
+	for _, status := range []string{"blocked; needs attention", "crashed", "timed out", "gave up"} {
+		wake := "[kanban] Task t_ab12 " + status + ".\nTitle: Check PVC\nResult: Stopped on " + status + "\n"
+		msg := srv.buildSessionMessage(kindEventTriage, false, hermesMessage{ID: 2, Role: roleUser, Content: &wake})
+		if msg.Author != authorKanban {
+			t.Errorf("status %q: buildSessionMessage.Author = %q, want %q", status, msg.Author, authorKanban)
+		}
+		card, ok := srv.parseKanbanCard(wake)
+		if !ok || card == nil || card.TaskID != "t_ab12" || card.Status != status {
+			t.Errorf("status %q: parseKanbanCard = %+v, ok=%v", status, card, ok)
+		}
+	}
+}
+
+func TestTranscriptDoesNotTagFirstReturnedRowAsWatcherWhenHeadIsTruncated(t *testing.T) {
+	// Case 1: exactly transcriptMaxRows (200) rows on a 50-row page boundary,
+	// with 50 older rows before them so reachedStart is false even though
+	// len(kept) <= transcriptMaxRows.
+	fake, h := setup(t)
+	sid := "k8s-evt-0000aaaa"
+	fake.seed(sid, "api_server", "Triage "+sid)
+	fake.mu.Lock()
+	fake.post(sid, "user", "initial event watcher prompt")
+	for i := 1; i < 50; i++ {
+		fake.post(sid, "assistant", "old reply")
+	}
+	fake.post(sid, "user", "operator reply at start of kept window")
+	for i := 1; i < transcriptMaxRows; i++ {
+		fake.post(sid, "assistant", "recent reply")
+	}
+	fake.mu.Unlock()
+
+	got := decode[transcriptResponse](t, serve(h, transcriptReq(sid)))
+	if len(got.Messages) != transcriptMaxRows {
+		t.Fatalf("len(messages) = %d, want %d", len(got.Messages), transcriptMaxRows)
+	}
+	if got.Messages[0].Author != authorUser || got.Messages[0].Card != nil {
+		t.Errorf("first row of truncated 200-row window = %+v, want user without card", got.Messages[0])
+	}
+
+	// Case 2: messagesMaxPages is exhausted by tool rows so fewer than
+	// transcriptMaxRows text rows are returned, but reachedStart is still false.
+	sid2 := "k8s-evt-0000bbbb"
+	fake.seed(sid2, "api_server", "Triage "+sid2)
+	fake.mu.Lock()
+	fake.post(sid2, "user", "initial event watcher prompt")
+	fake.post(sid2, "user", "operator follow-up")
+	for i := 0; i < messagesMaxPages*messagesPageLimit; i++ {
+		fake.post(sid2, "tool", "pod list")
+	}
+	fake.post(sid2, "user", "latest operator question")
+	fake.post(sid2, "assistant", "latest answer")
+	fake.mu.Unlock()
+
+	got2 := decode[transcriptResponse](t, serve(h, transcriptReq(sid2)))
+	if len(got2.Messages) != 2 {
+		t.Fatalf("len(messages) = %d, want 2", len(got2.Messages))
+	}
+	if got2.Messages[0].Author != authorUser || got2.Messages[0].Card != nil {
+		t.Errorf("first row after messagesMaxPages cap = %+v, want user without card", got2.Messages[0])
+	}
 }
