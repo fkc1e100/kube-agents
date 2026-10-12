@@ -3421,6 +3421,12 @@ write_tfvars_from_state() {
     print_error "PLATFORM_AGENT_MODE='${platform_agent_mode}' is not one of today, next. Fix it in install.env."
     return 1
   fi
+  if is_truthy "${ACCEPT_NO_NETWORK_POLICY:-false}" && \
+     is_truthy "${WEB_CONSOLE_ENABLED:-$DEFAULT_ENABLE_WEB_CONSOLE}"; then
+    print_error "WEB_CONSOLE_ENABLED=true cannot be combined with ACCEPT_NO_NETWORK_POLICY=true."
+    print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement on the cluster, or set WEB_CONSOLE_ENABLED=false in install.env."
+    return 1
+  fi
 
   local old_umask
   old_umask="$(umask)"

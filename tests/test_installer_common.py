@@ -543,6 +543,25 @@ class InstallerCommonTest(unittest.TestCase):
                 self.assertIn("rc=0", proc.stdout, proc.stderr)
                 self.assertIn(f"web_console_enabled      = {want}", dest.read_text())
 
+    def test_tfvars_refuses_web_console_when_accept_no_network_policy_is_set(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            dest = pathlib.Path(out_dir) / "terraform.tfvars"
+            proc = self._run(
+                f'rc=0; write_tfvars_from_state "{dest}" || rc=$?; echo "rc=$rc"',
+                env={
+                    "API_SERVER_KEY": "k",
+                    "WEB_CONSOLE_ENABLED": "true",
+                    "ACCEPT_NO_NETWORK_POLICY": "true",
+                },
+                describe_stub=_autopilot_describe_stub(),
+            )
+            self.assertIn("rc=1", proc.stdout, proc.stderr)
+            self.assertIn(
+                "WEB_CONSOLE_ENABLED=true cannot be combined with ACCEPT_NO_NETWORK_POLICY=true",
+                proc.stdout + proc.stderr,
+            )
+            self.assertFalse(dest.exists())
+
     # ── the cert-manager probe: a Deployment alone cannot say whose it is ────
 
     def test_tfvars_keeps_cert_manager_when_the_state_manages_the_release(self):

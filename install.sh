@@ -853,6 +853,15 @@ flag_bool_value() {
   esac
 }
 
+is_truthy() {
+  local val="${1:-}"
+  val="${val//[[:space:]]/}"
+  case "$val" in
+    [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss] | [Yy] | 1 | [Oo][Nn]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Rejects a toggle value that is neither true nor false, naming the flag that
 # carried it. Called from parse_args, on what the caller actually typed, and
 # never on a PARAM_* that install.env or the environment seeded: those are read
@@ -4009,7 +4018,7 @@ print_no_network_policy_consequences() {
   print_info "Every NetworkPolicy this install ships is accepted by the API server and enforced by nothing:"
   print_info "  • the agent pod's ingress restriction and egress confinement (otherwise port 443 outside private ranges, and named in-cluster peers)"
   print_info "  • the shell sandbox's deny-all policy, which otherwise allows only cluster DNS and the credential proxy"
-  print_info "  • the LiteLLM gateway, GitHub token minter and Hindsight policies"
+  print_info "  • the LiteLLM gateway, GitHub token minter, Hindsight and web console policies"
   print_info "What is lost is the confinement of kube-agents' own workloads, not of yours: the sandbox that runs model-authored commands can reach anything routable in this VPC. Trusting the workloads already in this cluster is a different decision."
   print_info "Recorded as ${NETWORK_POLICY_REPORT_FIELD}=${NP_ENFORCEMENT_ABSENT_ACCEPTED} in the install report and as the ${NETWORK_POLICY_ENFORCEMENT_ANNOTATION} annotation on the PlatformAgent. To confine it later, enable Dataplane V2 or the Calico addon on the cluster and re-run the installer."
 }
@@ -4201,6 +4210,12 @@ prompt_existing_cluster_opt_ins() {
 # and prints it; this only settles it before the bootstrap writes the file.
 settle_network_policy_acceptance() {
   local project_id="$1" cluster_name="$2" region="$3" tfvars_file="$4" image_tag="$5"
+  # When the web console is on, check_existing_cluster_network_policy_preflight
+  # refuses the combination and writes the report; do not persist or regenerate
+  # an acceptance that cannot proceed.
+  if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+    return 0
+  fi
   if is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-false}" && ! is_truthy "${ACCEPT_NO_NETWORK_POLICY:-false}"; then
     export ACCEPT_NO_NETWORK_POLICY="true"
     KUBE_AGENTS_GENERATE_API_SERVER_KEY=true \
@@ -4314,8 +4329,17 @@ check_existing_cluster_network_policy_preflight() {
 
   # The third answer: install anyway, on record, without touching the cluster.
   # The generated tfvars carry accept_no_network_policy = true, which is what
-  # gets the plan past the module's postcondition.
+  # gets the plan past the module's postcondition. Refused when the web
+  # console is on: the console holds the Platform Agent's API key with no login
+  # of its own, and its deny-all-ingress NetworkPolicy is the only thing
+  # keeping other pods in the cluster from reaching it.
   if is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}"; then
+    if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+      print_error "Existing cluster '$cluster_name' enforces no NetworkPolicy, and the web console (--enable-web-console / WEB_CONSOLE_ENABLED=true) requires NetworkPolicy enforcement."
+      print_info "The web console holds the Platform Agent's API key with no login of its own; without NetworkPolicy enforcement, any pod in the cluster can reach it. Enable NetworkPolicy (--enable-network-policy) or disable the web console (--enable-web-console=false)."
+      write_json_report "REFUSED_WEB_CONSOLE_WITHOUT_NETWORK_POLICY"
+      exit 1
+    fi
     print_no_network_policy_consequences "$cluster_name"
     NETWORK_POLICY_ENFORCEMENT="$NP_ENFORCEMENT_ABSENT_ACCEPTED"
     # The settle step and this preflight each describe the cluster once. If
@@ -4426,6 +4450,12 @@ validate_existing_cluster_opt_in_flags() {
       print_info "The first enables the legacy Calico addon on the cluster (may recreate nodes); the second installs without NetworkPolicy enforcement and changes nothing."
       exit 1
     fi
+  fi
+  if is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}" && \
+     is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+    print_error "--enable-web-console (WEB_CONSOLE_ENABLED=true) cannot be combined with --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true)."
+    print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement (--enable-network-policy or Dataplane V2), or leave the web console off (--enable-web-console=false)."
+    exit 1
   fi
 }
 
