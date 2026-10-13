@@ -262,10 +262,21 @@ class WebConsoleChartTest(unittest.TestCase):
         # Truncating the full "<release>-web-console-litellm-peers" string at
         # 63 characters turns a 50- or 51-character release name into
         # "<release>-web-console", colliding with the console's own Service.
+        # Both Services truncate the release prefix before appending their suffix.
+        self.assertIn(
+            '{{- $name := printf "%s-web-console" (.Release.Name | trunc 51 | trimSuffix "-") }}',
+            self.template,
+        )
         self.assertIn(
             '{{- $peersName := printf "%s-web-console-litellm-peers" (.Release.Name | trunc 37 | trimSuffix "-") }}',
             self.template,
         )
+
+    def test_chat_platform_env_is_wired_from_integration(self) -> None:
+        deployment = self.docs["Deployment"]
+        self.assertIn("name: CHAT_PLATFORM", deployment)
+        for platform in ("$integ.slack", "$integ.googleChat", "$integ.teams"):
+            self.assertIn(platform, self.template)
 
 
 @unittest.skipUnless(shutil.which("helm"), "helm is not installed")
@@ -312,24 +323,32 @@ class WebConsoleRenderTest(unittest.TestCase):
             self.assertNotIn(name, without)
 
     def test_long_release_name_keeps_the_peers_service_a_dns_label(self) -> None:
-        # 50- and 51-character release names plus "-web-console-litellm-peers"
-        # exceed 63 characters; truncating the release prefix to 37 characters
-        # keeps the peers Service a valid DNS label distinct from the console's
-        # own "<release>-web-console" Service.
-        for release in ("r" * 47 + "-ab", "r" * 48 + "-ab"):
+        # 50- through 53-character release names exercise both the 37-char
+        # truncation on "<release>-web-console-litellm-peers" and the 51-char
+        # truncation on "<release>-web-console", keeping both Services valid
+        # 63-character DNS labels and distinct from each other.
+        for release in ("r" * 47 + "-ab", "r" * 48 + "-ab", "r" * 49 + "-ab", "r" * 50 + "-ab"):
             with self.subTest(release=release):
                 docs = self._render("--set", "webConsole.enabled=true", release=release)
                 (service,) = self._headless(docs)
                 name = service["metadata"]["name"]
                 self.assertLessEqual(len(name), 63)
                 self.assertTrue(name.endswith("-web-console-litellm-peers"))
-                self.assertNotEqual(name, f"{release}-web-console")
                 console_services = [
                     d for d in docs
-                    if d["kind"] == "Service" and d["metadata"]["name"] == f"{release}-web-console"
+                    if d["kind"] == "Service"
+                    and d["spec"].get("clusterIP") != "None"
+                    and d["metadata"].get("labels", {}).get("app.kubernetes.io/name") == "web-console"
                 ]
                 self.assertEqual(len(console_services), 1)
-                deployment = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == f"{release}-web-console")
+                console_name = console_services[0]["metadata"]["name"]
+                self.assertLessEqual(len(console_name), 63)
+                self.assertTrue(console_name.endswith("-web-console"))
+                self.assertNotEqual(name, console_name)
+                deployment = next(
+                    d for d in docs
+                    if d["kind"] == "Deployment" and d["metadata"]["name"] == console_name
+                )
                 env = {e["name"]: e.get("value") for e in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
                 self.assertEqual(env["LITELLM_PEERS_HOST"], f"{name}.ns.svc.cluster.local")
 

@@ -102,6 +102,7 @@ const (
 	envAgentKSA         = "AGENT_KSA"
 	envAgentGSA         = "AGENT_GSA"
 	envAgentRoles       = "AGENT_ROLES"
+	envChatPlatform     = "CHAT_PLATFORM"
 	// agentRolesSeparator splits AGENT_ROLES, which the chart joins with it.
 	agentRolesSeparator = ","
 
@@ -203,6 +204,7 @@ type config struct {
 	AgentKSA         string
 	AgentGSA         string
 	AgentRoles       []string
+	ChatPlatform     string
 }
 
 func loadConfig() config {
@@ -220,6 +222,7 @@ func loadConfig() config {
 		AgentKSA:         os.Getenv(envAgentKSA),
 		AgentGSA:         os.Getenv(envAgentGSA),
 		AgentRoles:       splitList(os.Getenv(envAgentRoles), agentRolesSeparator),
+		ChatPlatform:     strings.TrimSpace(os.Getenv(envChatPlatform)),
 	}
 	return cfg
 }
@@ -366,10 +369,11 @@ type upstreamStatus struct {
 }
 
 type statusResponse struct {
-	Cluster  string         `json:"cluster"`
-	Project  string         `json:"project"`
-	Location string         `json:"location"`
-	Agent    upstreamStatus `json:"agent"`
+	Cluster      string         `json:"cluster"`
+	Project      string         `json:"project"`
+	Location     string         `json:"location"`
+	ChatPlatform string         `json:"chat_platform,omitempty"`
+	Agent        upstreamStatus `json:"agent"`
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -386,10 +390,11 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		agent.Detail = fmt.Sprintf("agent gateway answered HTTP %d", resp.StatusCode)
 	}
 	writeJSON(w, http.StatusOK, statusResponse{
-		Cluster:  s.cfg.ClusterName,
-		Project:  s.cfg.ProjectID,
-		Location: s.cfg.Location,
-		Agent:    agent,
+		Cluster:      s.cfg.ClusterName,
+		Project:      s.cfg.ProjectID,
+		Location:     s.cfg.Location,
+		ChatPlatform: s.cfg.ChatPlatform,
+		Agent:        agent,
 	})
 }
 
@@ -765,6 +770,11 @@ func (s *server) allowAgentSessionReply(w http.ResponseWriter, parent context.Co
 	if kind := classifySession(sid, sess.Source, sess.Title); kind != kindEventTriage && kind != kindScheduled {
 		writeError(w, http.StatusForbidden, "session_not_allowed",
 			"The console posts only into its own sessions, event triage and scheduled checks.")
+		return false
+	}
+	if s.cfg.ChatPlatform != "" {
+		writeError(w, http.StatusForbidden, "session_not_allowed",
+			fmt.Sprintf("Alert and scheduled threads are read-only in the console when %s is enabled; reply in %s.", s.cfg.ChatPlatform, s.cfg.ChatPlatform))
 		return false
 	}
 	busy, failure := s.agentSessionBusy(ctx, sid, sess, time.Now())

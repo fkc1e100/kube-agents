@@ -1358,9 +1358,11 @@
               <p class="about-caption">
                 The agent opens a post in # alerts for each event-triage session,
                 and in # scheduled for each scheduled job per UTC day.
-                Replies you send there go into that session. Slack and Google
-                Chat sessions are listed by title only and cannot be opened
-                here.
+                Replies you send there go into that session on a chat-less
+                install; when a chat platform is enabled, those threads are
+                read-only here so replies stay in the chat thread. Slack and
+                Google Chat sessions are listed by title only and cannot be
+                opened here.
               </p>
             </div>
           </aside>
@@ -1519,14 +1521,15 @@
         if (!Array.isArray(list)) return [];
         return list
           .filter((t) => t && SESSION_ID_RE.test(t.id))
-          .map(cleanThread)
-          .slice(0, MAX_THREADS);
+          .map(cleanThread);
       }
 
       // Loads the list, folding in the single session an older console kept
       // in sessionStorage, then drops the old keys.
       function loadThreads() {
         threads = parseThreads(localStorage.getItem(THREADS_KEY));
+        const hadCount = threads.length;
+        let dirty = false;
         const legacy = sessionStorage.getItem(LEGACY_SESSION_KEY);
         if (legacy && SESSION_ID_RE.test(legacy) && !findThread(legacy)) {
           const mark = sessionStorage.getItem(LEGACY_MARK_KEY);
@@ -1538,8 +1541,7 @@
               started: true,
             }),
           );
-          capThreads();
-          saveThreads();
+          dirty = true;
         }
         sessionStorage.removeItem(LEGACY_SESSION_KEY);
         sessionStorage.removeItem(LEGACY_MARK_KEY);
@@ -1549,6 +1551,8 @@
           : threads[0]
             ? threads[0].id
             : "";
+        capThreads();
+        if (dirty || threads.length !== hadCount) saveThreads();
       }
 
       function saveThreads() {
@@ -1586,11 +1590,13 @@
           }
         });
         threads = merged;
-        if (retained) saveThreads();
         const activeStillPresent = activeId && !!findThread(activeId);
         if (activeId && !activeStillPresent && !inflight[activeId]) {
           activeId = threads[0] ? threads[0].id : "";
         }
+        const beforeCap = threads.length;
+        capThreads();
+        if (retained || threads.length !== beforeCap) saveThreads();
         if (wasOnScreen && !activeStillPresent && !inflight[wasOnScreen]) {
           if (activeId && typeof selectThread === "function") {
             selectThread(activeId);
@@ -1781,7 +1787,8 @@
               ? messages.slice(0, replyAt)
               : [];
         if (midTurnSlice.length > 0) {
-          let inWake = false;
+          let inWake = !!(turnAt < 0 && t.wakeOpen);
+          t.wakeOpen = false;
           midTurnSlice.forEach((m) => {
             if (m.role === "user") {
               inWake = true;
@@ -1792,6 +1799,8 @@
               inWake = false;
             }
           });
+        } else {
+          t.wakeOpen = false;
         }
         if (replyAt >= 0) {
           advanceMark(t, messages[replyAt].id);
@@ -1821,6 +1830,12 @@
           const role = m.author || (m.role === "user" ? "user" : "agent");
           appendMessage(role, m.content, "", m.timestamp, m.card);
         });
+        const lastMsg = messages.length ? messages[messages.length - 1] : null;
+        t.wakeOpen = !!(
+          lastMsg &&
+          lastMsg.role === "user" &&
+          lastMsg.author === "kanban"
+        );
         if (transcript) advanceMark(t, transcript.latest_id);
         saveThreads();
         threadsChanged();
@@ -2143,8 +2158,13 @@
       // Inline formatting for text outside code fences.
       function renderInline(text) {
         let html = escapeHtml(text);
-        html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+        const codeSpans = [];
+        html = html.replace(/`([^`\n]+)`/g, (_, inner) => {
+          const idx = codeSpans.push(`<code>${inner}</code>`) - 1;
+          return `\u0000CODE${idx}\u0000`;
+        });
         html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+        html = html.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)]);
         return html
           .split(/\n{2,}/)
           .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
@@ -2431,8 +2451,17 @@
         });
       }
 
+      let chatPlatform = "";
+
       function updateSideComposer() {
-        $("side-send").disabled = pane.mode === "post" && !!inflight[pane.id];
+        const readOnly = !!chatPlatform;
+        const busy = pane.mode === "post" && !!inflight[pane.id];
+        const input = $("side-input");
+        input.disabled = readOnly;
+        input.placeholder = readOnly
+          ? `Read-only here — reply in ${chatPlatform}`
+          : "Reply in this thread";
+        $("side-send").disabled = readOnly || busy;
       }
 
       function updateTitle() {
@@ -2473,23 +2502,22 @@
 
       function renderThreads() {
         const list = $("thread-list");
-        if (threads.length === 0) {
-          list.innerHTML = `<div class="rail-item static">No threads yet</div>`;
-          return;
-        }
-        list.innerHTML = threads
-          .map((t) => {
-            const classes = ["rail-item"];
-            if (onScreen(t.id)) classes.push("active");
-            if (t.unread) classes.push("unread");
-            const busy = !!inflight[t.id];
-            const dot = busy
-              ? `<span class="thread-dot busy" title="A turn is running"></span>`
-              : t.unread
-                ? `<span class="thread-dot unread" title="New messages"></span>`
-                : "";
-            const title = t.title || "New chat";
-            return `
+        const html =
+          threads.length === 0
+            ? `<div class="rail-item static">No threads yet</div>`
+            : threads
+                .map((t) => {
+                  const classes = ["rail-item"];
+                  if (onScreen(t.id)) classes.push("active");
+                  if (t.unread) classes.push("unread");
+                  const busy = !!inflight[t.id];
+                  const dot = busy
+                    ? `<span class="thread-dot busy" title="A turn is running"></span>`
+                    : t.unread
+                      ? `<span class="thread-dot unread" title="New messages"></span>`
+                      : "";
+                  const title = t.title || "New chat";
+                  return `
           <div class="thread${onScreen(t.id) ? " active" : ""}">
             <button type="button" class="${classes.join(" ")}" data-thread="${escapeHtml(t.id)}" title="${escapeHtml(title)}">
               ${dot}<span class="rail-label">${escapeHtml(title)}</span>
@@ -2497,8 +2525,29 @@
             </button>
             <button type="button" class="thread-remove" data-remove="${escapeHtml(t.id)}" title="Remove from this list. The agent keeps the session." ${busy ? "disabled" : ""}>&times;</button>
           </div>`;
-          })
-          .join("");
+                })
+                .join("");
+        if (list.innerHTML === html) return;
+        const active =
+          document.activeElement && list.contains(document.activeElement)
+            ? document.activeElement
+            : null;
+        const focusThread =
+          active && active.dataset ? active.dataset.thread : "";
+        const focusRemove =
+          active && active.dataset ? active.dataset.remove : "";
+        list.innerHTML = html;
+        if (focusThread) {
+          const btn = list.querySelector(
+            `[data-thread="${CSS.escape(focusThread)}"]`,
+          );
+          if (btn) btn.focus();
+        } else if (focusRemove) {
+          const btn = list.querySelector(
+            `[data-remove="${CSS.escape(focusRemove)}"]`,
+          );
+          if (btn && !btn.disabled) btn.focus();
+        }
       }
 
       function showView(name) {
@@ -2770,6 +2819,10 @@
           return false;
         }
         const data = result.data;
+        if (typeof data.chat_platform === "string" && data.chat_platform !== chatPlatform) {
+          chatPlatform = data.chat_platform;
+          updateSideComposer();
+        }
         if (!force && data.latest_id === pane.latestId) return true;
         pane.latestId = data.latest_id;
         const follow = force || nearBottom(body);
@@ -2818,7 +2871,7 @@
       // Sends a reply into the open post's session: the event triage or
       // scheduled session itself, which the server checks before the turn.
       async function sendFromSide() {
-        if (pane.mode !== "post" || inflight[pane.id]) return;
+        if (pane.mode !== "post" || chatPlatform || inflight[pane.id]) return;
         const input = $("side-input");
         const text = input.value.trim();
         if (!text) return;
@@ -3269,6 +3322,11 @@
           const resp = await fetch("/api/status");
           const data = await readBody(resp);
           if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+          const nextChat = typeof data.chat_platform === "string" ? data.chat_platform : "";
+          if (nextChat !== chatPlatform) {
+            chatPlatform = nextChat;
+            updateSideComposer();
+          }
           badge.title = data.agent ? data.agent.detail : "";
           if (data.agent && data.agent.healthy) {
             badge.className = "badge badge-green";

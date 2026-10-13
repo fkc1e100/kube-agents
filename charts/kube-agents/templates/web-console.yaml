@@ -32,12 +32,18 @@ no credentials to read IAM.
 {{- $tag := .Values.webConsole.image.tag | default .Values.platformAgent.deployment.image.tag | default .Chart.AppVersion | toString }}
 {{- $repo := include "kube-agents.imageRepository" (dict "repository" .Values.webConsole.image.repository "registry" (include "kube-agents.imageRegistry" .)) }}
 {{- $identity := .Values.webConsole.agentIdentity | default dict }}
+{{- $integ := .Values.platformAgent.integration | default dict }}
+{{- $chatPlatforms := list }}
+{{- if ($integ.slack | default dict).enabled }}{{- $chatPlatforms = append $chatPlatforms "Slack" }}{{- end }}
+{{- if ($integ.googleChat | default dict).enabled }}{{- $chatPlatforms = append $chatPlatforms "Google Chat" }}{{- end }}
+{{- if ($integ.teams | default dict).enabled }}{{- $chatPlatforms = append $chatPlatforms "Microsoft Teams" }}{{- end }}
 {{- /* A Service name is a DNS label: 63 characters at most, and distinct from <release>-web-console. LITELLM_PEERS_HOST uses the same value. */ -}}
+{{- $name := printf "%s-web-console" (.Release.Name | trunc 51 | trimSuffix "-") }}
 {{- $peersName := printf "%s-web-console-litellm-peers" (.Release.Name | trunc 37 | trimSuffix "-") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-web-console
+  name: {{ $name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: web-console
@@ -100,6 +106,10 @@ spec:
               value: {{ $identity.gcpServiceAccount | default "" | quote }}
             - name: AGENT_ROLES
               value: {{ join "," ($identity.roles | default list) | quote }}
+            {{- if $chatPlatforms }}
+            - name: CHAT_PLATFORM
+              value: {{ join " / " $chatPlatforms | quote }}
+            {{- end }}
             - name: API_SERVER_KEY
               valueFrom:
                 secretKeyRef:
@@ -125,7 +135,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-web-console
+  name: {{ $name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: web-console
@@ -145,7 +155,7 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Release.Name }}-web-console
+  name: {{ $name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: web-console

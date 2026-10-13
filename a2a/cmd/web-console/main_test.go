@@ -441,6 +441,49 @@ func TestChatRepliesIntoAnAgentSession(t *testing.T) {
 	}
 }
 
+func TestChatRefusesAgentSessionRepliesWhenChatPlatformIsEnabled(t *testing.T) {
+	fake, s := setupServer(t)
+	s.cfg.ChatPlatform = "Slack"
+	h := s.routes()
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
+	fake.seed("cron-daily-report-20261006", "api_server", "Triage cron-daily-report-20261006")
+	fake.mu.Lock()
+	fake.post("k8s-evt-0000000a", "user", "triage this")
+	fake.mu.Unlock()
+
+	status := decode[statusResponse](t, serve(h, httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/status", nil)))
+	if status.ChatPlatform != "Slack" {
+		t.Errorf("status.ChatPlatform = %q, want Slack", status.ChatPlatform)
+	}
+	tr := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-0000000a")))
+	if tr.ChatPlatform != "Slack" {
+		t.Errorf("transcript.ChatPlatform = %q, want Slack", tr.ChatPlatform)
+	}
+	for _, sid := range []string{"k8s-evt-0000000a", "cron-daily-report-20261006"} {
+		for _, req := range []*http.Request{
+			chatReq(`{"message":"is it fixed?","session_id":"` + sid + `"}`),
+			streamReq(`{"message":"is it fixed?","session_id":"` + sid + `"}`),
+		} {
+			rec := serve(h, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s on %s: status %d, want 403: %s", req.URL.Path, sid, rec.Code, rec.Body.String())
+			}
+			got := decode[errorResponse](t, rec)
+			if got.Error != "session_not_allowed" || !strings.Contains(got.Detail, "reply in Slack") {
+				t.Errorf("%s on %s: error = %+v, want session_not_allowed naming Slack", req.URL.Path, sid, got)
+			}
+		}
+	}
+	if _, chats := fake.state(); len(chats) != 0 {
+		t.Errorf("a refused agent-session reply still reached Hermes: %v", chats)
+	}
+	// Console's own threads remain writable when Slack is enabled.
+	own := serve(h, chatReq(`{"message":"check pods"}`))
+	if own.Code != http.StatusOK {
+		t.Errorf("console thread turn with ChatPlatform set: status %d: %s", own.Code, own.Body.String())
+	}
+}
+
 func TestChatRefusesChatPlatformAndUnknownSessions(t *testing.T) {
 	fake, h := setup(t)
 	fake.seed("slack-thread-1", "slack", "Triage k8s-evt-0000000b")
@@ -1073,6 +1116,30 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   // When a thread was not on screen, it is removed by another tab's update.
   vm.runInContext("view = 'channel'; activeId = ''; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
   assert.equal(vm.runInContext("findThread(" + JSON.stringify(idA) + ")", ctx), null, "background thread removed");
+
+  // Retaining an on-screen thread into a 12-thread stored list still caps
+  // at MAX_THREADS (12) by evicting the oldest idle thread, rather than
+  // saving 13 and letting parseThreads slice by position.
+  const full12 = Array.from({ length: 12 }, (_, i) => ({
+    id: "web-console-" + (i + 1).toString(16).padStart(32, "0"),
+    title: "T" + i,
+    mark: 1,
+    markKnown: true,
+    updated: i === 5 ? 1 : 50 + i,
+    unread: false,
+    started: true,
+  }));
+  vm.runInContext(
+    "addThread(" + JSON.stringify(idA) + ", 'Active', true);" +
+    "activeId = " + JSON.stringify(idA) + "; view = 'thread';" +
+    "mergeStoredThreads(" + JSON.stringify(JSON.stringify(full12)) + ");",
+    ctx
+  );
+  const afterCap = JSON.parse(vm.runInContext("JSON.stringify(threads.map(t => t.id))", ctx));
+  assert.equal(afterCap.length, 12, "mergeStoredThreads must cap at MAX_THREADS");
+  assert.ok(afterCap.includes(idA), "active retained thread kept");
+  assert.ok(!afterCap.includes(full12[5].id), "oldest idle thread evicted by LRU, not last by position");
+  assert.ok(afterCap.includes(full12[11].id), "newest tail thread kept");
 }
 
 // 4. settleAfterReply advances mark to replyId when fetchNewMessages fails.
@@ -1138,6 +1205,37 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     ]
   );
   assert.equal(vm.runInContext("t.mark", ctx), 16);
+
+  // Re-selecting a thread mid-turn after a kanban wake user row landed in its
+  // transcript (id <= mark) still delivers the wake's assistant reply when
+  // settleAfterReply runs with turnAt < 0 && replyAt >= 0.
+  const idReselect = "web-console-" + "f".repeat(32);
+  const ctxReselect = makeHarness(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      latest_id: 14,
+      messages: [
+        { id: 10, role: "assistant", author: "agent", content: "wake reply after reselect" },
+        { id: 11, role: "assistant", author: "agent", content: "intermediate note of user turn" },
+        { id: 14, role: "assistant", author: "agent", content: "final turn reply" },
+      ],
+    }),
+  }));
+  vm.runInContext(
+    "const tr = addThread(" + JSON.stringify(idReselect) + ", 'reselect', true);" +
+    "activateThread(tr, { latest_id: 9, messages: [" +
+    "  { id: 7, role: 'user', author: 'user', content: 'check cluster' }," +
+    "  { id: 9, role: 'user', author: 'kanban', content: '[kanban] Task t_2 completed.' }" +
+    "] });",
+    ctxReselect
+  );
+  ctxReselect.getState().appended.length = 0;
+  await vm.runInContext("settleAfterReply(tr, 'check cluster', 'final turn reply', 4, 14)", ctxReselect);
+  assert.deepEqual(
+    ctxReselect.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [{ author: "agent", text: "wake reply after reselect", tag: "update" }]
+  );
 }
 
 // 6. loadSeen and updateChannel: first-visit seeding across both channels even

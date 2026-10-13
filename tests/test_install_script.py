@@ -114,7 +114,16 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
 """
         overrides = {"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}
         overrides.update(env or {})
-        full_env = get_isolated_test_env(overrides=overrides, bin_dir=bin_dir)
+        full_env = get_isolated_test_env(
+            overrides=overrides,
+            bin_dir=bin_dir,
+            absent=(
+                "ACCEPT_NO_NETWORK_POLICY",
+                "ENABLE_NETWORK_POLICY",
+                "MIGRATE_NODE_POOLS",
+                "WEB_CONSOLE_ENABLED",
+            ),
+        )
         return _run_installer_bash(setup, full_env, cwd=cwd or _REPO_ROOT)
 
     def test_validate_immutable_ref_accepts_valid_refs(self):
@@ -5026,6 +5035,7 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
             "LITELLM_REDACTION_IP_ACTION",
             "LITELLM_REDACTION_IP_ALLOW_CIDRS",
             "LITELLM_REDACTION_RULES",
+            "WEB_CONSOLE_ENABLED",
         ):
             env.pop(key, None)
         env.update(overrides)

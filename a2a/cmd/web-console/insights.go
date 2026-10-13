@@ -233,9 +233,16 @@ func (s *server) readUsage(ctx context.Context) usageInfo {
 	out.OutputTokens = int64(math.Round(sums[metricOutputTokens]))
 	out.TotalTokens = int64(math.Round(sums[metricTotalTokens]))
 	out.SpendUSD = sums[metricSpendUSD]
-	if len(failures) > 0 {
+	switch {
+	case len(failures) > 0 && out.ReplicasFound > len(addrs):
+		out.Error = fmt.Sprintf("%d of %d LiteLLM replicas could not be read (%d over the %d-replica cap were skipped): %s",
+			len(failures), out.ReplicasFound, out.ReplicasFound-len(addrs), maxLiteLLMPeers, strings.Join(failures, "; "))
+	case len(failures) > 0:
 		out.Error = fmt.Sprintf("%d of %d LiteLLM replicas could not be read: %s",
-			len(failures), len(addrs), strings.Join(failures, "; "))
+			len(failures), out.ReplicasFound, strings.Join(failures, "; "))
+	case out.ReplicasFound > len(addrs):
+		out.Error = fmt.Sprintf("Read the first %d of %d LiteLLM replicas (%d over the %d-replica cap were skipped).",
+			len(addrs), out.ReplicasFound, out.ReplicasFound-len(addrs), maxLiteLLMPeers)
 	}
 	return out
 }

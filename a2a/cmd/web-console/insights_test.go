@@ -152,6 +152,17 @@ func TestInsightsCapsPeersAt32(t *testing.T) {
 	if u.ReplicasFound != 35 || u.ReplicasRead != 32 {
 		t.Errorf("replicas = %d of %d, want 32 of 35", u.ReplicasRead, u.ReplicasFound)
 	}
+	if !strings.Contains(u.Error, "32 of 35") || !strings.Contains(u.Error, "3 over the 32-replica cap") {
+		t.Errorf("error = %q, want capped replica notice", u.Error)
+	}
+
+	// When a replica also fails under the cap, Error reports the total
+	// ReplicasFound (35) and the skipped count alongside the failure.
+	hFail := insightsServer(cfg, resolver, bodies, map[string]error{"10.0.0.1": errors.New("connection refused")}).routes()
+	uFail := decode[insightsResponse](t, serve(hFail, insightsReq())).Usage
+	if uFail.ReplicasFound != 35 || uFail.ReplicasRead != 31 || !strings.Contains(uFail.Error, "1 of 35") || !strings.Contains(uFail.Error, "3 over the 32-replica cap") {
+		t.Errorf("capped partial read = %+v", uFail)
+	}
 }
 
 func TestInsightsWithoutLiteLLM(t *testing.T) {

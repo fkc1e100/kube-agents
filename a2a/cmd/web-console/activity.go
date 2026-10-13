@@ -303,11 +303,12 @@ type hermesSession struct {
 }
 
 type transcriptResponse struct {
-	SessionID string           `json:"session_id"`
-	Title     string           `json:"title"`
-	Kind      string           `json:"kind"`
-	LatestID  int64            `json:"latest_id"`
-	Messages  []sessionMessage `json:"messages"`
+	SessionID    string           `json:"session_id"`
+	Title        string           `json:"title"`
+	Kind         string           `json:"kind"`
+	ChatPlatform string           `json:"chat_platform,omitempty"`
+	LatestID     int64            `json:"latest_id"`
+	Messages     []sessionMessage `json:"messages"`
 }
 
 // handleTranscript returns the newest transcriptMaxRows text rows of a
@@ -349,6 +350,9 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := transcriptResponse{SessionID: sid, Title: sess.Title, Kind: kind, Messages: []sessionMessage{}}
+	if kind != kindConsole {
+		out.ChatPlatform = s.cfg.ChatPlatform
+	}
 	var textMessages []hermesMessage
 	for _, m := range rows {
 		if m.ID > out.LatestID {
@@ -406,7 +410,7 @@ func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMess
 		msg.Card = parseEventWatcherCard(content)
 		return msg
 	}
-	if kind == kindScheduled {
+	if isFirstUser && kind == kindScheduled {
 		msg.Author = authorScheduler
 		msg.Card = &messageCard{Subject: summarySubject(content)}
 		return msg
