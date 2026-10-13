@@ -90,8 +90,8 @@ func TestSumMetricsSkipsCreatedAndOtherSeries(t *testing.T) {
 	if len(got) != len(want) {
 		t.Errorf("kept series %v, want only the usage counters", got)
 	}
-	if _, err := sumMetrics(strings.NewReader("litellm_spend_metric_total{} abc\n")); err == nil {
-		t.Errorf("a garbled value parsed without an error")
+	if _, err := sumMetrics(strings.NewReader("litellm_spend_metric_total{} abc\n")); err == nil || !strings.Contains(err.Error(), "has a value that is not a number") {
+		t.Errorf("a garbled value gave %v, want 'has a value that is not a number'", err)
 	}
 }
 
@@ -130,6 +130,27 @@ func TestInsightsReportsAPartialRead(t *testing.T) {
 	}
 	if !strings.Contains(u.Error, "10.0.0.2") || !strings.Contains(u.Error, "connection refused") {
 		t.Errorf("error %q does not name the failed replica", u.Error)
+	}
+	serve(h, insightsReq())
+	if resolver.calls != 1 {
+		t.Errorf("a second partial read request inside the cache interval looked the replicas up again (%d lookups)", resolver.calls)
+	}
+}
+
+func TestInsightsCapsPeersAt32(t *testing.T) {
+	addrs := make([]string, 35)
+	bodies := make(map[string]string)
+	for i := range addrs {
+		addrs[i] = fmt.Sprintf("10.0.0.%d", i+1)
+		bodies[addrs[i]] = replicaMetrics(1)
+	}
+	resolver := &fakeResolver{addrs: addrs}
+	cfg := config{LiteLLMPeersHost: "peers"}
+	h := insightsServer(cfg, resolver, bodies, nil).routes()
+
+	u := decode[insightsResponse](t, serve(h, insightsReq())).Usage
+	if u.ReplicasFound != 35 || u.ReplicasRead != 32 {
+		t.Errorf("replicas = %d of %d, want 32 of 35", u.ReplicasRead, u.ReplicasFound)
 	}
 }
 

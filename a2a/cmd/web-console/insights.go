@@ -169,7 +169,7 @@ func (s *server) currentUsage(ctx context.Context) usageInfo {
 	s.usage.mu.Unlock()
 
 	v := s.readUsage(ctx)
-	if v.Error == "" && ctx.Err() == nil {
+	if v.ReplicasRead > 0 && ctx.Err() == nil {
 		s.usage.mu.Lock()
 		s.usage.value, s.usage.readAt = v, time.Now()
 		s.usage.mu.Unlock()
@@ -184,10 +184,10 @@ func (s *server) readUsage(ctx context.Context) usageInfo {
 	if err != nil {
 		return usageInfo{Error: "Could not find the LiteLLM replicas: " + err.Error()}
 	}
+	out := usageInfo{ReplicasFound: len(addrs)}
 	if len(addrs) > maxLiteLLMPeers {
 		addrs = addrs[:maxLiteLLMPeers]
 	}
-	out := usageInfo{ReplicasFound: len(addrs)}
 	if len(addrs) == 0 {
 		out.Error = "No LiteLLM replica is ready."
 		return out
@@ -307,7 +307,7 @@ func sumMetrics(r io.Reader) (map[string]float64, error) {
 		}
 		v, err := strconv.ParseFloat(fields[0], 64)
 		if err != nil {
-			return nil, fmt.Errorf("series %s has value %q: %w", name, fields[0], err)
+			return nil, fmt.Errorf("series %s has a value that is not a number", name)
 		}
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			continue

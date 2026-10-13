@@ -130,7 +130,7 @@ const (
 	// agentBusyPageLimit is how many of the newest messages the busy check
 	// reads.
 	agentBusyPageLimit = 5
-	agentBusyDetail    = "The agent is still working on this thread; try again in a minute."
+	agentBusyDetail    = "The agent is still working on this thread; try again once it has answered, or after the 10-minute window passes."
 
 	// maxRequestBodyBytes bounds a chat request. A turn is a typed message,
 	// and the container's memory limit is 128Mi.
@@ -449,6 +449,7 @@ func (s *server) listSessions(ctx context.Context, path string) ([]recentSession
 // (event watcher, scheduler, or kanban task notification) so the thread can
 // show a compact card instead of a raw routing template.
 type messageCard struct {
+	Kind     string `json:"kind,omitempty"`
 	Subject  string `json:"subject,omitempty"`
 	Resource string `json:"resource,omitempty"`
 	Reason   string `json:"reason,omitempty"`

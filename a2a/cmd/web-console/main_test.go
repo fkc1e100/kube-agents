@@ -197,7 +197,7 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.chats = append(f.chats, body)
 		delay, code, reply := f.chatDelay, f.chatCode, f.reply
 		entered, gate := f.chatEntered, f.chatGate
-		f.chatEntered = nil
+		f.chatEntered, f.chatGate = nil, nil
 		f.mu.Unlock()
 		if entered != nil {
 			close(entered)
@@ -1031,8 +1031,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
 }
 
 // 3. mergeStoredThreads preserves object identity, keeps local in-flight threads,
-// does not advance mark on the on-screen thread, and switches view when the
-// on-screen thread was removed in another tab.
+// does not advance mark on the on-screen thread, and preserves the on-screen thread
+// even if evicted by another tab.
 {
   const idA = "web-console-" + "a".repeat(32);
   const idB = "web-console-" + "b".repeat(32);
@@ -1060,16 +1060,19 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   assert.equal(vm.runInContext("tB.mark", ctx), 7, "background thread adopts higher mark from other tab");
   assert.equal(vm.runInContext("!!findThread(" + JSON.stringify(idC) + ")", ctx), true, "in-flight thread preserved across storage merge");
 
-  // Removing on-screen thread idA in another tab triggers selectThread on fallback.
+  // An on-screen thread idA missing from another tab's update (e.g. evicted by capThreads in tab B)
+  // is preserved in merged threads so this tab does not jump away mid-read.
   const tab2WithoutA = JSON.stringify([
     { id: idB, title: "B", mark: 7, markKnown: true, updated: 100, unread: false, started: true },
   ]);
   vm.runInContext("delete inflight[" + JSON.stringify(idC) + "]; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
-  assert.equal(ctx.getState().selectedThread, idB);
+  assert.equal(vm.runInContext("!!findThread(" + JSON.stringify(idA) + ")", ctx), true, "on-screen thread preserved across storage merge");
+  assert.equal(vm.runInContext("activeId", ctx), idA, "stays on active thread");
+  assert.equal(ctx.getState().selectedThread, null, "selectThread not called because on-screen thread kept");
 
-  // Removing the last remaining thread while on screen falls back to selectChannel('alerts').
-  vm.runInContext("activeId = " + JSON.stringify(idB) + "; view = 'thread'; mergeStoredThreads('[]')", ctx);
-  assert.equal(ctx.getState().selectedChannel, "alerts");
+  // When a thread was not on screen, it is removed by another tab's update.
+  vm.runInContext("view = 'channel'; activeId = ''; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
+  assert.equal(vm.runInContext("findThread(" + JSON.stringify(idA) + ")", ctx), null, "background thread removed");
 }
 
 // 4. settleAfterReply advances mark to replyId when fetchNewMessages fails.

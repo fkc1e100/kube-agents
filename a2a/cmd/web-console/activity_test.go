@@ -301,6 +301,7 @@ func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
 	fake.post("k8s-evt-55376c71", "user", "fix this")
 	fake.post("k8s-evt-55376c71", "user", kanbanWake)
 	fake.post("cron-sweep-20261006", "user", "Run the policy sweep\nSecond line")
+	fake.post("cron-sweep-20261006", "user", "Run the policy sweep second run")
 	fake.mu.Unlock()
 
 	evt := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-55376c71")))
@@ -332,9 +333,17 @@ func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
 	}
 
 	sched := decode[transcriptResponse](t, serve(h, transcriptReq("cron-sweep-20261006")))
-	if len(sched.Messages) != 1 || sched.Messages[0].Author != authorScheduler ||
-		sched.Messages[0].Card == nil || sched.Messages[0].Card.Subject != "Run the policy sweep" {
+	if len(sched.Messages) != 2 || sched.Messages[0].Author != authorScheduler ||
+		sched.Messages[0].Card == nil || sched.Messages[0].Card.Subject != "Run the policy sweep" ||
+		sched.Messages[1].Author != authorScheduler || sched.Messages[1].Card == nil {
 		t.Errorf("scheduled transcript = %+v", sched.Messages)
+	}
+
+	driftPrompt := "- **Object:** prod-databases/Pod/db-1\n- **Who:** alice@example.com\n- **What:** `patch` via `pods.patch`\n"
+	driftCard := parseEventWatcherCard(driftPrompt)
+	if driftCard.Kind != "drift" || driftCard.Resource != "prod-databases/Pod/db-1" ||
+		driftCard.Warning != "alice@example.com" || driftCard.Reason != "`patch` via `pods.patch`" {
+		t.Errorf("driftCard = %+v", driftCard)
 	}
 
 	srv := newServer(config{})
@@ -397,5 +406,26 @@ func TestTranscriptDoesNotTagFirstReturnedRowAsWatcherWhenHeadIsTruncated(t *tes
 	}
 	if got2.Messages[0].Author != authorUser || got2.Messages[0].Card != nil {
 		t.Errorf("first row after messagesMaxPages cap = %+v, want user without card", got2.Messages[0])
+	}
+}
+
+func TestTranscriptTagsFirstRowWhenSessionIsExactlyTranscriptMaxRows(t *testing.T) {
+	fake, h := setup(t)
+	sid := "k8s-evt-0000cccc"
+	fake.seed(sid, "api_server", "Triage "+sid)
+	fake.mu.Lock()
+	triagePrompt := "A Kubernetes Warning event needs triage\n\n- `title`: `Triage ns/Pod/name`\n- **Resource:** ns/Pod/name\n- **Event Reason:** Unhealthy\n"
+	fake.post(sid, "user", triagePrompt)
+	for i := 1; i < transcriptMaxRows; i++ {
+		fake.post(sid, "assistant", "reply")
+	}
+	fake.mu.Unlock()
+
+	got := decode[transcriptResponse](t, serve(h, transcriptReq(sid)))
+	if len(got.Messages) != transcriptMaxRows {
+		t.Fatalf("len(messages) = %d, want %d", len(got.Messages), transcriptMaxRows)
+	}
+	if got.Messages[0].Author != authorEventWatcher || got.Messages[0].Card == nil {
+		t.Errorf("first row of exact 200-row session = %+v, want authorEventWatcher with card", got.Messages[0])
 	}
 }

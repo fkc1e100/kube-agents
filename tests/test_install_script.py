@@ -10187,7 +10187,7 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                         "validate_existing_cluster_opt_in_flags\n"
                         'echo "PASSED"\n'
                     )
-                    env = get_isolated_test_env()
+                    env = get_isolated_test_env(absent=("ACCEPT_NO_NETWORK_POLICY", "ENABLE_NETWORK_POLICY", "MIGRATE_NODE_POOLS", "WEB_CONSOLE_ENABLED"))
                     env[key] = value
                     proc = subprocess.run(
                         ["bash", "-c", script],

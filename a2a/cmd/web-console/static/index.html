@@ -234,7 +234,8 @@
         visibility: hidden;
       }
 
-      .thread:hover .thread-remove {
+      .thread:hover .thread-remove,
+      .thread:focus-within .thread-remove {
         visibility: visible;
       }
       .thread-remove:disabled {
@@ -1355,8 +1356,8 @@
                 later in IAM are not shown here.
               </p>
               <p class="about-caption">
-                The agent opens a post in # alerts for each Kubernetes warning
-                event it triages, and in # scheduled for each scheduled check.
+                The agent opens a post in # alerts for each event-triage session,
+                and in # scheduled for each scheduled job per UTC day.
                 Replies you send there go into that session. Slack and Google
                 Chat sessions are listed by title only and cannot be opened
                 here.
@@ -1410,7 +1411,7 @@
       const CHANNELS = {
         alerts: {
           title: "# alerts",
-          sub: "One post per Kubernetes warning event the agent triaged",
+          sub: "One post per event-triage session the agent opened",
           author: "Event watcher",
           avatar: "!",
           avatarClass: "avatar-alert",
@@ -1419,7 +1420,7 @@
         },
         scheduled: {
           title: "# scheduled",
-          sub: "One post per scheduled check the agent ran",
+          sub: "One post per scheduled job per UTC day",
           author: "Scheduler",
           avatar: "\u21bb",
           avatarClass: "avatar-cron",
@@ -1574,12 +1575,18 @@
           mine.unread = onScreen(mine.id) ? false : !!(mine.unread || t.unread);
           return mine;
         });
+        let retained = false;
         threads.forEach((mine) => {
-          if (inflight[mine.id] && !merged.some((t) => t.id === mine.id)) {
+          if (
+            (inflight[mine.id] || onScreen(mine.id)) &&
+            !merged.some((t) => t.id === mine.id)
+          ) {
             merged.unshift(mine);
+            retained = true;
           }
         });
         threads = merged;
+        if (retained) saveThreads();
         const activeStillPresent = activeId && !!findThread(activeId);
         if (activeId && !activeStillPresent && !inflight[activeId]) {
           activeId = threads[0] ? threads[0].id : "";
@@ -1693,7 +1700,10 @@
           if (m.id <= t.mark) return;
           if (m.author === "kanban")
             deliver(t, m.content, "Specialist report", m);
-          else if (m.role === "assistant") deliver(t, m.content, "update", m);
+          else if (m.role === "assistant")
+            deliver(t, m.content, "update", m);
+          else if (m.role === "user" && !inflight[t.id])
+            deliver(t, m.content, "You", m);
           advanceMark(t, m.id);
         });
       }
@@ -1764,9 +1774,15 @@
         // the typed message starts such a wake; its agent reply is shown and
         // ends the wake so subsequent assistant messages of the user's own turn
         // are not misclassified as wake updates.
-        if (turnAt >= 0 && replyAt > turnAt) {
+        const midTurnSlice =
+          turnAt >= 0 && replyAt > turnAt
+            ? messages.slice(turnAt + 1, replyAt)
+            : turnAt < 0 && replyAt >= 0
+              ? messages.slice(0, replyAt)
+              : [];
+        if (midTurnSlice.length > 0) {
           let inWake = false;
-          messages.slice(turnAt + 1, replyAt).forEach((m) => {
+          midTurnSlice.forEach((m) => {
             if (m.role === "user") {
               inWake = true;
               if (m.author === "kanban" && m.id > t.mark)
@@ -2204,17 +2220,20 @@
       function renderAuthorBody(role, text, card, meta) {
         if (role === "event_watcher") {
           const subject = (card && card.subject) || threadTitle(text);
+          const isDrift = card && card.kind === "drift";
           const rows = [];
           if (card && card.resource)
             rows.push(
-              `<dt>Resource</dt><dd><code>${escapeHtml(card.resource)}</code></dd>`,
+              `<dt>${isDrift ? "Object" : "Resource"}</dt><dd><code>${escapeHtml(card.resource)}</code></dd>`,
             );
           if (card && card.reason)
             rows.push(
-              `<dt>Reason</dt><dd><code>${escapeHtml(card.reason)}</code></dd>`,
+              `<dt>${isDrift ? "What" : "Reason"}</dt><dd><code>${escapeHtml(card.reason)}</code></dd>`,
             );
           if (card && card.warning)
-            rows.push(`<dt>Message</dt><dd>${escapeHtml(card.warning)}</dd>`);
+            rows.push(
+              `<dt>${isDrift ? "Who" : "Message"}</dt><dd>${escapeHtml(card.warning)}</dd>`,
+            );
           const grid = rows.length
             ? `<dl class="msg-card-grid">${rows.join("")}</dl>`
             : "";
@@ -2784,6 +2803,10 @@
             body.appendChild(messageRow("user", turn.text));
           showPending("side", id);
         }
+        (notices[id] || []).forEach((text) =>
+          body.appendChild(messageRow("agent", text, "error")),
+        );
+        delete notices[id];
         if (follow) body.scrollTop = body.scrollHeight;
         return true;
       }
@@ -2833,6 +2856,10 @@
               meta,
             );
           }
+        } else if (outcome.error !== undefined) {
+          (notices[id] = notices[id] || []).push(outcome.error);
+          feedNew.add(id);
+          renderFeed(false);
         }
         updateSideComposer();
         pollChannels();
@@ -3049,7 +3076,7 @@
             // it, so the run finishes and its reply lands in the session.
             result = {
               error:
-                "The connection to the web console broke off. The agent is still finishing this turn; its reply will appear in this thread within a minute or so. " +
+                "The connection to the web console broke off. The agent is still finishing this turn; its reply will appear in this thread once the turn finishes. " +
                 err.message,
             };
           }
@@ -3229,7 +3256,9 @@
           renderInsights(data);
         } catch (e) {
           setText("ins-tokens", "Not available", e.message);
+          setText("ins-tokens-split", e.message, e.message);
           setText("ins-cost", "Not available", e.message);
+          setText("ins-usage-note", "", e.message).classList.remove("warn");
         }
       }
 

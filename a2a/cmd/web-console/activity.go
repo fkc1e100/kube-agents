@@ -359,6 +359,12 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	truncatedHead := !reachedStart
+	if truncatedHead && len(rows) > 0 {
+		firstPage, _ := s.fetchMessagesPage(ctx, fmt.Sprintf("/api/sessions/%s/messages?order=oldest&limit=1&offset=0", url.PathEscape(sid)))
+		if len(firstPage) > 0 && rows[0].ID <= firstPage[0].ID {
+			truncatedHead = false
+		}
+	}
 	if len(textMessages) > transcriptMaxRows {
 		textMessages = textMessages[len(textMessages)-transcriptMaxRows:]
 		truncatedHead = true
@@ -395,17 +401,15 @@ func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMess
 		msg.Card = card
 		return msg
 	}
-	if isFirstUser {
-		switch kind {
-		case kindEventTriage:
-			msg.Author = authorEventWatcher
-			msg.Card = parseEventWatcherCard(content)
-			return msg
-		case kindScheduled:
-			msg.Author = authorScheduler
-			msg.Card = &messageCard{Subject: summarySubject(content)}
-			return msg
-		}
+	if isFirstUser && kind == kindEventTriage {
+		msg.Author = authorEventWatcher
+		msg.Card = parseEventWatcherCard(content)
+		return msg
+	}
+	if kind == kindScheduled {
+		msg.Author = authorScheduler
+		msg.Card = &messageCard{Subject: summarySubject(content)}
+		return msg
 	}
 	msg.Author = authorUser
 	return msg
@@ -413,6 +417,9 @@ func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMess
 
 func parseEventWatcherCard(text string) *messageCard {
 	card := &messageCard{Subject: summarySubject(text)}
+	if strings.Contains(text, "**Who:**") || strings.Contains(text, "**What:**") || strings.Contains(text, "**Object:**") {
+		card.Kind = "drift"
+	}
 	if m := eventResourcePattern.FindStringSubmatch(text); m != nil {
 		card.Resource = strings.TrimSpace(m[1])
 	}
