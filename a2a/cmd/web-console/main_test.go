@@ -152,6 +152,7 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Same paging as Hermes with order=latest: offset counts back from
 		// the newest message, and the page comes back oldest first.
+		// When order is omitted or not latest, Hermes serves insertion order.
 		all := f.messages[sid]
 		limit, offset := len(all), 0
 		if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
@@ -160,8 +161,15 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil {
 			offset = v
 		}
-		end := max(len(all)-offset, 0)
-		page := all[max(end-limit, 0):end]
+		var page []map[string]any
+		if r.URL.Query().Get("order") == "latest" {
+			end := max(len(all)-offset, 0)
+			page = all[max(end-limit, 0):end]
+		} else {
+			start := min(offset, len(all))
+			end := min(start+limit, len(all))
+			page = all[start:end]
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "session_id": sid, "data": page})
 	default:
 		hermesError(w, http.StatusNotFound, "no route")

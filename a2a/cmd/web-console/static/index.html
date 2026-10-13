@@ -753,6 +753,9 @@
           showUpdates(messages.slice(replyAt + 1));
         } else if (typeof replyId === "number" && replyId > 0) {
           advanceMark(replyId);
+          showUpdates(messages.filter((m) => m.id > replyId));
+        } else if (turnAt >= 0) {
+          showUpdates(messages.slice(turnAt + 1));
         }
         advanceMark(data.latest_id);
       }
@@ -775,7 +778,11 @@
           }
           return;
         }
-        unsettledTurn = null;
+        if (unsettledTurn) {
+          const u = unsettledTurn;
+          unsettledTurn = null;
+          applySettleData(data, u.typed, u.reply, u.beforeId, u.replyId);
+        }
         applySettleData(data, typed, reply, beforeId, replyId);
       }
 
@@ -828,16 +835,31 @@
       // fence (```yaml) is dropped rather than rendered as the first line.
       function renderMarkdown(text) {
         if (!text) return "";
-        const fence =
-          /(?:^|\n)([ ]*)(`{3,})([^\n`]*)\n([\s\S]*?)(?:\n[ ]*\2+ *(?=\n|$)|$)/g;
         let html = "";
-        let last = 0;
-        let match;
-        while ((match = fence.exec(text)) !== null) {
-          const before = text.slice(last, match.index);
+        let pos = 0;
+        const openRe = /(?:^|\n)([ ]*)(`{3,})([^\n`]*)\n/g;
+        let openMatch;
+        while ((openMatch = openRe.exec(text)) !== null) {
+          if (openMatch.index < pos) continue;
+          const before = text.slice(pos, openMatch.index);
           if (before.trim()) html += renderInline(before.trim());
-          const indent = match[1].length;
-          const code = match[4]
+          const indent = openMatch[1].length;
+          const fenceLen = openMatch[2].length;
+          const startCode = openRe.lastIndex;
+          const closeRe = new RegExp(`(?:\\n|^)[ ]*(\`{${fenceLen},}) *(?=\\n|$)`, "g");
+          closeRe.lastIndex = startCode;
+          const closeMatch = closeRe.exec(text);
+          let codeText = "";
+          if (closeMatch) {
+            codeText = text.slice(startCode, closeMatch.index);
+            pos = closeRe.lastIndex;
+            openRe.lastIndex = pos;
+          } else {
+            codeText = text.slice(startCode);
+            pos = text.length;
+            openRe.lastIndex = pos;
+          }
+          const code = codeText
             .replace(/\n$/, "")
             .split("\n")
             .map((line) => {
@@ -847,9 +869,8 @@
             })
             .join("\n");
           html += `<pre><code>${escapeHtml(code)}</code></pre>`;
-          last = fence.lastIndex;
         }
-        const tail = text.slice(last);
+        const tail = text.slice(pos);
         if (tail.trim()) html += renderInline(tail.trim());
         return html;
       }

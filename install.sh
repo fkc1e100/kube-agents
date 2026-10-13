@@ -4252,8 +4252,8 @@ prompt_network_policy_choice() {
         PARAM_ACCEPT_NO_NETWORK_POLICY="false"
         ;;
       *)
-        PARAM_ENABLE_NETWORK_POLICY="false"
-        PARAM_ACCEPT_NO_NETWORK_POLICY="false"
+        print_info "Stopping without modifying the cluster or writing install.env."
+        exit 1
         ;;
     esac
     return 0
