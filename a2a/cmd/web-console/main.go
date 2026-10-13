@@ -33,10 +33,10 @@ limitations under the License.
 //   - every response forbids framing, so another page cannot overlay the
 //     console and trick a click into sending a turn.
 //
-// Each browser tab gets its own Hermes session, minted here with a
-// "web-console-" prefix. A client may only name a session with that prefix,
-// so the console cannot be used to post into the event watcher's triage
-// sessions or any other caller's.
+// Each browser tab mints its own Hermes session ID with a "web-console-"
+// prefix. A client may only name a session with that prefix, so the console
+// cannot be used to post into the event watcher's triage sessions or any
+// other caller's.
 //
 // A turn reaches the Planning Agent, the same front door a chat message
 // reaches. When it delegates work to a kanban card, the card's result arrives
@@ -48,9 +48,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -121,8 +119,7 @@ const (
 	roleAssistant = "assistant"
 	roleUser      = "user"
 
-	sessionIDPrefix    = "web-console-"
-	sessionIDRandBytes = 16
+	sessionIDPrefix = "web-console-"
 
 	// consoleHeader is the custom header the page sends with every turn. A
 	// cross-origin page cannot set it without a preflight, and this server
@@ -185,8 +182,9 @@ func envOr(key, fallback string) string {
 // server holds the console's handlers and the one piece of mutable state it
 // keeps: which sessions have a turn in flight.
 type server struct {
-	cfg    config
-	client *http.Client
+	cfg           config
+	client        *http.Client
+	createTimeout time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]bool
@@ -194,9 +192,10 @@ type server struct {
 
 func newServer(cfg config) *server {
 	return &server{
-		cfg:      cfg,
-		client:   &http.Client{}, // deadlines come from each request's context
-		inflight: map[string]bool{},
+		cfg:           cfg,
+		client:        &http.Client{}, // deadlines come from each request's context
+		createTimeout: sessionCreateTimeout,
+		inflight:      map[string]bool{},
 	}
 }
 
@@ -484,22 +483,9 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sid := req.SessionID
-	if sid != "" && !sessionIDPattern.MatchString(sid) {
+	if !sessionIDPattern.MatchString(sid) {
 		writeError(w, http.StatusBadRequest, "invalid_session_id", "Session ID was not issued by this console.")
 		return
-	}
-	created := false
-	if sid == "" {
-		var err error
-		if sid, err = newSessionID(); err != nil {
-			writeError(w, http.StatusInternalServerError, "session_id_failed", "Could not generate a session ID.")
-			return
-		}
-		if err := s.createSession(r.Context(), sid); err != nil {
-			writeError(w, http.StatusBadGateway, "session_create_failed", err.Error())
-			return
-		}
-		created = true
 	}
 
 	if !s.claim(sid) {
@@ -508,9 +494,12 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(sid)
 
-	var beforeID int64
-	if !created {
-		beforeID = s.latestMessageID(r.Context(), sid)
+	beforeID, exists := s.latestMessageID(r.Context(), sid)
+	if !exists {
+		if err := s.createSession(r.Context(), sid); err != nil {
+			writeError(w, http.StatusBadGateway, "session_create_failed", err.Error())
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
@@ -520,21 +509,23 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		// The agent pod's session store does not have this ID, for instance
 		// after the pod was replaced. Recreate it and run the turn once more.
 		beforeID = 0
-		if err = s.createSession(ctx, sid); err == nil {
-			reply, err = s.runTurn(ctx, sid, msg)
+		if createErr := s.createSession(ctx, sid); createErr != nil {
+			writeError(w, http.StatusBadGateway, "session_create_failed", createErr.Error())
+			return
 		}
+		reply, err = s.runTurn(ctx, sid, msg)
 	}
 	if err != nil {
 		var ue *upstreamError
 		switch {
 		case errors.As(err, &ue) && ue.status == http.StatusTooManyRequests,
 			errors.As(err, &ue) && ue.status == http.StatusServiceUnavailable:
-			writeErrorWithSession(w, http.StatusServiceUnavailable, "agent_busy", ue.Error(), sid)
-		case errors.Is(err, context.DeadlineExceeded):
-			writeErrorWithSession(w, http.StatusGatewayTimeout, "turn_timeout",
-				fmt.Sprintf("The agent did not answer within %s. It may still be working; ask for a status update.", turnTimeout), sid)
+			writeError(w, http.StatusServiceUnavailable, "agent_busy", ue.Error())
+		case errors.Is(ctx.Err(), context.DeadlineExceeded):
+			writeError(w, http.StatusGatewayTimeout, "turn_timeout",
+				fmt.Sprintf("The agent did not answer within %s. It may still be working; ask for a status update.", turnTimeout))
 		default:
-			writeErrorWithSession(w, http.StatusBadGateway, "agent_error", err.Error(), sid)
+			writeError(w, http.StatusBadGateway, "agent_error", err.Error())
 		}
 		return
 	}
@@ -543,16 +534,21 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // latestMessageID reads the session's newest message row ID, or 0 when the
-// session is empty or the read fails.
-func (s *server) latestMessageID(parent context.Context, sid string) int64 {
+// session is empty or the read fails. The second return value is false only
+// when Hermes reports 404 for the session, so handleChat creates a fresh
+// client-minted session before its first turn.
+func (s *server) latestMessageID(parent context.Context, sid string) (int64, bool) {
 	ctx, cancel := context.WithTimeout(parent, messagesTimeout)
 	defer cancel()
 	path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=1&offset=0", url.PathEscape(sid))
 	listed, failure := s.fetchMessagesPage(ctx, path)
-	if failure != nil || len(listed) == 0 {
-		return 0
+	if failure != nil {
+		return 0, failure.status != http.StatusNotFound
 	}
-	return listed[len(listed)-1].ID
+	if len(listed) == 0 {
+		return 0, true
+	}
+	return listed[len(listed)-1].ID, true
 }
 
 // replyMessageID finds the row ID of the assistant reply that just finished
@@ -580,7 +576,9 @@ func (s *server) replyMessageID(parent context.Context, sid string, beforeID int
 			if m.ID <= beforeID {
 				break
 			}
-			if m.Role == roleAssistant && m.Content != nil && strings.TrimSpace(*m.Content) == want {
+			emptyReply := want == "" && (m.Content == nil || strings.TrimSpace(*m.Content) == "")
+			textReply := want != "" && m.Content != nil && strings.TrimSpace(*m.Content) == want
+			if m.Role == roleAssistant && (textReply || emptyReply) {
 				matchedID = m.ID
 				break
 			}
@@ -611,18 +609,10 @@ func (s *server) release(sid string) {
 	delete(s.inflight, sid)
 }
 
-func newSessionID() (string, error) {
-	b := make([]byte, sessionIDRandBytes)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return sessionIDPrefix + hex.EncodeToString(b), nil
-}
-
 // createSession creates the Hermes session row. Hermes answers 409 when the
 // ID exists, which is the outcome this wanted.
 func (s *server) createSession(parent context.Context, sid string) error {
-	ctx, cancel := context.WithTimeout(parent, sessionCreateTimeout)
+	ctx, cancel := context.WithTimeout(parent, s.createTimeout)
 	defer cancel()
 	// Titles are unique in Hermes, so the title carries the ID.
 	body := map[string]string{"session_id": sid, "title": "Web console " + strings.TrimPrefix(sid, sessionIDPrefix)}
@@ -723,17 +713,12 @@ func drainAndClose(resp *http.Response) {
 }
 
 type errorResponse struct {
-	Error     string `json:"error"`
-	Detail    string `json:"detail"`
-	SessionID string `json:"session_id,omitempty"`
+	Error  string `json:"error"`
+	Detail string `json:"detail"`
 }
 
 func writeError(w http.ResponseWriter, status int, code, detail string) {
 	writeJSON(w, status, errorResponse{Error: code, Detail: detail})
-}
-
-func writeErrorWithSession(w http.ResponseWriter, status int, code, detail, sid string) {
-	writeJSON(w, status, errorResponse{Error: code, Detail: detail, SessionID: sid})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

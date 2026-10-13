@@ -608,9 +608,8 @@
       let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
       let turnInFlight = false;
       let pollInFlight = false;
-      let markKnown = sessionStorage.getItem(MARK_KEY) !== null;
       let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
-      let unsettledTurn = null;
+      let unsettledTurns = [];
 
       function newSessionId() {
         const bytes = new Uint8Array(16);
@@ -624,7 +623,6 @@
       function advanceMark(id) {
         if (typeof id !== "number" || id <= lastSeenId) return;
         lastSeenId = id;
-        markKnown = true;
         sessionStorage.setItem(MARK_KEY, String(lastSeenId));
       }
 
@@ -632,25 +630,16 @@
         currentSessionId = id;
         sessionStorage.setItem(SESSION_KEY, currentSessionId);
         lastSeenId = 0;
-        markKnown = true;
         sessionStorage.setItem(MARK_KEY, "0");
-        unsettledTurn = null;
-      }
-
-      function resetMark() {
-        lastSeenId = 0;
-        markKnown = false;
-        unsettledTurn = null;
-        sessionStorage.removeItem(MARK_KEY);
+        unsettledTurns = [];
       }
 
       // Returns {latest_id, messages} for this tab's session, or null.
       async function fetchNewMessages() {
         if (!currentSessionId) return null;
-        const after = markKnown ? `?after=${lastSeenId}` : "";
         try {
           const resp = await fetch(
-            `/api/sessions/${encodeURIComponent(currentSessionId)}/messages${after}`,
+            `/api/sessions/${encodeURIComponent(currentSessionId)}/messages?after=${lastSeenId}`,
           );
           if (!resp.ok) return null;
           return await resp.json();
@@ -671,23 +660,20 @@
         });
       }
 
-      // Periodic poll between turns. On a tab that has no mark yet (a reload
-      // of an older session), the first poll only sets the mark. When a turn's
-      // post-turn reads both failed, the first successful poll settles that
-      // turn by content instead of replaying its reply as an update.
+      // Periodic poll between turns. When an earlier turn's post-turn settle
+      // fetch failed, the first successful poll settles pending turns in order
+      // instead of replaying their replies as updates.
       async function pollMessages() {
         if (!currentSessionId || turnInFlight || pollInFlight) return;
         pollInFlight = true;
         try {
           const data = await fetchNewMessages();
           if (!data) return;
-          if (unsettledTurn) {
-            const u = unsettledTurn;
-            unsettledTurn = null;
-            applySettleData(data, u.typed, u.reply, u.beforeId, u.replyId);
+          if (unsettledTurns.length > 0) {
+            settlePendingTurns(data);
             return;
           }
-          if (markKnown) showUpdates(data.messages);
+          showUpdates(data.messages);
           advanceMark(data.latest_id);
         } finally {
           pollInFlight = false;
@@ -697,6 +683,7 @@
       function applySettleData(data, typed, reply, beforeId, replyId) {
         const messages = data.messages || [];
         const same = (a, b) => (a || "").trim() === (b || "").trim();
+        const hasReplyText = (reply || "").trim() !== "";
         let turnAt = -1;
         messages.forEach((m, i) => {
           if (
@@ -712,7 +699,7 @@
           );
         }
         let replyAt = -1;
-        if (typeof replyId === "number" && replyId > 0) {
+        if (hasReplyText && typeof replyId === "number" && replyId > 0) {
           replyAt = messages.findIndex(
             (m, i) =>
               i > turnAt &&
@@ -721,13 +708,13 @@
               same(m.content, reply),
           );
         }
-        if (replyAt < 0) {
+        if (hasReplyText && replyAt < 0) {
           messages.forEach((m, i) => {
             if (i > turnAt && m.role === "assistant" && same(m.content, reply))
               replyAt = i;
           });
         }
-        if (replyAt < 0 && typeof replyId === "number" && replyId > 0) {
+        if (hasReplyText && replyAt < 0 && typeof replyId === "number" && replyId > 0) {
           replyAt = messages.findIndex(
             (m, i) => i > turnAt && m.id === replyId,
           );
@@ -737,17 +724,23 @@
         // run during this turn and land inside its range. A user row other than
         // the typed message starts such a wake; its agent reply is shown and
         // ends the wake so later assistant rows of the typed turn are not shown.
-        if (turnAt >= 0 && replyAt > turnAt) {
-          let inWake = false;
-          messages.slice(turnAt + 1, replyAt).forEach((m) => {
-            if (m.role === "user") {
-              inWake = true;
-            } else if (inWake && m.role === "assistant" && m.id > lastSeenId) {
-              appendMessage("agent", m.content, "update");
-              inWake = false;
-            }
-          });
-        }
+        const inTurn =
+          turnAt < 0
+            ? []
+            : replyAt > turnAt
+              ? messages.slice(turnAt + 1, replyAt)
+              : typeof replyId === "number" && replyId > 0
+                ? messages.slice(turnAt + 1).filter((m) => m.id <= replyId)
+                : [];
+        let inWake = false;
+        inTurn.forEach((m) => {
+          if (m.role === "user") {
+            inWake = true;
+          } else if (inWake && m.role === "assistant" && m.id > lastSeenId) {
+            appendMessage("agent", m.content, "update");
+            inWake = false;
+          }
+        });
         if (replyAt >= 0) {
           advanceMark(messages[replyAt].id);
           showUpdates(messages.slice(replyAt + 1));
@@ -760,30 +753,66 @@
         advanceMark(data.latest_id);
       }
 
+      function settlePendingTurns(data) {
+        const turns = unsettledTurns;
+        unsettledTurns = [];
+        const all = data.messages || [];
+        const same = (a, b) => (a || "").trim() === (b || "").trim();
+        turns.forEach((u, idx) => {
+          if (idx + 1 < turns.length) {
+            const next = turns[idx + 1];
+            let slice = all;
+            let latest = data.latest_id;
+            if (typeof next.beforeId === "number" && next.beforeId > 0) {
+              slice = all.filter((m) => m.id <= next.beforeId);
+              latest = next.beforeId;
+            } else {
+              const uUserAt = all.findIndex(
+                (m) =>
+                  m.id > lastSeenId &&
+                  m.role === "user" &&
+                  same(m.content, u.typed) &&
+                  (!u.beforeId || m.id > u.beforeId),
+              );
+              const nextUserAt = all.findIndex(
+                (m, i) =>
+                  i > uUserAt &&
+                  m.id > lastSeenId &&
+                  m.role === "user" &&
+                  same(m.content, next.typed),
+              );
+              if (nextUserAt >= 0) {
+                slice = all.slice(0, nextUserAt);
+                latest =
+                  slice.length > 0 ? slice[slice.length - 1].id : lastSeenId;
+              }
+            }
+            applySettleData(
+              { messages: slice, latest_id: latest },
+              u.typed,
+              u.reply,
+              u.beforeId,
+              u.replyId,
+            );
+          } else {
+            applySettleData(data, u.typed, u.reply, u.beforeId, u.replyId);
+          }
+        });
+      }
+
       // Runs once a turn's reply is on screen. The session holds three runs of
       // messages above the mark: results that landed before this turn started
       // (shown), the turn itself from the typed message to its reply (already
       // on screen, so only marked), and results that landed after the reply
-      // (shown). When the follow-up fetch fails, replyId moves the mark past
-      // the reply if present; when neither read supplied an ID, unsettledTurn
-      // holds the turn so the next poll settles by content instead of replaying.
+      // (shown). When the follow-up fetch fails, the turn stays in
+      // unsettledTurns without advancing the mark so the next successful fetch
+      // shows any pre-turn or mid-turn wakes and settles the reply without
+      // replaying it.
       async function settleAfterReply(typed, reply, beforeId, replyId) {
+        unsettledTurns.push({ typed, reply, beforeId, replyId });
         const data = await fetchNewMessages();
-        if (!data) {
-          if (typeof replyId === "number" && replyId > 0) {
-            advanceMark(replyId);
-            unsettledTurn = null;
-          } else {
-            unsettledTurn = { typed, reply, beforeId, replyId };
-          }
-          return;
-        }
-        if (unsettledTurn) {
-          const u = unsettledTurn;
-          unsettledTurn = null;
-          applySettleData(data, u.typed, u.reply, u.beforeId, u.replyId);
-        }
-        applySettleData(data, typed, reply, beforeId, replyId);
+        if (!data) return;
+        settlePendingTurns(data);
       }
 
       function escapeHtml(text) {
@@ -808,7 +837,8 @@
       }
 
       // Inline formatting for text outside code fences. Matches equal-length
-      // backtick delimiter runs so double-backtick spans can quote a backtick.
+      // backtick delimiter runs so double-backtick spans can quote a backtick,
+      // and applies bold formatting only outside emitted <code>...</code> spans.
       function renderInline(text) {
         let html = escapeHtml(text);
         html = html.replace(/(`+)((?:(?!\1)[^\n])+)\1/g, (_, ticks, inner) => {
@@ -821,7 +851,14 @@
               : inner;
           return `<code>${code}</code>`;
         });
-        html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+        html = html
+          .split(/(<code>[\s\S]*?<\/code>)/g)
+          .map((part) =>
+            part.startsWith("<code>")
+              ? part
+              : part.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"),
+          )
+          .join("");
         return html
           .split(/\n{2,}/)
           .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
@@ -846,7 +883,7 @@
           const indent = openMatch[1].length;
           const fenceLen = openMatch[2].length;
           const startCode = openRe.lastIndex;
-          const closeRe = new RegExp(`(?:\\n|^)[ ]*(\`{${fenceLen},}) *(?=\\n|$)`, "g");
+          const closeRe = new RegExp(`^[ ]*(\`{${fenceLen},}) *(?=\\n|$)`, "gm");
           closeRe.lastIndex = startCode;
           const closeMatch = closeRe.exec(text);
           let codeText = "";
@@ -941,9 +978,6 @@
             }),
           });
           const data = await readBody(resp);
-          if (data.session_id && data.session_id !== currentSessionId) {
-            initNewSession(data.session_id);
-          }
           pending.remove();
           if (resp.ok) {
             appendMessage(

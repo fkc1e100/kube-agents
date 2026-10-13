@@ -43,16 +43,18 @@ const testKey = "test-api-key"
 // in insertion order; errors are OpenAI-shaped {"error":{"message":...}}.
 // Every route requires the bearer key, as the agent's auth sidecar does.
 type fakeHermes struct {
-	mu           sync.Mutex
-	sessions     map[string]bool
-	messages     map[string][]map[string]any
-	nextID       int64
-	lastQuery    string
-	chats        []map[string]any
-	reply        string
-	postTurnWake string
-	chatDelay    time.Duration
-	chatCode     int
+	mu                 sync.Mutex
+	sessions           map[string]bool
+	messages           map[string][]map[string]any
+	nextID             int64
+	lastQuery          string
+	chats              []map[string]any
+	reply              string
+	postTurnWake       string
+	chatDelay          time.Duration
+	chatCode           int
+	createDelay        time.Duration
+	dropSessionOnFirst bool
 }
 
 func newFakeHermes() *fakeHermes {
@@ -96,6 +98,12 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
+		createDelay := f.createDelay
+		f.mu.Unlock()
+		if createDelay > 0 {
+			time.Sleep(createDelay)
+		}
+		f.mu.Lock()
 		defer f.mu.Unlock()
 		if f.sessions[body["session_id"]] {
 			hermesError(w, http.StatusConflict, "Session already exists")
@@ -109,6 +117,10 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.mu.Lock()
+		if f.dropSessionOnFirst {
+			f.dropSessionOnFirst = false
+			delete(f.sessions, sid)
+		}
 		known := f.sessions[sid]
 		f.chats = append(f.chats, body)
 		delay, code, reply := f.chatDelay, f.chatCode, f.reply
@@ -206,7 +218,18 @@ func setup(t *testing.T) (*fakeHermes, http.Handler) {
 	return fake, newServer(cfg).routes()
 }
 
+const defaultTestSessionID = "web-console-0123456789abcdef0123456789abcdef"
+
 func chatReq(body string) *http.Request {
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(body), &parsed); err == nil {
+		if _, has := parsed["session_id"]; !has {
+			parsed["session_id"] = defaultTestSessionID
+			if b, err := json.Marshal(parsed); err == nil {
+				body = string(b)
+			}
+		}
+	}
 	req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/chat", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(consoleHeader, consoleHeaderValue)
@@ -269,22 +292,27 @@ func TestChatUsesHermesContract(t *testing.T) {
 
 func TestEachNewChatGetsItsOwnSession(t *testing.T) {
 	_, h := setup(t)
-	a := decode[chatResponse](t, serve(h, chatReq(`{"message":"one"}`)))
-	b := decode[chatResponse](t, serve(h, chatReq(`{"message":"two"}`)))
-	if a.SessionID == b.SessionID {
-		t.Fatalf("two browsers without a session were handed the same session %q", a.SessionID)
+	sidA := "web-console-" + strings.Repeat("a", 32)
+	sidB := "web-console-" + strings.Repeat("b", 32)
+	a := decode[chatResponse](t, serve(h, chatReq(`{"message":"one","session_id":"`+sidA+`"}`)))
+	b := decode[chatResponse](t, serve(h, chatReq(`{"message":"two","session_id":"`+sidB+`"}`)))
+	if a.SessionID != sidA || b.SessionID != sidB || a.SessionID == b.SessionID {
+		t.Fatalf("two browser tabs with distinct client-minted IDs were not kept distinct: a=%q b=%q", a.SessionID, b.SessionID)
 	}
 	c := decode[chatResponse](t, serve(h, chatReq(`{"message":"three","session_id":"`+a.SessionID+`"}`)))
-	if c.SessionID != a.SessionID {
-		t.Errorf("a named console session was not reused: got %q want %q", c.SessionID, a.SessionID)
+	if c.SessionID != a.SessionID || c.BeforeID != a.ReplyID {
+		t.Errorf("a named console session was not reused: got session=%q before=%d, want %q before=%d", c.SessionID, c.BeforeID, a.SessionID, a.ReplyID)
 	}
 }
 
 func TestChatRefusesForeignSessionIDs(t *testing.T) {
 	fake, h := setup(t)
-	for _, sid := range []string{"k8s-evt-abc", "web-console-../../x", "web-console-ABC", "../api/sessions"} {
-		body, _ := json.Marshal(chatRequest{Message: "hi", SessionID: sid})
-		rec := serve(h, chatReq(string(body)))
+	for _, sid := range []string{"", "k8s-evt-abc", "web-console-../../x", "web-console-ABC", "../api/sessions"} {
+		raw := `{"message":"hi","session_id":` + strconv.Quote(sid) + `}`
+		req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/chat", strings.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(consoleHeader, consoleHeaderValue)
+		rec := serve(h, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("session %q: status %d, want 400", sid, rec.Code)
 		}
@@ -297,12 +325,51 @@ func TestChatRefusesForeignSessionIDs(t *testing.T) {
 func TestChatRecreatesAMissingSession(t *testing.T) {
 	fake, h := setup(t)
 	sid := "web-console-" + strings.Repeat("a", 32)
+	// First turn on a fresh tab creates the session before runTurn when
+	// latestMessageID sees 404, so runTurn succeeds in one call.
 	rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if sessions, chats := fake.state(); !sessions[sid] || len(chats) != 2 {
-		t.Errorf("want the session recreated and the turn retried once; sessions=%v chats=%d", sessions, len(chats))
+	if sessions, chats := fake.state(); !sessions[sid] || len(chats) != 1 {
+		t.Errorf("want the fresh session created ahead of runTurn; sessions=%v chats=%d", sessions, len(chats))
+	}
+	// If the agent pod's session store loses the session right before runTurn,
+	// the 404 retry recreates the session and retries the turn once.
+	fake.mu.Lock()
+	fake.dropSessionOnFirst = true
+	fake.mu.Unlock()
+	rec2 := serve(h, chatReq(`{"message":"again","session_id":"`+sid+`"}`))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec2.Code, rec2.Body.String())
+	}
+	if sessions, chats := fake.state(); !sessions[sid] || len(chats) != 3 {
+		t.Errorf("want the lost session recreated and the turn retried once; sessions=%v chats=%d", sessions, len(chats))
+	}
+}
+
+func TestChatSessionCreateTimeoutReports502Not504(t *testing.T) {
+	fake := newFakeHermes()
+	upstream := httptest.NewServer(fake)
+	t.Cleanup(upstream.Close)
+	srv := newServer(config{HermesURL: upstream.URL, APIServerKey: testKey, ClusterName: "c1"})
+	srv.createTimeout = 40 * time.Millisecond
+	h := srv.routes()
+
+	sid := "web-console-" + strings.Repeat("d", 32)
+	fake.mu.Lock()
+	fake.sessions[sid] = true
+	fake.dropSessionOnFirst = true
+	fake.createDelay = 120 * time.Millisecond
+	fake.mu.Unlock()
+
+	rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("session-create timeout inside 404 retry: status %d, want 502 (not 504): %s", rec.Code, rec.Body.String())
+	}
+	got := decode[errorResponse](t, rec)
+	if got.Error != "session_create_failed" {
+		t.Errorf("error code = %q, want session_create_failed", got.Error)
 	}
 }
 
@@ -318,9 +385,6 @@ func TestChatSurfacesUpstreamErrorsWithoutAFallback(t *testing.T) {
 	got := decode[errorResponse](t, rec)
 	if !strings.Contains(got.Detail, "upstream refused") {
 		t.Errorf("detail %q does not carry the gateway's message", got.Detail)
-	}
-	if got.SessionID == "" {
-		t.Errorf("error response dropped the session id, so the page would open a new session next turn")
 	}
 
 	fake.mu.Lock()
@@ -616,15 +680,24 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 
 // TestPageSettleAndWakeLogic executes the embedded script from static/index.html
 // in Node's vm module against stubbed DOM and fetch globals, verifying:
-//  1. A failed settle fetch still advances the mark to replyId so the next
-//     poll does not replay the turn's own assistant reply as an "update".
+//  1. A failed settle fetch keeps the mark at its pre-turn value and queues the
+//     turn in unsettledTurns so the next poll shows any pre-turn or mid-turn
+//     wakes and advances the mark past replyId without replaying the turn's own
+//     assistant reply as an "update".
+//  1b. Two consecutive failed settles (with or without replyId) queue both
+//      turns and settle them in order on the next poll or next settle fetch
+//      without replaying either turn's reply.
 //  2. Results that landed before the turn, multiple card wakes that landed
 //     mid-turn (followed by intermediate assistant rows of the typed turn), and
 //     results that landed after the reply are each shown once while the typed
-//     turn's own assistant messages are not duplicated, even if replyId raced
-//     and points at a post-reply wake row.
-//  3. renderMarkdown formats line-opening fenced code blocks while keeping
-//     mid-line triple backticks intact in inline prose.
+//     turn's own assistant messages are not duplicated, including when the
+//     turn's final reply is empty.
+//  3. renderMarkdown formats line-opening fenced code blocks (including empty
+//     fenced blocks) while keeping mid-line backticks and literal **bold**
+//     markers inside inline code spans intact.
+//  4. First turn on a fresh tab mints the session and sets the mark to 0
+//     before the request, so a dropped connection preserves the session and
+//     displays the late reply on the next poll.
 func TestPageSettleAndWakeLogic(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -688,38 +761,9 @@ function makeContext(fetchImpl, initialStorage = {}) {
   return ctx;
 }
 
-// Case 1: failed settle fetch advances lastSeenId to replyId so the next poll
-// does not replay the turn's own assistant reply as an "update".
-{
-  let pollCalls = [];
-  const ctx = makeContext(async (url) => {
-    if (!String(url).includes("/messages")) {
-      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-    }
-    pollCalls.push(String(url));
-    if (pollCalls.length === 1) {
-      return { ok: false, status: 502, text: async () => "bad gateway" };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ latest_id: 8, messages: [] }),
-    };
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
-    "kube-agents-web-console-mark": "4",
-  });
-  pollCalls = [];
-  await vm.runInContext("settleAfterReply('again', 'pods are healthy', 4, 8)", ctx);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "8", "failed settle must advance mark to replyId");
-  await vm.runInContext("pollMessages()", ctx);
-  assert.ok(pollCalls[1].endsWith("?after=8"), "next poll must request ?after=8, got " + pollCalls[1]);
-  assert.deepEqual(ctx.appended, [], "turn reply must not be replayed as an update");
-}
-
-// Case 1b: when both post-turn reads fail (replyId is undefined and the settle
-// fetch fails), the next successful poll settles by content instead of replaying
-// the turn's own reply as an "update", and still shows post-reply updates.
+// Case 1: failed settle fetch keeps the mark at 4 so pre-turn wakes are not
+// skipped, then the next poll settles the turn to replyId (8) without replaying
+// the turn's own assistant reply as an "update".
 {
   let pollCalls = [];
   const ctx = makeContext(async (url) => {
@@ -734,10 +778,55 @@ function makeContext(fetchImpl, initialStorage = {}) {
       ok: true,
       status: 200,
       json: async () => ({
-        latest_id: 10,
+        latest_id: 8,
         messages: [
+          { id: 5, role: "user", content: "[kanban] card done" },
+          { id: 6, role: "assistant", content: "pre-turn wake during outage" },
           { id: 7, role: "user", content: "again" },
           { id: 8, role: "assistant", content: "pods are healthy" },
+        ],
+      }),
+    };
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  pollCalls = [];
+  await vm.runInContext("settleAfterReply('again', 'pods are healthy', 6, 8)", ctx);
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "4", "failed settle must not advance mark past unseen rows");
+  await vm.runInContext("pollMessages()", ctx);
+  assert.ok(pollCalls[1].endsWith("?after=4"), "next poll must request ?after=4, got " + pollCalls[1]);
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "8", "poll after failed settle must advance mark to replyId");
+  assert.equal(
+    JSON.stringify(ctx.appended),
+    JSON.stringify([{ role: "agent", text: "pre-turn wake during outage", tag: "update" }]),
+    "pre-turn wake must be shown and turn reply must not be replayed"
+  );
+}
+
+// Case 1b: two consecutive turns whose post-turn reads fail, followed by a poll,
+// and an unsettled turn A followed by a succeeding settleAfterReply on turn B:
+// neither turn's reply or intermediate working note is replayed as an "update".
+{
+  let pollCalls = [];
+  const ctx = makeContext(async (url) => {
+    if (!String(url).includes("/messages")) {
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    }
+    pollCalls.push(String(url));
+    if (pollCalls.length <= 2) {
+      return { ok: false, status: 502, text: async () => "bad gateway" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 10,
+        messages: [
+          { id: 5, role: "user", content: "a" },
+          { id: 6, role: "assistant", content: "ra" },
+          { id: 7, role: "user", content: "b" },
+          { id: 8, role: "assistant", content: "rb" },
           { id: 9, role: "user", content: "[kanban] card done" },
           { id: 10, role: "assistant", content: "delegated result after outage" },
         ],
@@ -748,19 +837,54 @@ function makeContext(fetchImpl, initialStorage = {}) {
     "kube-agents-web-console-mark": "4",
   });
   pollCalls = [];
-  await vm.runInContext("settleAfterReply('again', 'pods are healthy', 4, undefined)", ctx);
+  await vm.runInContext("settleAfterReply('a', 'ra', 4, undefined)", ctx);
+  await vm.runInContext("settleAfterReply('b', 'rb', 6, undefined)", ctx);
   await vm.runInContext("pollMessages()", ctx);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "10", "poll after failed settle must advance mark past turn and post-reply update");
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "10");
   assert.equal(
     JSON.stringify(ctx.appended),
     JSON.stringify([{ role: "agent", text: "delegated result after outage", tag: "update" }]),
-    "poll after failed settle must not replay turn reply and must show post-reply update"
+    "two failed settles followed by poll must not replay either turn reply"
   );
+
+  let callCount = 0;
+  const ctx2 = makeContext(async (url) => {
+    if (!String(url).includes("/messages")) {
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    }
+    callCount++;
+    if (callCount === 1) {
+      return { ok: false, status: 502, text: async () => "bad gateway" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 9,
+        messages: [
+          { id: 5, role: "user", content: "a" },
+          { id: 6, role: "assistant", content: "ra" },
+          { id: 7, role: "user", content: "b" },
+          { id: 8, role: "assistant", content: "checking..." },
+          { id: 9, role: "assistant", content: "rb" },
+        ],
+      }),
+    };
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  callCount = 0;
+  await vm.runInContext("settleAfterReply('a', 'ra', 4, undefined)", ctx2);
+  await vm.runInContext("settleAfterReply('b', 'rb', 6, 9)", ctx2);
+  assert.equal(ctx2.store.get("kube-agents-web-console-mark"), "9");
+  assert.deepEqual(ctx2.appended, [], "settling pending turn A before turn B must not replay B's working note or reply");
 }
 
 // Case 2: pre-turn result, two mid-turn wakes (with intermediate assistant rows
 // on the typed turn), and a post-reply result, even when replyId points at the
-// post-reply wake row (id 16) rather than the turn's own reply row (id 14).
+// post-reply wake row (id 16) rather than the turn's own reply row (id 14),
+// plus an empty-reply turn with a mid-turn wake.
 {
   let settleReady = false;
   const messages = [
@@ -803,15 +927,45 @@ function makeContext(fetchImpl, initialStorage = {}) {
     "all delegated results (pre-turn, both mid-turn wakes, post-reply) must be shown once"
   );
   assert.equal(ctx.store.get("kube-agents-web-console-mark"), "16");
+
+  // Empty final reply (row 11 filtered out of /messages) with a mid-turn wake at row 10.
+  const emptyReplyCtx = makeContext(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      latest_id: 11,
+      messages: [
+        { id: 7, role: "user", content: "check" },
+        { id: 8, role: "assistant", content: "working note" },
+        { id: 9, role: "user", content: "[kanban] card done" },
+        { id: 10, role: "assistant", content: "wake result on empty-reply turn" },
+      ],
+    }),
+  }), {
+    "kube-agents-web-console-session": "web-console-" + "b".repeat(32),
+    "kube-agents-web-console-mark": "6",
+  });
+  await vm.runInContext("settleAfterReply('check', '', 6, 11)", emptyReplyCtx);
+  assert.equal(
+    JSON.stringify(emptyReplyCtx.appended),
+    JSON.stringify([{ role: "agent", text: "wake result on empty-reply turn", tag: "update" }]),
+    "mid-turn wake on an empty-reply turn must be shown once"
+  );
+  assert.equal(emptyReplyCtx.store.get("kube-agents-web-console-mark"), "11");
 }
 
 // Case 3: renderMarkdown handles column-0 fences, indented list fences,
-// indented closers, four-backtick fences, mid-line backticks, and double-backtick
-// inline code spans quoting a single backtick.
+// indented closers, four-backtick fences, empty fenced blocks, mid-line
+// backticks, double-backtick inline code spans quoting a single backtick,
+// and literal **bold** markers inside inline code spans.
 {
   const ctx = makeContext(async () => ({ ok: false, status: 503, text: async () => "" }));
   const fenced = vm.runInContext("renderMarkdown('Before\\n\\x60\\x60\\x60yaml\\nkind: Pod\\n\\x60\\x60\\x60\\nAfter')", ctx);
   assert.equal(fenced, "<p>Before</p><pre><code>kind: Pod</code></pre><p>After</p>");
+  const emptyFence = vm.runInContext("renderMarkdown('Run:\\n\\x60\\x60\\x60\\n\\x60\\x60\\x60\\nThen apply.')", ctx);
+  assert.equal(emptyFence, "<p>Run:</p><pre><code></code></pre><p>Then apply.</p>");
+  const codeWithStars = vm.runInContext("renderMarkdown('Pass \\x60**kwargs\\x60 to **func**.')", ctx);
+  assert.equal(codeWithStars, "<p>Pass <code>**kwargs</code> to <strong>func</strong>.</p>");
   const indentedListFence = vm.runInContext(
     "renderMarkdown('- Apply:\\n  \\x60\\x60\\x60yaml\\n  kind: Pod\\n\\n  spec: {}\\n  \\x60\\x60\\x60\\n- Done')",
     ctx
@@ -843,9 +997,9 @@ function makeContext(fetchImpl, initialStorage = {}) {
   assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
 }
 
-// Case 4: first turn on a fresh tab mints the session and sets markKnown=true
-// before the request, so a 504 timeout or a dropped connection preserves the
-// session and displays the late reply on the next poll.
+// Case 4: first turn on a fresh tab mints the session and sets the mark to 0
+// before the request, so a dropped connection preserves the session and
+// displays the late reply on the next poll.
 {
   let chatSessionId = "";
   const ctx = makeContext(async (url, opts) => {
