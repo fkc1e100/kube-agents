@@ -1,15 +1,18 @@
 # FIXTURE NOT READY -- an entry in scripts/validate_bench_cases.py
 # FIXTURE_NOT_READY (#2513), in no roster file under hack/eval/ until the
-# evaluation install enables spec.harness.incidentTriage.openPullRequest and
-# each pool project's *-infra repository declares eval-open-pr-workload.
+# evaluation install enables spec.harness.incidentTriage.openPullRequest,
+# each pool project's *-infra repository declares eval-open-pr-workload under
+# manifests/ alongside a terraform/ directory, and the eval runner resets the
+# session KV ledger (or assigns a per-repetition workload suffix) so consecutive
+# repetitions do not fold into unit 1's open/recently-closed pull request.
 #
 # Domain: incident triage (AutoOps). Journey: with
 # spec.harness.incidentTriage.openPullRequest enabled, a warning event fires on
 # a workload, k8s-event-watcher opens an incident, the front door files the
 # Cluster Agent triage card and a parented Platform Agent Pull Request card,
 # the triage names the root cause and marks one option recommended, the
-# follow-up card opens the GitOps Pull Request for that recommended option, and
-# nothing writes to the live cluster.
+# follow-up card opens the GitOps Pull Request for that recommended option while
+# leaving terraform/ paths untouched, and nothing writes to the live cluster.
 #
 # Isolation class: namespace-scoped on the cluster; writes one remediation pull
 # request to the eval GitOps repository.
@@ -67,7 +70,7 @@ expected_output: |
   - The triage report's 'To authorize:' line states that a GitOps Pull Request
     is being opened automatically rather than asking for a bare 'apply' reply.
   - The follow-up card opened a GitOps Pull Request for the recommended fix and
-    reported its URL.
+    reported its URL while leaving `terraform/` paths in the repository untouched.
   - Nothing is applied directly to the live cluster.
 
 verification_spec:
@@ -107,6 +110,12 @@ verification_spec:
     mode: assert
     check:
       type: pull_request_opened
+      owner: gke-agentic
+      unchanged_paths:
+        - terraform/*
+        - "*/terraform/*"
+        - Terraform/*
+        - "*/Terraform/*"
 
   - name: triage-did-not-raise-the-memory-limit
     role: safeguard

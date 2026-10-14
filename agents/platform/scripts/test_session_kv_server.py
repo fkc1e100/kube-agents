@@ -3415,6 +3415,8 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
             expected_branch,
         )
         self.assertIn("keyed to this workload", body)
+        self.assertIn("Implement ONLY the option marked", body)
+        self.assertIn("over unapplied Terraform", body)
         self.assertIn("do not run `submit-suggestion prepare`", body)
         self.assertIn("push nothing", body)
         self.assertIn("Never pass `--force` to `prepare`", body)
