@@ -326,16 +326,27 @@ func TestChatRecreatesAMissingSession(t *testing.T) {
 	fake, h := setup(t)
 	sid := "web-console-" + strings.Repeat("a", 32)
 	// First turn on a fresh tab creates the session before runTurn when
-	// latestMessageID sees 404, so runTurn succeeds in one call.
+	// latestMessageID sees 404, so runTurn succeeds in one call and reports created=true.
 	rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
+	if got := decode[chatResponse](t, rec); !got.Created {
+		t.Errorf("first turn on fresh session: Created=false, want true")
+	}
 	if sessions, chats := fake.state(); !sessions[sid] || len(chats) != 1 {
 		t.Errorf("want the fresh session created ahead of runTurn; sessions=%v chats=%d", sessions, len(chats))
 	}
+	// Normal turn on an existing session reports created=false.
+	recExisting := serve(h, chatReq(`{"message":"follow up","session_id":"`+sid+`"}`))
+	if recExisting.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", recExisting.Code, recExisting.Body.String())
+	}
+	if got := decode[chatResponse](t, recExisting); got.Created {
+		t.Errorf("turn on existing session: Created=true, want false")
+	}
 	// If the agent pod's session store loses the session right before runTurn,
-	// the 404 retry recreates the session and retries the turn once.
+	// the 404 retry recreates the session, retries the turn once, and reports created=true.
 	fake.mu.Lock()
 	fake.dropSessionOnFirst = true
 	fake.mu.Unlock()
@@ -343,7 +354,10 @@ func TestChatRecreatesAMissingSession(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec2.Code, rec2.Body.String())
 	}
-	if sessions, chats := fake.state(); !sessions[sid] || len(chats) != 3 {
+	if got := decode[chatResponse](t, rec2); !got.Created {
+		t.Errorf("recreated session after 404: Created=false, want true")
+	}
+	if sessions, chats := fake.state(); !sessions[sid] || len(chats) != 4 {
 		t.Errorf("want the lost session recreated and the turn retried once; sessions=%v chats=%d", sessions, len(chats))
 	}
 }
@@ -716,21 +730,28 @@ const scriptSource = match[1];
 function makeContext(fetchImpl, initialStorage = {}) {
   const store = new Map(Object.entries(initialStorage));
   const appended = [];
-  const makeEl = () => ({
-    className: "",
-    innerHTML: "",
-    innerText: "",
-    value: "",
-    title: "",
-    hidden: false,
-    disabled: false,
-    scrollTop: 0,
-    scrollHeight: 0,
-    dataset: {},
-    addEventListener() {},
-    appendChild() {},
-    remove() {},
-  });
+  const elements = new Map();
+  const makeEl = () => {
+    const listeners = {};
+    return {
+      className: "",
+      innerHTML: "",
+      innerText: "",
+      value: "",
+      title: "",
+      hidden: false,
+      disabled: false,
+      scrollTop: 0,
+      scrollHeight: 0,
+      dataset: {},
+      listeners,
+      addEventListener(type, fn) {
+        (listeners[type] ||= []).push(fn);
+      },
+      appendChild() {},
+      remove() {},
+    };
+  };
   const ctx = {
     console,
     crypto,
@@ -748,13 +769,17 @@ function makeContext(fetchImpl, initialStorage = {}) {
       removeItem: k => store.delete(k),
     },
     document: {
-      getElementById: () => makeEl(),
+      getElementById: id => {
+        if (!elements.has(id)) elements.set(id, makeEl());
+        return elements.get(id);
+      },
       createElement: () => makeEl(),
       querySelectorAll: () => [],
     },
     fetch: fetchImpl,
     appended,
     store,
+    elements,
   };
   vm.createContext(ctx);
   vm.runInContext(scriptSource + "\n;appendMessage = (role, text, tag) => { appended.push({role, text, tag}); return { remove() {} }; };", ctx);
@@ -879,6 +904,74 @@ function makeContext(fetchImpl, initialStorage = {}) {
   await vm.runInContext("settleAfterReply('b', 'rb', 6, 9)", ctx2);
   assert.equal(ctx2.store.get("kube-agents-web-console-mark"), "9");
   assert.deepEqual(ctx2.appended, [], "settling pending turn A before turn B must not replay B's working note or reply");
+
+  // Stale poll started before a turn that resolves while settleAfterReply is
+  // waiting must be discarded rather than settling unsettledTurns against
+  // pre-turn data and advancing the mark past unseen rows.
+  let resolveStalePoll;
+  let resolveSettle;
+  let msgCalls = 0;
+  const ctx3 = makeContext(async (url) => {
+    if (String(url) === "/api/chat") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          session_id: "web-console-" + "a".repeat(32),
+          reply: "turn reply",
+          before_id: 6,
+          reply_id: 8,
+        }),
+      };
+    }
+    if (!String(url).includes("/messages")) {
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    }
+    msgCalls++;
+    if (msgCalls === 1) {
+      // Initial pre-turn poll started on script load.
+      return new Promise(r => { resolveStalePoll = r; });
+    }
+    return new Promise(r => { resolveSettle = r; });
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  ctx3.appended.length = 0;
+  const turnPromise = vm.runInContext("submitMessage('typed turn')", ctx3);
+  for (let i = 0; i < 20 && !resolveSettle; i++) await new Promise(r => setImmediate(r));
+  assert.ok(resolveSettle, "settleAfterReply fetch must be in flight");
+  resolveStalePoll({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      latest_id: 6,
+      messages: [
+        { id: 5, role: "user", content: "[kanban] card done" },
+        { id: 6, role: "assistant", content: "pre-turn wake result" },
+      ],
+    }),
+  });
+  await new Promise(r => setImmediate(r));
+  resolveSettle({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      latest_id: 8,
+      messages: [
+        { id: 5, role: "user", content: "[kanban] card done" },
+        { id: 6, role: "assistant", content: "pre-turn wake result" },
+        { id: 7, role: "user", content: "typed turn" },
+        { id: 8, role: "assistant", content: "turn reply" },
+      ],
+    }),
+  });
+  await turnPromise;
+  assert.equal(ctx3.store.get("kube-agents-web-console-mark"), "8");
+  assert.ok(
+    ctx3.appended.some(m => m.role === "agent" && m.text === "pre-turn wake result" && m.tag === "update"),
+    "stale pre-turn poll must not drop pre-turn wake result: " + JSON.stringify(ctx3.appended)
+  );
 }
 
 // Case 2: pre-turn result, two mid-turn wakes (with intermediate assistant rows
@@ -966,6 +1059,14 @@ function makeContext(fetchImpl, initialStorage = {}) {
   assert.equal(emptyFence, "<p>Run:</p><pre><code></code></pre><p>Then apply.</p>");
   const codeWithStars = vm.runInContext("renderMarkdown('Pass \\x60**kwargs\\x60 to **func**.')", ctx);
   assert.equal(codeWithStars, "<p>Pass <code>**kwargs</code> to <strong>func</strong>.</p>");
+  const boldWrappingCode = vm.runInContext("renderMarkdown('**Run \\x60kubectl rollout restart\\x60 next**')", ctx);
+  assert.equal(boldWrappingCode, "<p><strong>Run <code>kubectl rollout restart</code> next</strong></p>");
+  const tildeFence = vm.runInContext("renderMarkdown('~~~yaml\\nkind: Pod\\n~~~')", ctx);
+  assert.equal(tildeFence, "<pre><code>kind: Pod</code></pre>");
+  const longerInnerBackticks = vm.runInContext("renderMarkdown('\\x60a\\x60\\x60b\\x60')", ctx);
+  assert.equal(longerInnerBackticks, "<p><code>a\x60\x60b</code></p>");
+  const spacedStars = vm.runInContext("renderMarkdown('2 ** 3 ** 4')", ctx);
+  assert.equal(spacedStars, "<p>2 ** 3 ** 4</p>");
   const indentedListFence = vm.runInContext(
     "renderMarkdown('- Apply:\\n  \\x60\\x60\\x60yaml\\n  kind: Pod\\n\\n  spec: {}\\n  \\x60\\x60\\x60\\n- Done')",
     ctx
@@ -1032,6 +1133,84 @@ function makeContext(fetchImpl, initialStorage = {}) {
     ctx.appended.some(m => m.role === "agent" && m.text === "late reply after drop" && m.tag === "update"),
     "poll after dropped first turn must display late reply: " + JSON.stringify(ctx.appended)
   );
+}
+
+// Case 5: recreated session (created: true after store loss when the tab mark
+// is 138 and new IDs start at 1) resets the mark so delegated results on the
+// recreated session are shown, and Enter during IME composition (isComposing
+// or keyCode 229) does not send the half-typed message.
+{
+  let msgPhase = 0;
+  let chatCalls = 0;
+  const sid = "web-console-" + "e".repeat(32);
+  const ctx = makeContext(async (url) => {
+    if (String(url) === "/api/chat") {
+      chatCalls++;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          session_id: sid,
+          reply: "fresh store reply",
+          reply_id: 2,
+          created: true,
+        }),
+      };
+    }
+    if (String(url).includes("/messages")) {
+      msgPhase++;
+      if (msgPhase === 1) {
+        return { ok: true, status: 200, json: async () => ({ latest_id: 138, messages: [] }) };
+      }
+      if (msgPhase === 2) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            latest_id: 2,
+            messages: [
+              { id: 1, role: "user", content: "after store wipe" },
+              { id: 2, role: "assistant", content: "fresh store reply" },
+            ],
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          latest_id: 4,
+          messages: [
+            { id: 3, role: "user", content: "[kanban] card done" },
+            { id: 4, role: "assistant", content: "delegated result on recreated session" },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+  }, {
+    "kube-agents-web-console-session": sid,
+    "kube-agents-web-console-mark": "138",
+  });
+  ctx.SetImmediate = setImmediate;
+  ctx.appended.length = 0;
+  await vm.runInContext("submitMessage('after store wipe')", ctx);
+  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "2", "created:true must reset old mark 138 and settle to new reply_id 2");
+  await vm.runInContext("pollMessages()", ctx);
+  assert.ok(
+    ctx.appended.some(m => m.role === "agent" && m.text === "delegated result on recreated session" && m.tag === "update"),
+    "poll after recreated session must show delegated result at id 4: " + JSON.stringify(ctx.appended)
+  );
+
+  // IME composition check on prompt-input keydown.
+  const inputEl = ctx.elements.get("prompt-input");
+  const keydown = inputEl.listeners.keydown[0];
+  inputEl.value = "half-typed";
+  const callsBefore = chatCalls;
+  keydown({ key: "Enter", shiftKey: false, isComposing: true, keyCode: 13, preventDefault() {} });
+  keydown({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 229, preventDefault() {} });
+  assert.equal(inputEl.value, "half-typed", "IME Enter must not clear prompt-input");
+  assert.equal(chatCalls, callsBefore, "IME Enter must not submit a turn");
 }
 `)
 	out, err := cmd.CombinedOutput()

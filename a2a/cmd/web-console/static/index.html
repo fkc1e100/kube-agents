@@ -607,6 +607,7 @@
 
       let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
       let turnInFlight = false;
+      let turnSeq = 0;
       let pollInFlight = false;
       let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
       let unsettledTurns = [];
@@ -662,13 +663,16 @@
 
       // Periodic poll between turns. When an earlier turn's post-turn settle
       // fetch failed, the first successful poll settles pending turns in order
-      // instead of replaying their replies as updates.
+      // instead of replaying their replies as updates. A poll that was already
+      // in flight when a turn started is discarded so stale pre-turn data never
+      // settles the turn.
       async function pollMessages() {
         if (!currentSessionId || turnInFlight || pollInFlight) return;
+        const seq = turnSeq;
         pollInFlight = true;
         try {
           const data = await fetchNewMessages();
-          if (!data) return;
+          if (!data || turnInFlight || seq !== turnSeq) return;
           if (unsettledTurns.length > 0) {
             settlePendingTurns(data);
             return;
@@ -714,7 +718,12 @@
               replyAt = i;
           });
         }
-        if (hasReplyText && replyAt < 0 && typeof replyId === "number" && replyId > 0) {
+        if (
+          hasReplyText &&
+          replyAt < 0 &&
+          typeof replyId === "number" &&
+          replyId > 0
+        ) {
           replyAt = messages.findIndex(
             (m, i) => i > turnAt && m.id === replyId,
           );
@@ -837,11 +846,33 @@
       }
 
       // Inline formatting for text outside code fences. Matches equal-length
-      // backtick delimiter runs so double-backtick spans can quote a backtick,
-      // and applies bold formatting only outside emitted <code>...</code> spans.
-      function renderInline(text) {
-        let html = escapeHtml(text);
-        html = html.replace(/(`+)((?:(?!\1)[^\n])+)\1/g, (_, ticks, inner) => {
+      // backtick delimiter runs so double-backtick spans can quote a backtick
+      // and single-backtick spans can hold a longer backtick run, and replaces
+      // emitted <code>...</code> spans with placeholders before applying bold
+      // formatting so bold can wrap a code span without matching inside one.
+      function replaceCodeSpans(line, codes) {
+        const runs = [];
+        const re = /`+/g;
+        let m;
+        while ((m = re.exec(line)) !== null) {
+          runs.push({ start: m.index, end: re.lastIndex, len: m[0].length });
+        }
+        if (runs.length < 2) return line;
+        let out = "";
+        let cursor = 0;
+        for (let i = 0; i < runs.length; i++) {
+          const open = runs[i];
+          let closeIdx = -1;
+          for (let j = i + 1; j < runs.length; j++) {
+            if (runs[j].len === open.len) {
+              closeIdx = j;
+              break;
+            }
+          }
+          if (closeIdx < 0) continue;
+          const close = runs[closeIdx];
+          out += line.slice(cursor, open.start);
+          const inner = line.slice(open.end, close.start);
           const code =
             inner.length >= 2 &&
             inner.startsWith(" ") &&
@@ -849,41 +880,61 @@
             inner.trim().length > 0
               ? inner.slice(1, -1)
               : inner;
-          return `<code>${code}</code>`;
-        });
-        html = html
-          .split(/(<code>[\s\S]*?<\/code>)/g)
-          .map((part) =>
-            part.startsWith("<code>")
-              ? part
-              : part.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>"),
-          )
-          .join("");
+          const idx = codes.length;
+          codes.push(`<code>${code}</code>`);
+          out += `\x00CODE${idx}\x00`;
+          cursor = close.end;
+          i = closeIdx;
+        }
+        out += line.slice(cursor);
+        return out;
+      }
+
+      function renderInline(text) {
+        const codes = [];
+        let html = escapeHtml(String(text).replace(/\x00/g, ""))
+          .split("\n")
+          .map((line) => replaceCodeSpans(line, codes))
+          .join("\n");
+        html = html.replace(
+          /(?<!\*)\*\*(?![\s*])((?:[^\n*]|\*(?!\*))+?)(?<![\s*])\*\*(?!\*)/g,
+          "<strong>$1</strong>",
+        );
+        html = html.replace(
+          /\x00CODE(\d+)\x00/g,
+          (_, idx) => codes[Number(idx)],
+        );
         return html
           .split(/\n{2,}/)
           .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
           .join("");
       }
 
-      // Splits on line-opening backtick fences (three or more backticks,
-      // optionally indented inside a list item) first, so code keeps its blank
-      // lines and is never run through the inline rules; mid-line backticks
-      // stay in the surrounding prose, and the info string after the opening
-      // fence (```yaml) is dropped rather than rendered as the first line.
+      // Splits on line-opening backtick or tilde fences (three or more matching
+      // fence characters, optionally indented inside a list item) first, so
+      // code keeps its blank lines and is never run through the inline rules;
+      // mid-line backticks stay in the surrounding prose, and the info string
+      // after the opening fence (```yaml) is dropped rather than rendered as
+      // the first line.
       function renderMarkdown(text) {
         if (!text) return "";
         let html = "";
         let pos = 0;
-        const openRe = /(?:^|\n)([ ]*)(`{3,})([^\n`]*)\n/g;
+        const openRe = /(?:^|\n)([ ]*)(`{3,}|~{3,})([^\n]*)\n/g;
         let openMatch;
         while ((openMatch = openRe.exec(text)) !== null) {
           if (openMatch.index < pos) continue;
+          const fenceChar = openMatch[2][0];
+          if (fenceChar === "`" && openMatch[3].includes("`")) continue;
           const before = text.slice(pos, openMatch.index);
           if (before.trim()) html += renderInline(before.trim());
           const indent = openMatch[1].length;
           const fenceLen = openMatch[2].length;
           const startCode = openRe.lastIndex;
-          const closeRe = new RegExp(`^[ ]*(\`{${fenceLen},}) *(?=\\n|$)`, "gm");
+          const closeRe = new RegExp(
+            `^[ ]*(${fenceChar}{${fenceLen},}) *(?=\\n|$)`,
+            "gm",
+          );
           closeRe.lastIndex = startCode;
           const closeMatch = closeRe.exec(text);
           let codeText = "";
@@ -937,6 +988,7 @@
       }
 
       function setBusy(busy) {
+        if (busy) turnSeq++;
         turnInFlight = busy;
         document.getElementById("btn-send").disabled = busy;
         document.querySelectorAll(".chip").forEach((c) => {
@@ -980,6 +1032,9 @@
           const data = await readBody(resp);
           pending.remove();
           if (resp.ok) {
+            if (data.created) {
+              initNewSession(currentSessionId);
+            }
             appendMessage(
               "agent",
               data.reply || "(The agent returned an empty reply.)",
@@ -1109,7 +1164,12 @@
       document
         .getElementById("prompt-input")
         .addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
+          if (
+            e.key === "Enter" &&
+            !e.shiftKey &&
+            !e.isComposing &&
+            e.keyCode !== 229
+          ) {
             e.preventDefault();
             sendFromInput();
           }

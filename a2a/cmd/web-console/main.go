@@ -462,6 +462,7 @@ type chatResponse struct {
 	Reply     string `json:"reply"`
 	BeforeID  int64  `json:"before_id,omitempty"`
 	ReplyID   int64  `json:"reply_id,omitempty"`
+	Created   bool   `json:"created,omitempty"`
 }
 
 func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -494,12 +495,14 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(sid)
 
+	created := false
 	beforeID, exists := s.latestMessageID(r.Context(), sid)
 	if !exists {
 		if err := s.createSession(r.Context(), sid); err != nil {
 			writeError(w, http.StatusBadGateway, "session_create_failed", err.Error())
 			return
 		}
+		created = true
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
@@ -513,6 +516,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "session_create_failed", createErr.Error())
 			return
 		}
+		created = true
 		reply, err = s.runTurn(ctx, sid, msg)
 	}
 	if err != nil {
@@ -530,7 +534,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	replyID := s.replyMessageID(r.Context(), sid, beforeID, reply)
-	writeJSON(w, http.StatusOK, chatResponse{SessionID: sid, Reply: reply, BeforeID: beforeID, ReplyID: replyID})
+	writeJSON(w, http.StatusOK, chatResponse{SessionID: sid, Reply: reply, BeforeID: beforeID, ReplyID: replyID, Created: created})
 }
 
 // latestMessageID reads the session's newest message row ID, or 0 when the

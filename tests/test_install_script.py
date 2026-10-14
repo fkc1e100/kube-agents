@@ -60,6 +60,24 @@ _SOURCE_INSTALLER_COMMON = f'source "{_INSTALLER_COMMON}"; '
 # bound turns that into a failure with output, not a hang.
 _INSTALLER_RUN_TIMEOUT_SECONDS = 60
 
+_SEEDED_INSTALLER_ENV_KEYS = (
+    "ACCEPT_NO_NETWORK_POLICY",
+    "ENABLE_NETWORK_POLICY",
+    "MIGRATE_NODE_POOLS",
+    "GOOGLE_CHAT_ENABLED",
+    "SLACK_ENABLED",
+    "ENABLE_GKE_BACKUP_PLAN",
+    "ENABLE_PUBSUB_PLATFORM",
+    "ENABLE_STOCKOUT_INVESTIGATOR",
+    "ENABLE_DRIFT_DETECTOR",
+    "WEB_CONSOLE_ENABLED",
+    "LITELLM_REDACTION_ENABLED",
+    "LITELLM_REDACTION_IP_ACTION",
+    "LITELLM_REDACTION_IP_ALLOW_CIDRS",
+    "LITELLM_REDACTION_RULES",
+    "SCOPED_SA_POOL_ENABLED",
+)
+
 
 def _run_installer_bash(body, env, cwd=_REPO_ROOT):
     """Run a bash body that sources install.sh, detached from any terminal.
@@ -117,12 +135,7 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
         full_env = get_isolated_test_env(
             overrides=overrides,
             bin_dir=bin_dir,
-            absent=(
-                "ACCEPT_NO_NETWORK_POLICY",
-                "ENABLE_NETWORK_POLICY",
-                "MIGRATE_NODE_POOLS",
-                "WEB_CONSOLE_ENABLED",
-            ),
+            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         return _run_installer_bash(setup, full_env, cwd=cwd or _REPO_ROOT)
 
@@ -5339,17 +5352,10 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
 
     @staticmethod
     def _env(overrides):
-        env = get_isolated_test_env(overrides=overrides)
-        for key in (
-            "LITELLM_REDACTION_ENABLED",
-            "LITELLM_REDACTION_IP_ACTION",
-            "LITELLM_REDACTION_IP_ALLOW_CIDRS",
-            "LITELLM_REDACTION_RULES",
-            "WEB_CONSOLE_ENABLED",
-        ):
-            env.pop(key, None)
-        env.update(overrides)
-        return env
+        return get_isolated_test_env(
+            overrides=overrides,
+            absent=_SEEDED_INSTALLER_ENV_KEYS,
+        )
 
     def test_the_first_run_records_the_export_and_the_next_run_reads_it_back(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -9037,11 +9043,10 @@ def _env_without_ambient_drift_keys(overrides=None, asked_for=None):
     turns on whose machine is running. Dropped unless the caller asked for
     them, in which case the caller's value is the point of the test.
     """
-    env = get_isolated_test_env(overrides=overrides)
-    for key in ("ENABLE_DRIFT_DETECTOR", "TF_VAR_enable_drift_pubsub"):
-        if key not in (asked_for or {}):
-            env.pop(key, None)
-    return env
+    return get_isolated_test_env(
+        overrides=overrides,
+        absent=_SEEDED_INSTALLER_ENV_KEYS + ("TF_VAR_enable_drift_pubsub",),
+    )
 
 
 class DomainScopedFlagsTest(unittest.TestCase):
@@ -10928,6 +10933,12 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         "--scoped-sa-pool-enabled",
     ]
 
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self._empty_install_env = pathlib.Path(tmp.name) / "install.env"
+        self._empty_install_env.write_text("")
+
     def _parse_args(self, *args, **env_overrides):
         """Run parse_args with these arguments, under these environment keys."""
         quoted = " ".join(shlex.quote(a) for a in args)
@@ -10936,8 +10947,12 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
             f"parse_args {quoted}\n"
             'echo "PASSED"\n'
         )
-        env = get_isolated_test_env()
-        env.update(env_overrides)
+        overrides = {"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}
+        overrides.update(env_overrides)
+        env = get_isolated_test_env(
+            overrides=overrides,
+            absent=_SEEDED_INSTALLER_ENV_KEYS,
+        )
         return subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
@@ -10995,8 +11010,13 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                         "validate_existing_cluster_opt_in_flags\n"
                         'echo "PASSED"\n'
                     )
-                    env = get_isolated_test_env()
-                    env[key] = value
+                    env = get_isolated_test_env(
+                        overrides={
+                            "KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env),
+                            key: value,
+                        },
+                        absent=_SEEDED_INSTALLER_ENV_KEYS,
+                    )
                     proc = subprocess.run(
                         ["bash", "-c", script],
                         capture_output=True,
