@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
@@ -1100,14 +1101,35 @@ class TestWorkloadWindow(unittest.TestCase):
     @patch.object(session_kv_server, "_start_agent_turn", return_value=True)
     @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
     @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
-    def test_an_install_without_a_chat_platform_still_folds(self, mock_post, mock_session, mock_turn):
-        """The real troubleshooter path on an install whose chat post never succeeds."""
+    def test_a_failed_chat_post_still_folds(self, mock_post, mock_session, mock_turn):
+        """The real troubleshooter path on an install whose chat post fails."""
         os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
         first = self._inject("k8s-evt-nochat-1", name="nochat-api-7d9f8b6c4-aaaaa")
         self.assertEqual(first.json()["status"], "injected")
         rows = self._rows("nochat-api")
         self.assertEqual(rows[0][1], 0, "the failed chat post cleared notified")
         second = self._inject("k8s-evt-nochat-2", name="nochat-api-7d9f8b6c4-bbbbb")
+        self.assertEqual(second.json(), {"status": "folded", "duplicate_of": str(rows[0][0])})
+        self.assertEqual(mock_turn.call_count, 1)
+
+    @patch.object(session_kv_server, "_start_agent_turn", return_value=True)
+    @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
+    @patch.object(session_kv_server, "_chat_platforms_disabled", return_value=True)
+    @patch.object(
+        session_kv_server,
+        "enabled_chat_platforms",
+        return_value=[session_kv_server.DEFAULT_CHAT_PLATFORM],
+    )
+    def test_an_install_without_a_chat_platform_still_folds(
+        self, _mock_platforms, _mock_disabled, _mock_session, mock_turn
+    ):
+        """On a headless install (`notified = NOTIFIED_HEADLESS = 2`), sibling events still fold."""
+        os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
+        first = self._inject("k8s-evt-headless-1", name="headless-api-7d9f8b6c4-aaaaa")
+        self.assertEqual(first.json()["status"], "injected")
+        rows = self._rows("headless-api")
+        self.assertEqual(rows[0][1], session_kv_server.NOTIFIED_HEADLESS)
+        second = self._inject("k8s-evt-headless-2", name="headless-api-7d9f8b6c4-bbbbb")
         self.assertEqual(second.json(), {"status": "folded", "duplicate_of": str(rows[0][0])})
         self.assertEqual(mock_turn.call_count, 1)
 
@@ -1129,17 +1151,22 @@ class TestWorkloadWindow(unittest.TestCase):
             [session_kv_server.TRIAGE_ABORTED_SENTINEL, 0],
         )
 
-    @patch.object(session_kv_server, "_start_agent_turn", side_effect=[False, True])
     @patch.object(session_kv_server, "_create_gateway_session", return_value=True)
     @patch.object(session_kv_server, "_post_initial_alert", return_value=None)
-    def test_a_failed_start_agent_turn_does_not_anchor_the_window(self, mock_post, mock_session, mock_turn):
+    def test_a_failed_start_agent_turn_does_not_anchor_the_window(self, mock_post, mock_session):
         """If _start_agent_turn fails before starting the turn, the next sibling replica must run."""
         os.environ[session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV] = self.WINDOW
-        first = self._inject("k8s-evt-abort-turn-1", name="abortturn-api-7d9f8b6c4-aaaaa")
-        self.assertEqual(first.json()["status"], "injected")
-        second = self._inject("k8s-evt-abort-turn-2", name="abortturn-api-7d9f8b6c4-bbbbb")
-        self.assertEqual(second.json()["status"], "injected")
-        self.assertEqual(mock_turn.call_count, 2)
+        ok_cm = MagicMock()
+        ok_cm.__enter__.return_value = MagicMock(status=200)
+        with patch(
+            "session_kv_server.urllib.request.urlopen",
+            side_effect=[urllib.error.URLError(ConnectionRefusedError("refused")), ok_cm],
+        ) as mock_urlopen:
+            first = self._inject("k8s-evt-abort-turn-1", name="abortturn-api-7d9f8b6c4-aaaaa")
+            self.assertEqual(first.json()["status"], "injected")
+            second = self._inject("k8s-evt-abort-turn-2", name="abortturn-api-7d9f8b6c4-bbbbb")
+            self.assertEqual(second.json()["status"], "injected")
+            self.assertEqual(mock_urlopen.call_count, 2)
         rows = self._rows("abortturn-api")
         self.assertEqual(
             [row[2] for row in rows],
@@ -3218,6 +3245,38 @@ class TestGatewaySessionBody(unittest.TestCase):
         self.assertTrue(ok)
         body = json.loads(urlopen.call_args[0][0].data.decode("utf-8"))
         self.assertEqual(set(body), {"session_id", "title"})
+
+
+class TestStartAgentTurn(unittest.TestCase):
+
+    def _call(self):
+        return session_kv_server._start_agent_turn(
+            "http://127.0.0.1:8642",
+            "k8s-evt-abc123",
+            "query",
+            {"Content-Type": "application/json"},
+        )
+
+    def test_status_200_and_read_timeout_return_true(self):
+        with patch("session_kv_server.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = MagicMock(status=200)
+            self.assertTrue(self._call())
+        with patch("session_kv_server.urllib.request.urlopen", side_effect=TimeoutError("read timed out")):
+            self.assertTrue(self._call())
+
+    def test_non_200_http_error_and_url_errors_return_false(self):
+        with patch("session_kv_server.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = MagicMock(status=503)
+            self.assertFalse(self._call())
+        for err in (
+            urllib.error.HTTPError("http://127.0.0.1:8642", 500, "err", {}, None),
+            urllib.error.URLError(ConnectionRefusedError("refused")),
+            urllib.error.URLError(TimeoutError("connect timed out")),
+            RuntimeError("unexpected"),
+        ):
+            with self.subTest(err=err):
+                with patch("session_kv_server.urllib.request.urlopen", side_effect=err):
+                    self.assertFalse(self._call())
 
 
 class TestGatewayApiToken(unittest.TestCase):
