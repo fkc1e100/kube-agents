@@ -3147,13 +3147,17 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         body = session_kv_server._triage_pr_task_body(self.PAYLOAD, self.SESSION)
         expected_branch = session_kv_server._incident_branch(self.SESSION, self.PAYLOAD)
         self.assertIn(f"`{expected_branch}`", body)
-        self.assertRegex(
+        self.assertTrue(
+            expected_branch.startswith("platform-agent/incident-prod-us-central1-test-ns-test-pod-"),
             expected_branch,
-            r"^platform-agent/incident-prod-us-central1-test-ns-pod-test-pod-oomkilled-[0-9a-f]{8}$",
         )
+        self.assertIn("keyed to this workload", body)
+        self.assertIn("do not run `submit-suggestion prepare`", body)
+        self.assertIn("push nothing", body)
+        self.assertIn("Never pass `--force` to `prepare`", body)
+        self.assertNotIn("kanban_list", body)
+        self.assertNotIn("in_progress", body)
         self.assertIn("**submit-suggestion**", body)
-        self.assertIn("Never pass `--force` to `prepare` while another `Open GitOps PR` card is `running`", body)
-        self.assertIn("with uncommitted work on branch", body)
         self.assertIn("`kanban_show` this card's parent", body)
         self.assertIn("If the parent card has no report (`result` is empty or its `status` is not `done`)", body)
         self.assertIn("Never change the live cluster directly", body)
@@ -3164,31 +3168,18 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertEqual(first, session_kv_server._incident_branch("k8s-evt-retried9", self.PAYLOAD))
         self.assertRegex(
             first,
-            r"^platform-agent/incident-prod-us-central1-test-ns-pod-test-pod-oomkilled-[0-9a-f]{8}$",
+            r"^platform-agent/incident-prod-us-central1-test-ns-test-pod-[0-9a-f]{8}$",
         )
         fallback = session_kv_server._incident_branch("", self.PAYLOAD)
         self.assertEqual(fallback, first)
-        # Sibling or replaced Deployment pods share the cleaned workload name on the branch.
-        replica_a = {**self.PAYLOAD, "name": "test-pod-6cfdb6b98b-zwv24"}
-        replica_b = {**self.PAYLOAD, "name": "test-pod-6cfdb6b98b-k8m12"}
-        self.assertEqual(
-            session_kv_server._incident_branch(self.SESSION, replica_a),
-            session_kv_server._incident_branch("k8s-evt-other", replica_b),
+        nameless = dict(self.PAYLOAD, name="")
+        self.assertRegex(
+            session_kv_server._incident_branch(self.SESSION, nameless),
+            r"^platform-agent/incident-evt-prod-us-oom-42-[0-9a-f]{8}$",
         )
-        self.assertEqual(session_kv_server._incident_branch(self.SESSION, replica_a), first)
-        # StatefulSet replicas share one branch across ordinals.
-        sts_0 = {**self.PAYLOAD, "name": "cache-0"}
-        sts_1 = {**self.PAYLOAD, "name": "cache-1"}
-        self.assertEqual(
-            session_kv_server._incident_branch(self.SESSION, sts_0),
-            session_kv_server._incident_branch(self.SESSION, sts_1),
-        )
-        # Distinct bare pods ending in 5-character words stay on distinct branches.
-        bare_a = {**self.PAYLOAD, "name": "redis-cache"}
-        bare_b = {**self.PAYLOAD, "name": "redis-proxy"}
-        self.assertNotEqual(
-            session_kv_server._incident_branch(self.SESSION, bare_a),
-            session_kv_server._incident_branch(self.SESSION, bare_b),
+        self.assertRegex(
+            session_kv_server._incident_branch("", nameless),
+            r"^platform-agent/incident-prod-us-central1-test-ns-pod--oomkilled-[0-9a-f]{8}$",
         )
         other = session_kv_server._incident_branch(self.SESSION, {**self.PAYLOAD, "name": "other-pod"})
         self.assertNotEqual(first, other)
@@ -3196,8 +3187,11 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertRegex(hostile.removeprefix("platform-agent/incident-"), r"^[a-z0-9-]+$")
 
     def test_the_branch_does_not_collide_across_boundary_shifts_or_punctuation(self):
-        shift_a = dict(self.PAYLOAD, namespace="test", name="ns-pod")
-        shift_b = dict(self.PAYLOAD, namespace="test-ns", name="pod")
+        # `prod` + `payments-api` and `prod-payments` + `api` join to the same
+        # hyphen-separated text, as do `api.v2` and `api-v2` after unsafe-char
+        # normalization. The trailing component digest keeps them distinct.
+        shift_a = dict(self.PAYLOAD, namespace="prod", name="payments-api", kind_of_object="Deployment")
+        shift_b = dict(self.PAYLOAD, namespace="prod-payments", name="api", kind_of_object="Deployment")
         self.assertNotEqual(
             session_kv_server._incident_branch("s1", shift_a),
             session_kv_server._incident_branch("s1", shift_b),
@@ -3209,6 +3203,26 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
             session_kv_server._incident_branch("s1", dash_name),
         )
 
+    def test_every_incident_on_one_workload_shares_the_branch(self):
+        # The watcher opens a new session each time its window lapses on an
+        # unfixed fault, and sibling replicas carry their own pod names. All of
+        # them must land on one branch, so they revise one open pull request.
+        replica_a = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-hn9mm", reason="FailedScheduling")
+        replica_b = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-zxg5p", reason="FailedScheduling")
+        branches = {
+            session_kv_server._incident_branch("k8s-evt-aaaa1111", replica_a),
+            session_kv_server._incident_branch("k8s-evt-bbbb2222", replica_b),
+            session_kv_server._incident_branch("k8s-evt-cccc3333", dict(replica_a, reason="BackOff")),
+        }
+        self.assertEqual(len(branches), 1)
+        (shared_branch,) = branches
+        self.assertRegex(
+            shared_branch,
+            r"^platform-agent/incident-prod-us-central1-test-ns-auth-service-[0-9a-f]{8}$",
+        )
+        other = dict(replica_a, name="checkout-gateway-66d545794c-f9dd5")
+        self.assertNotIn(session_kv_server._incident_branch("k8s-evt-aaaa1111", other), branches)
+
     def test_a_long_key_is_cut_with_a_digest(self):
         from providers import validate as provider_validate
 
@@ -3216,11 +3230,84 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         long_b = dict(self.PAYLOAD, name="w" * 200 + "b", kind_of_object="Deployment")
         full_a = session_kv_server._incident_branch("", long_a)
         full_b = session_kv_server._incident_branch("", long_b)
-        self.assertNotEqual(full_a, full_b)
         self.assertLessEqual(len(full_a), session_kv_server.INCIDENT_BRANCH_MAX_LEN)
         self.assertLessEqual(len(full_b), session_kv_server.INCIDENT_BRANCH_MAX_LEN)
         self.assertEqual(provider_validate.validate_branch(full_a), full_a)
         self.assertEqual(provider_validate.validate_branch(full_b), full_b)
+        a = full_a.removeprefix("platform-agent/incident-")
+        b = full_b.removeprefix("platform-agent/incident-")
+        self.assertLessEqual(len(a), session_kv_server.INCIDENT_BRANCH_KEY_MAX_LEN)
+        self.assertNotEqual(a, b)
+        self.assertRegex(a, r"^[a-z0-9-]+$")
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_open_pull_request_defaults_workload_window_so_concurrent_replicas_fold(self, mock_trigger):
+        # With `openPullRequest: true` and `workloadDedupSeconds` unset/0, the
+        # server still applies a 300s workload window so two replicas of one
+        # Deployment failing together do not start two concurrent PR cards
+        # sharing one branch and scratch working copy.
+        dedup_env = session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV
+        with patch.dict(os.environ, {self.ENV: "true"}, clear=False):
+            os.environ.pop(dedup_env, None)
+            self.assertEqual(
+                session_kv_server._workload_dedup_seconds(),
+                session_kv_server.INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS,
+            )
+            os.environ[dedup_env] = "0"
+            self.assertEqual(
+                session_kv_server._workload_dedup_seconds(),
+                session_kv_server.INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS,
+            )
+            with self.assertLogs(session_kv_server.logger, level="WARNING") as cm:
+                os.environ[dedup_env] = "not-an-int"
+                self.assertEqual(
+                    session_kv_server._workload_dedup_seconds(),
+                    session_kv_server.INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS,
+                )
+            self.assertTrue(any("using the 300s fallback" in line for line in cm.output), cm.output)
+            os.environ[dedup_env] = "120"
+            self.assertEqual(session_kv_server._workload_dedup_seconds(), 120)
+
+            os.environ.pop(dedup_env, None)
+            TestWorkloadWindow.setUp(self)
+            try:
+                os.environ[self.ENV] = "true"
+                first = TestWorkloadWindow._inject(self, "k8s-evt-prdef-1", name="auth-service-67756c6f76-hn9mm")
+                second = TestWorkloadWindow._inject(self, "k8s-evt-prdef-2", name="auth-service-67756c6f76-zxg5p")
+                self.assertEqual(first.json()["status"], "injected")
+                self.assertEqual(second.json()["status"], "folded")
+                self.assertEqual(mock_trigger.call_count, 1)
+            finally:
+                TestWorkloadWindow.tearDown(self)
+
+    @patch.object(session_kv_server, "trigger_agent_troubleshooter")
+    def test_non_folding_kinds_for_one_name_do_not_share_a_branch(self, mock_trigger):
+        # `_recent_delivered_event` keeps a Pod/Deployment incident and an HPA
+        # (or a Job with `controller_ref="Job/..."`) with the same name as
+        # separate incidents. `_incident_branch` includes the non-Pod/Deployment
+        # kind so the two admitted sessions never file PR cards on one branch.
+        with patch.dict(os.environ, {self.ENV: "true"}, clear=False):
+            os.environ.pop(session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, None)
+            TestWorkloadWindow.setUp(self)
+            try:
+                os.environ[self.ENV] = "true"
+                pod_resp = TestWorkloadWindow._inject(
+                    self, "k8s-evt-kind-1", kind_of_object="Pod", name="hpa-branch-api-6cfdb6b98b-zwv24"
+                )
+                hpa_resp = TestWorkloadWindow._inject(
+                    self, "k8s-evt-kind-2", kind_of_object="HorizontalPodAutoscaler", name="hpa-branch-api"
+                )
+                self.assertEqual(pod_resp.json()["status"], "injected")
+                self.assertEqual(hpa_resp.json()["status"], "injected")
+                self.assertEqual(mock_trigger.call_count, 2)
+                pod_payload = mock_trigger.call_args_list[0].args[2]
+                hpa_payload = mock_trigger.call_args_list[1].args[2]
+                pod_branch = session_kv_server._incident_branch("k8s-evt-kind-1", pod_payload)
+                hpa_branch = session_kv_server._incident_branch("k8s-evt-kind-2", hpa_payload)
+                self.assertNotEqual(pod_branch, hpa_branch)
+                self.assertIn("horizontalpodautoscaler", hpa_branch)
+            finally:
+                TestWorkloadWindow.tearDown(self)
 
     def test_drift_records_ignore_the_setting(self):
         drift = {"kind": session_kv_server.INJECT_KIND_DRIFT, "summary": "s"}

@@ -1,10 +1,13 @@
 """platformAgent.harness.incidentTriage reaches the CR only when an install sets it.
 
-The CRD defaults spec.harness.incidentTriage.openPullRequest to false, and the
-operator adds INCIDENT_TRIAGE_OPEN_PULL_REQUEST to the gateway only when it is
-true. The chart's part is to stay out of the way: an install that never set the
-value renders the CR it rendered before, with no incidentTriage block at all,
-and an install that did gets the value it wrote, false included.
+The CRD defaults spec.harness.incidentTriage.openPullRequest to false and
+spec.harness.incidentTriage.workloadDedupSeconds to 0 (which keeps one incident
+per object UID when openPullRequest is false, while the session server applies
+its 300s default window when openPullRequest is true and workloadDedupSeconds
+is unset or 0). The chart's part is to stay out of the way: an install that
+never set the values renders the CR it rendered before, with no incidentTriage
+block at all, and an install that did gets the CR field values it wrote, false
+and 0 included.
 """
 
 import pathlib

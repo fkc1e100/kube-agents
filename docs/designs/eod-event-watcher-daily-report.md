@@ -261,7 +261,8 @@ read-only activity feed (`/v1/intercepted-events`, `/v1/tasks`) is the intended 
 `dispatched_headless` neither prints a `⚠️` failure line nor vetoes the ✅ all-clear / 🟢 header.
 
 Sibling-replica events folded into an earlier workload anchor event (`duplicate_of > 0`, written when
-`INCIDENT_WORKLOAD_DEDUP_SECONDS` is set; see
+the workload deduplication window is active via `INCIDENT_WORKLOAD_DEDUP_SECONDS` or the `300`s
+default under `openPullRequest: true`; see
 [`session_management.md`](../../agents/platform/docs/session_management.md)) also carry
 `notified = 0`, and are skipped before the counts above run: the anchor row was already admitted,
 so a folded sibling is neither a ceiling drop nor a second workload incident.
