@@ -553,10 +553,10 @@ type IncidentTriageSpec struct {
 	// as a pull request against the GitOps repository without waiting for a
 	// human to reply `apply`. The front door files a second card, assigned to
 	// the Platform Agent and parented on the triage card, that opens it on a
-	// branch keyed to the workload, so every incident for a workload whose pull
-	// request is still open revises its pull request rather than opening
-	// another. A human still reviews and merges it, and nothing is written to
-	// the live cluster. Drift records are not affected.
+	// branch keyed to the workload, so a repeat on that workload is folded into
+	// its open pull request's incident rather than opening another, and a
+	// `Critical` escalation revises it. A human still reviews and merges it, and
+	// nothing is written to the live cluster. Drift records are not affected.
 	//
 	// The operator sets INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true on the platform
 	// agent container when this is true, and sets nothing otherwise, so an

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import hmac
 import json
 import os
@@ -13,6 +14,7 @@ import sqlite3
 import subprocess
 import tempfile
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -187,6 +189,35 @@ INCIDENT_PR_BRANCH_PREFIX = "platform-agent/incident-"
 INCIDENT_BRANCH_MAX_LEN = 200
 INCIDENT_BRANCH_KEY_MAX_LEN = INCIDENT_BRANCH_MAX_LEN - len(INCIDENT_PR_BRANCH_PREFIX)
 INCIDENT_BRANCH_DIGEST_LEN = 8
+# With `openPullRequest` on, an event for a workload whose incident branch
+# carries an agent pull request still in review starts no new incident: it is
+# recorded as a duplicate of the workload's last admitted row, as the workload
+# window does, and the watcher is answered "folded". Without this the
+# watcher's rolling window lapses on a fault nobody has fixed yet and each
+# lapse is a fresh triage session, every five minutes for as long as the pull
+# request waits (a workload window of a few minutes does not cover a fault that
+# repeats on a 5-minute back-off, as FailedScheduling does).
+# "In review" is open, or merged or closed within the grace period
+# below: a merged fix takes ArgoCD's sync and a rollout to reach the pods, and
+# the failing pods keep reporting until it does.
+INCIDENT_PR_REVIEW_GRACE_SECONDS = 600
+# How far back the fold looks for the most recent admitted or folded row of the
+# workload, resolving any folded row back to its root admitted row so a
+# long-lived open pull request keeps refreshing its anchor past seven days.
+INCIDENT_PR_ANCHOR_SECONDS = 7 * 24 * 3600
+# The lookup crosses to the sandbox and the forge. The watcher gives the
+# inject call 10 s (injector.go), so the lookup gets less than that, and a
+# slower or failed lookup admits the event as if the check were not there.
+INCIDENT_PR_LOOKUP_TIMEOUT_S = 5
+# Proposals read per branch. The forge's list order is its own, so more than
+# one: a merged pull request listed ahead of the open one that replaced it on
+# the same branch must not hide it.
+INCIDENT_PR_LOOKUP_LIMIT = 5
+INCIDENT_PR_LOOKUP_WORKERS = 2
+_INCIDENT_PR_LOOKUP_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=INCIDENT_PR_LOOKUP_WORKERS, thread_name_prefix="incident-pr-lookup"
+)
+_INCIDENT_PR_LOOKUP_SEMAPHORE = threading.BoundedSemaphore(INCIDENT_PR_LOOKUP_WORKERS)
 # Characters a session id may carry that a branch name should not. Session ids
 # come from the watcher and are already narrow; this keeps the branch to one
 # lowercase path segment whatever a future producer sends.
@@ -1256,10 +1287,12 @@ def record_intercepted_event(
     leaves the row itself unbounded, and the row is what the shared session PVC
     has to hold once a storm is writing one per sighting.
 
-    `duplicate_of` is the id of the admitted row this event was folded into
-    by the workload window (`INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV`), or 0. A
-    duplicate is written with `notified=False`: nothing was sent for it, and
-    the recap must not count it as an alert.
+    `duplicate_of` is the id of the root admitted row this event was folded
+    into by the workload window (`INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV`) or by
+    the open-pull-request in-review check (`INCIDENT_PR_REVIEW_GRACE_SECONDS`),
+    or 0 (and updated to `TRIAGE_ABORTED_SENTINEL = -1` if an admitted anchor's
+    triage turn fails to start). A duplicate is written with `notified=False`:
+    nothing was sent for it, and the recap must not count it as an alert.
     """
     if conn is not None:
         try:
@@ -1347,6 +1380,7 @@ def _recent_delivered_event(
     window_seconds: int,
     object_kind: str = "",
     severity: str = "",
+    include_folded: bool = False,
     conn: Optional[sqlite3.Connection] = None,
 ) -> Optional[int]:
     """The newest admitted ledger row for this workload inside the window, or None.
@@ -1365,12 +1399,17 @@ def _recent_delivered_event(
     A row the ceiling suppressed, the severity gate filtered, the window
     already folded (`duplicate_of > 0`), or whose triage session failed to
     start (`duplicate_of = TRIAGE_ABORTED_SENTINEL`) does not anchor a
-    window of its own — otherwise a workload whose first event was refused or
-    never started a turn would silence its second. Non-watcher rows
-    (`OutOfBandChange`, `ControllerStall`) share `intercepted_events` and are
-    excluded so a drift or stall record never silences a pod Warning event.
-    A `Critical` event only folds into a `Critical` anchor so an escalation on
-    the same workload is not silenced by an earlier `Warning`.
+    rolling workload window of its own — otherwise a workload whose first event
+    was refused or never started a turn would silence its second. When
+    `include_folded=True` (used to find the anchor for an open pull request in
+    review), a folded row (`duplicate_of > 0`) carries its root admitted row
+    forward (`CASE WHEN duplicate_of > 0 THEN duplicate_of ELSE id END`) so an
+    unmerged pull request continues folding past `INCIDENT_PR_ANCHOR_SECONDS`.
+    Non-watcher rows (`OutOfBandChange`, `ControllerStall`) share
+    `intercepted_events` and are excluded so a drift or stall record never
+    silences a pod Warning event. A `Critical` event only folds into a
+    `Critical` anchor so an escalation on the same workload is not silenced by
+    an earlier `Warning`.
 
     Keyed on cluster, namespace, object kind and the cleaned workload name
     rather than on the reason: kubelet reports one failing pod under several
@@ -1386,10 +1425,29 @@ def _recent_delivered_event(
     """
     if window_seconds <= INCIDENT_WORKLOAD_DEDUP_OFF or not workload:
         return None
+    if include_folded:
+        select_expr = "CASE WHEN e.duplicate_of > 0 THEN e.duplicate_of ELSE e.id END"
+        from_clause = (
+            "FROM intercepted_events e "
+            "LEFT JOIN intercepted_events root "
+            "ON root.id = CASE WHEN e.duplicate_of > 0 THEN e.duplicate_of ELSE e.id END "
+        )
+        anchor_filter = (
+            "(((e.notified >= 1 OR e.delivery_error != '') AND e.duplicate_of = 0) "
+            "OR (e.duplicate_of > 0 AND COALESCE(root.duplicate_of, -1) = 0 "
+            "AND (COALESCE(root.notified, 0) >= 1 OR COALESCE(root.delivery_error, '') != '')))"
+        )
+        severity_col = "COALESCE(root.severity, e.severity)"
+    else:
+        select_expr = "e.id"
+        from_clause = "FROM intercepted_events e "
+        anchor_filter = "(e.notified >= 1 OR e.delivery_error != '') AND e.duplicate_of = 0"
+        severity_col = "e.severity"
     base_where = (
-        "WHERE cluster = ? AND namespace = ? AND workload = ? "
-        "AND (notified >= 1 OR delivery_error != '') AND duplicate_of = 0 "
-        "AND reason NOT IN (?, ?) "
+        f"{from_clause}"
+        "WHERE e.cluster = ? AND e.namespace = ? AND e.workload = ? "
+        f"AND {anchor_filter} "
+        "AND e.reason NOT IN (?, ?) "
     )
     base_params: list[Any] = [
         cluster,
@@ -1401,13 +1459,13 @@ def _recent_delivered_event(
     if object_kind:
         kind_lower = object_kind.lower()
         if kind_lower in ("pod", "deployment", "replicaset"):
-            base_where += "AND (object_kind = '' OR LOWER(object_kind) IN ('pod', 'deployment', 'replicaset')) "
+            base_where += "AND (e.object_kind = '' OR LOWER(e.object_kind) IN ('pod', 'deployment', 'replicaset')) "
         else:
-            base_where += "AND (object_kind = '' OR LOWER(object_kind) = ?) "
+            base_where += "AND (e.object_kind = '' OR LOWER(e.object_kind) = ?) "
             base_params.append(kind_lower)
     if severity == "Critical":
-        base_where += "AND severity = 'Critical' "
-    query = f"SELECT id FROM intercepted_events {base_where}AND created_at >= datetime('now', ?) ORDER BY id DESC LIMIT 1"
+        base_where += f"AND {severity_col} = 'Critical' "
+    query = f"SELECT {select_expr} {base_where}AND e.created_at >= datetime('now', ?) ORDER BY e.id DESC LIMIT 1"
     params = [*base_params, f"-{int(window_seconds)} seconds"]
     try:
         if conn is not None:
@@ -2648,6 +2706,105 @@ def _incident_branch(session_id: str, payload: Dict[str, Any]) -> str:
         slug = slug[:max_prefix].rstrip("-")
     slug = f"{slug}-{digest}" if slug else digest
     return f"{INCIDENT_PR_BRANCH_PREFIX}{slug}"
+
+
+def _parse_forge_time(value: str) -> Optional[datetime]:
+    """A forge timestamp (ISO 8601, `Z` or offset) as an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _proposal_in_review(proposal: Dict[str, Any], now: datetime) -> bool:
+    """Open, or merged or closed within `INCIDENT_PR_REVIEW_GRACE_SECONDS` of `now`."""
+    if proposal.get("state") == "open":
+        return True
+    ended = _parse_forge_time(str(proposal.get("closed") or proposal.get("updated") or ""))
+    return ended is not None and (now - ended).total_seconds() <= INCIDENT_PR_REVIEW_GRACE_SECONDS
+
+
+def _lookup_incident_pull_request(branch: str, *, deadline: Optional[float] = None) -> str:
+    """The URL of a proposal on `branch` that is still in review, or ''."""
+    import forge  # the agent pod's forge view; imported here so tests and drift need no broker
+    from gitops_workspace import get_managed_repo_keys
+
+    if deadline is None:
+        deadline = time.monotonic() + INCIDENT_PR_LOOKUP_TIMEOUT_S
+    now = datetime.now(timezone.utc)
+    for key in get_managed_repo_keys():
+        repo = key.split(":", 1)[1] if ":" in key else key
+        if not repo:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                f"Open pull request lookup budget exhausted before checking {repo} for {branch}; admitting the event"
+            )
+            break
+        call_args = (
+            "proposal-list",
+            {"source": branch, "state": "all", "limit": INCIDENT_PR_LOOKUP_LIMIT},
+            repo,
+        )
+        try:
+            try:
+                answer = forge.call(*call_args, timeout=remaining)
+            except TypeError:
+                answer = forge.call(*call_args)
+        except Exception as exc:
+            logger.warning(f"Open pull request lookup for {branch} on {repo} failed: {exc}")
+            continue
+        for proposal in answer.get("proposals") or []:
+            if _proposal_in_review(proposal, now):
+                return str(proposal.get("url") or f"{repo}:{branch}")
+    return ""
+
+
+def _incident_pull_request_in_review(payload: Dict[str, Any], workload: str) -> str:
+    """The agent pull request already in review for this event's workload, or ''.
+
+    Only with `openPullRequest` on and a workload name to key the branch on.
+    Bounded by `INCIDENT_PR_LOOKUP_TIMEOUT_S` and `_INCIDENT_PR_LOOKUP_SEMAPHORE`;
+    each repository hop receives the remaining wall-clock budget so a slow
+    forge or sandbox releases its worker permit when the budget expires rather
+    than waiting out `FORWARD_TIMEOUT_S`.
+    """
+    if not workload or not _incident_triage_opens_pull_request():
+        return ""
+    branch = _incident_branch("", payload)
+    if not _INCIDENT_PR_LOOKUP_SEMAPHORE.acquire(blocking=False):
+        logger.warning(f"Open pull request lookup pool busy for {branch}; admitting the event")
+        return ""
+    deadline = time.monotonic() + INCIDENT_PR_LOOKUP_TIMEOUT_S
+
+    def _run() -> str:
+        try:
+            try:
+                return _lookup_incident_pull_request(branch, deadline=deadline)
+            except TypeError:
+                return _lookup_incident_pull_request(branch)
+        finally:
+            _INCIDENT_PR_LOOKUP_SEMAPHORE.release()
+
+    try:
+        future = _INCIDENT_PR_LOOKUP_POOL.submit(_run)
+    except Exception:
+        _INCIDENT_PR_LOOKUP_SEMAPHORE.release()
+        raise
+    try:
+        return future.result(timeout=INCIDENT_PR_LOOKUP_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        logger.warning(
+            f"Open pull request lookup for {branch} took over {INCIDENT_PR_LOOKUP_TIMEOUT_S}s; admitting the event"
+        )
+    except Exception as exc:
+        logger.warning(f"Open pull request lookup for {branch} failed: {exc}; admitting the event")
+    return ""
 
 
 def _triage_pr_task_body(payload: Dict[str, Any], session_id: str) -> str:
@@ -4821,6 +4978,34 @@ def inject_message(
     # already paid for. Checked before the ledger write so the row carries
     # the verdict, and before the quota so the claim is skipped.
     duplicate_of = None
+    pull_request_in_review = ""
+    if not suppressed and _incident_triage_opens_pull_request():
+        pre_window_dup = _recent_delivered_event(
+            event_cluster,
+            namespace,
+            clean_name,
+            window_seconds,
+            object_kind=workload_kind,
+            severity=severity_label,
+        )
+        if pre_window_dup is None:
+            # Past the window, the workload may still have a fix waiting for review
+            # (INCIDENT_PR_REVIEW_GRACE_SECONDS). Check the local ledger for an
+            # anchor row first (including folded rows that carry their root
+            # anchor forward, and respecting severity so a Warning anchor never
+            # silences a Critical escalation) so a brand-new workload pays no
+            # forge round trip and no network hop runs inside BEGIN IMMEDIATE.
+            anchor_id = _recent_delivered_event(
+                event_cluster,
+                namespace,
+                clean_name,
+                INCIDENT_PR_ANCHOR_SECONDS,
+                object_kind=workload_kind,
+                severity=severity_label,
+                include_folded=True,
+            )
+            if anchor_id is not None:
+                pull_request_in_review = _incident_pull_request_in_review(payload, clean_name)
     if window_seconds > INCIDENT_WORKLOAD_DEDUP_OFF and not suppressed:
         with _inject_admission_transaction() as admission_conn:
             duplicate_of = _recent_delivered_event(
@@ -4832,6 +5017,21 @@ def inject_message(
                 severity=severity_label,
                 conn=admission_conn,
             )
+            if duplicate_of is not None:
+                pull_request_in_review = ""
+            elif pull_request_in_review:
+                duplicate_of = _recent_delivered_event(
+                    event_cluster,
+                    namespace,
+                    clean_name,
+                    INCIDENT_PR_ANCHOR_SECONDS,
+                    object_kind=workload_kind,
+                    severity=severity_label,
+                    include_folded=True,
+                    conn=admission_conn,
+                )
+                if duplicate_of is None:
+                    pull_request_in_review = ""
             if duplicate_of is None:
                 allowed, suppressed_today = _claim_alert_quota(severity_label, conn=admission_conn)
                 quota_denied = not allowed
@@ -4853,7 +5053,7 @@ def inject_message(
             )
             if admission_conn is not None and session_id:
                 try:
-                    if duplicate_of is not None:
+                    if duplicate_of is not None and not pull_request_in_review:
                         _upsert_event_session_metadata(
                             admission_conn,
                             session_id,
@@ -4863,7 +5063,7 @@ def inject_message(
                                 "folded_payload": _bounded_folded_payload(payload),
                             },
                         )
-                    elif not quota_denied:
+                    elif duplicate_of is None and not quota_denied:
                         _upsert_event_session_metadata(
                             admission_conn,
                             session_id,
@@ -4909,9 +5109,14 @@ def inject_message(
         # recognizes "folded" and an older watcher that treats unknown 2xx
         # statuses as accepted keep the dedup entry closed without marking it
         # policy-filtered.
+        because = (
+            f"pull request {pull_request_in_review} is still in review"
+            if pull_request_in_review
+            else f"workload window {window_seconds}s"
+        )
         logger.info(
             f"Folded {severity_label} event {event_reason} for {namespace}/{clean_name} "
-            f"into ledger row {duplicate_of} (workload window {window_seconds}s); no triage session"
+            f"into ledger row {duplicate_of} ({because}); no triage session"
         )
         return {"status": "folded", "duplicate_of": str(duplicate_of)}
 

@@ -81,9 +81,10 @@ type metrics struct {
 	// swallowed by the family's Info member. See ReopenIfPolicyFiltered.
 	eventsPolicyReopened *prometheus.CounterVec
 	// eventsWorkloadFolded counts Warning events the daemon folded into an
-	// active incident for the same workload within workloadDedupSeconds.
-	// Kept distinct from eventsPolicyFiltered so routine Info churn and
-	// folded Warning replicas are reported separately.
+	// active incident for the same workload (inside workloadDedupSeconds or
+	// while the workload's agent pull request is still in review). Kept
+	// distinct from eventsPolicyFiltered so routine Info churn and folded
+	// Warning events are reported separately.
 	eventsWorkloadFolded *prometheus.CounterVec
 	injectErrors         *prometheus.CounterVec
 	sessionCreates       *prometheus.CounterVec
@@ -153,7 +154,7 @@ func newMetrics() *metrics {
 		}, []string{"cluster", "project", "location", "reason", "namespace"}),
 		eventsWorkloadFolded: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_events_workload_folded_total",
-			Help: "Total Warning events the daemon accepted and folded into an earlier admitted anchor event for the same workload within workloadDedupSeconds. The dedup entry stays closed and unflagged.",
+			Help: "Total Warning events the daemon accepted and folded into an earlier admitted anchor event for the same workload (inside workloadDedupSeconds, or while the workload's agent pull request is still in review). The dedup entry stays closed and unflagged.",
 		}, []string{"cluster", "project", "location", "reason", "namespace"}),
 		injectErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "k8s_event_watcher_inject_errors_total",

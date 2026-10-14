@@ -697,13 +697,14 @@ func (d *dispatcher) Dispatch(ctx context.Context, ev TriageEvent) {
 		return
 	}
 	if status == injectStatusFolded {
-		// 2xx, and folded into the workload's recent anchor event within the
-		// dedup window: the dedup entry stays closed (unlike "suppressed") and
-		// is NOT marked policy-filtered (unlike "filtered", which would let a
-		// subsequent Warning on the same pod reopen the entry and re-inject on
-		// every kubelet resync).
+		// 2xx, and folded into the workload's recent anchor event (inside the
+		// workload window or while its pull request is in review): the dedup
+		// entry stays closed (unlike "suppressed") and is NOT marked
+		// policy-filtered (unlike "filtered", which would let a subsequent
+		// Warning on the same pod reopen the entry and re-inject on every
+		// kubelet resync).
 		d.metrics.eventsWorkloadFolded.WithLabelValues(ev.Cluster, ev.Project, ev.Location, ev.Key.Reason, ev.Namespace).Inc()
-		log.Printf("workload-folded %s pod=%s/%s (sid=%s) — folded into recent workload anchor event",
+		log.Printf("workload-folded %s pod=%s/%s (sid=%s) — folded into active workload incident",
 			ev.Key.Reason, ev.Namespace, ev.Name, sid)
 		return
 	}
