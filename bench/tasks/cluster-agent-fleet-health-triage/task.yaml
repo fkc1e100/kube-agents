@@ -79,6 +79,22 @@ verification_spec:
         - 'kubectl\s.*\s(-w|--watch)(\s|$)'
         - 'gcloud\s+container\s+clusters\s+get-credentials'
         - 'kubectl\s+(describe|logs)\s.*(-n|--namespace)[\s=](kube-[\w-]+|gke-[\w-]+|gmp-[\w-]+)(\s|$)'
+  # Order-aware: once any worker's scan has printed `unhealthy: 0`, no later
+  # command in the fan-out re-lists the cluster or re-runs the scan wider to
+  # confirm it. The skill forbids both after a clean scan, and on the cluster
+  # with the OOM the scan output already is the cluster-wide listing, so the
+  # crashloop path (per-pod reads in seeded-debug) never needs an
+  # all-namespaces list either. R3 of the 2026-10-15 benchmark saw three to
+  # six such reads per healthy cluster.
+  - name: the-clean-scan-was-not-re-checked
+    role: objective
+    mode: assert
+    check:
+      type: worker_commands
+      after_result_pattern: "unhealthy: 0"
+      forbidden_patterns:
+        - 'workload_triage\.py\s.*--include-system'
+        - 'kubectl\s+get\s+(pods?|po|events?|ev|daemonsets?|ds|deployments?|deploy)(,\S+)?\s.*(-A|--all-namespaces)(\s|$)'
   - name: rca-names-the-oom
     role: objective
     mode: assert
