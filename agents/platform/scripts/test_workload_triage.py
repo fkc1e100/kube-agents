@@ -19,7 +19,7 @@ def stamp(minutes_ago: float) -> str:
     return (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def pod(name, namespace="shop", phase="Running", ready=True, age=120, waiting=None, last_term=None, restarts=0, scheduled=None):
+def pod(name, namespace="shop", phase="Running", ready=True, age=120, waiting=None, last_term=None, restarts=0, scheduled=None, owner="ReplicaSet"):
     cs = {"name": "app", "ready": ready, "restartCount": restarts, "state": {}}
     if waiting:
         cs["state"] = {"waiting": {"reason": waiting}}
@@ -33,8 +33,11 @@ def pod(name, namespace="shop", phase="Running", ready=True, age=120, waiting=No
     status = {"phase": phase, "conditions": conditions}
     if phase != "Pending" or waiting:
         status["containerStatuses"] = [cs]
+    meta = {"name": name, "namespace": namespace, "creationTimestamp": stamp(age)}
+    if owner:
+        meta["ownerReferences"] = [{"kind": owner, "name": f"{name}-owner"}]
     return {
-        "metadata": {"name": name, "namespace": namespace, "creationTimestamp": stamp(age)},
+        "metadata": meta,
         "spec": {"containers": [{"name": "app"}]},
         "status": status,
     }
@@ -162,6 +165,29 @@ class ClassifyPodTest(unittest.TestCase):
         self.assertEqual(report["summary"]["healthy"], 1)
         self.assertEqual(report["summary"]["unhealthy"], 1)
 
+    def test_old_failure_with_no_replacing_controller_stays_unhealthy(self):
+        job = pod("nightly-1", phase="Failed", ready=False, age=600, owner="Job")
+        bare = pod("one-off", phase="Failed", ready=False, age=600, owner=None)
+        report = triage(pods=[job, bare])
+        self.assertEqual(report["stale_failed"], [])
+        self.assertEqual(sorted(r["pod"] for r in report["unhealthy_pods"]), ["nightly-1", "one-off"])
+
+    def test_eviction_without_finished_at_is_dated_by_its_conditions(self):
+        evicted = pod("evicted-now", phase="Failed", ready=False, age=600)
+        evicted["status"]["reason"] = "Evicted"
+        evicted["status"]["conditions"].append({"type": "DisruptionTarget", "status": "True", "lastTransitionTime": stamp(5)})
+        report = triage(pods=[evicted])
+        self.assertEqual([r["pod"] for r in report["unhealthy_pods"]], ["evicted-now"])
+
+    def test_completed_init_container_is_not_the_last_exit(self):
+        p = pod("web", last_term={"exitCode": 1, "reason": "Error", "finishedAt": stamp(600)}, restarts=2)
+        p["status"]["initContainerStatuses"] = [
+            {"name": "init", "ready": True, "restartCount": 0, "state": {"terminated": {"exitCode": 0, "reason": "Completed", "finishedAt": stamp(30)}}}
+        ]
+        report = triage(pods=[p])
+        self.assertEqual(report["unhealthy_pods"], [])
+        self.assertEqual(report["restarted_earlier"][0]["last_exit"], "1 Error")
+
 
 class ControllerTest(unittest.TestCase):
     def test_only_controllers_below_desired_are_listed(self):
@@ -234,7 +260,9 @@ class SkillNamesTest(unittest.TestCase):
     def test_every_handoff_names_a_shipped_cluster_skill(self):
         """The SKILL column is read by the agent as a skill to load, so each value must exist."""
         skills_dir = os.path.join(os.path.dirname(__file__), "..", "..", "cluster", "skills")
-        for name in (workload_triage.SKILL_CRASHLOOP, workload_triage.SKILL_PENDING, workload_triage.SKILL_CREATING):
+        names = [v for k, v in vars(workload_triage).items() if k.startswith("SKILL_")]
+        self.assertGreaterEqual(len(names), 3)
+        for name in names:
             self.assertTrue(os.path.isfile(os.path.join(skills_dir, name, "SKILL.md")), name)
 
     def test_table_renders_headers_alone(self):
@@ -263,6 +291,19 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("pod-crashloop-oom", out)
         self.assertTrue(out.rstrip().endswith("unhealthy: 1"))
+
+    def test_history_sections_and_summary_suffix_render(self):
+        old_term = {"exitCode": 137, "reason": "OOMKilled", "finishedAt": stamp(300)}
+        evicted = pod("evicted", phase="Failed", ready=False, age=600)
+        evicted["status"]["reason"] = "Evicted"
+        run = stub(pods=[pod("web", last_term=old_term, restarts=3), evicted])
+        code, out, _ = self.run_main([], run)
+        self.assertEqual(code, 0)
+        self.assertIn("failed earlier 1)", out.splitlines()[0])
+        self.assertIn("RESTARTED EARLIER", out)
+        self.assertIn("137 OOMKilled", out)
+        self.assertIn("FAILED EARLIER", out)
+        self.assertTrue(out.rstrip().endswith("unhealthy: 0"))
 
     def test_json_output(self):
         code, out, _ = self.run_main(["--json"], stub(pods=[pod("web")]))
