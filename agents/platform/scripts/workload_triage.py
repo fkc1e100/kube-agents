@@ -23,9 +23,12 @@ It prints only what needs attention:
 
 System namespaces (``kube-*``, ``gke-*``, ``gmp-*`` and ``*-system``) are folded
 into one summary line each unless ``--include-system`` is given, so a restart in
-a managed add-on does not pull the agent into exploring it.
+a managed add-on does not pull the agent into exploring it. A system line names
+its restarted pods with count and age, newest restart first.
 
-The script never mutates and never sleeps. It always ends with
+The first line names the kubeconfig context and the UTC time of the scan, so
+the output is its own audit trail. The script never mutates and never sleeps.
+It always ends with
 ``unhealthy: <count>`` -- unhealthy pods plus controllers below desired, outside
 system namespaces -- which is ``0`` on a healthy cluster.
 
@@ -47,6 +50,7 @@ from datetime import datetime, timedelta, timezone
 KUBECTL = "kubectl"
 PODS_ARGS = ("get", "pods", "--all-namespaces", "-o", "json")
 CONTROLLERS_ARGS = ("get", "deployments,statefulsets,daemonsets", "--all-namespaces", "-o", "json")
+CONTEXT_ARGS = ("config", "current-context")
 EVENTS_ARGS = ("get", "events", "--all-namespaces", "--field-selector", "type=Warning", "-o", "json")
 
 # Namespaces a cluster-wide scan summarises instead of listing: Kubernetes' own,
@@ -100,6 +104,13 @@ def run_kubectl(args: tuple[str, ...]) -> tuple[int, str, str]:
     except OSError as exc:
         return 127, "", str(exc)
     return res.returncode, res.stdout, res.stderr
+
+
+def current_context(run) -> str:
+    """The kubeconfig context the reads used, for the report's audit line; a
+    local kubeconfig read, not an API call."""
+    code, out, _ = run(CONTEXT_ARGS)
+    return out.strip() if code == 0 and out.strip() else "unknown"
 
 
 def read_items(run, args: tuple[str, ...], what: str, errors: list[str]) -> list[dict] | None:
@@ -217,6 +228,9 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
         return row
 
     last_finished = max((t[0] for t in terminations if t[0] is not None), default=None)
+    if restarts:
+        row["last_restart"] = format_age(last_finished, now) + " ago" if last_finished else "?"
+        row["last_restart_minutes"] = int((now - last_finished).total_seconds() // 60) if last_finished else None
 
     if phase == "Failed":
         # When the pod failed: its last container exit, else the newest
@@ -265,7 +279,6 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
     if restarts and last_finished is not None and now - last_finished < window:
         return verdict("RecentRestart", SKILL_CRASHLOOP)
     if restarts:
-        row["last_restart"] = format_age(last_finished, now) + " ago" if last_finished else "?"
         return verdict("RestartedEarlier", SKILL_CRASHLOOP, CATEGORY_RESTARTED_EARLIER)
     return None
 
@@ -384,7 +397,15 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
             # Restart counts answer "which pods restarted?" without listing
             # the namespace, so they ride on the summary line.
             if row and row["restarts"]:
-                entry["restarted"].append((row["pod"], row["restarts"]))
+                entry["restarted"].append(
+                    {
+                        "pod": row["pod"],
+                        "restarts": row["restarts"],
+                        "last_restart": row.get("last_restart", "?"),
+                        "minutes": row.get("last_restart_minutes"),
+                        "recent": row["reason"] == "RecentRestart",
+                    }
+                )
             continue
         counted += 1
         if row is None:
@@ -417,6 +438,8 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
             system_entry(row["namespace"])["warnings"] += row["count"]
 
     return {
+        "scanned_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "context": current_context(run),
         "summary": {
             "pods": counted,
             "healthy": counted - len(unhealthy) - len(initializing) - len(stale_failed),
@@ -457,6 +480,7 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
 def render_text(report: dict, max_rows: int) -> str:
     s = report["summary"]
     out = [
+        f"scanned {report['scanned_at']} context {report['context']}",
         f"pods: {s['pods']} (healthy {s['healthy']}, initializing {s['initializing']}, unhealthy {s['unhealthy_pods']}"
         f"{', failed earlier ' + str(s['stale_failed']) if s['stale_failed'] else ''})"
         f"  controllers below desired: {s['controllers_below_desired']}"
@@ -525,13 +549,22 @@ def render_text(report: dict, max_rows: int) -> str:
     return "\n".join(out)
 
 
-def _restarted_clause(restarted: list[tuple[str, int]]) -> str:
+def _restarted_clause(restarted: list[dict]) -> str:
+    """Restarted system pods, newest restart first, so one that restarted in the
+    events window is never crowded out by pods that restarted at node boot."""
     if not restarted:
         return ""
-    ranked = sorted(restarted, key=lambda r: -r[1])
-    named = ", ".join(f"{pod} {count}" for pod, count in ranked[:SYSTEM_RESTARTS_NAMED])
+
+    def newest_first(r: dict) -> tuple[int, int]:
+        return (0 if r["recent"] else 1, r["minutes"] if r["minutes"] is not None else 1 << 30)
+
+    ranked = sorted(restarted, key=newest_first)
+    named = ", ".join(
+        f"{r['pod']} {r['restarts']}x, last {r['last_restart']}" + (" (in window)" if r["recent"] else "")
+        for r in ranked[:SYSTEM_RESTARTS_NAMED]
+    )
     more = len(ranked) - SYSTEM_RESTARTS_NAMED
-    return f", restarted pods: {named}" + (f" (+{more} more)" if more > 0 else "")
+    return f", restarted pods: {named}" + (f" (+{more} more; --include-system lists them)" if more > 0 else "")
 
 
 def build_parser() -> argparse.ArgumentParser:

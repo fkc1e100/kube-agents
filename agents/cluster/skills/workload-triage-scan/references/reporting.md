@@ -26,11 +26,11 @@ kanban_complete(
 
 ## Healthy scan
 
-When `workload_triage.py` ends with `unhealthy: 0`, `result` is the scan's summary line, any initializing pods by name, the `RESTARTED EARLIER` and `FAILED EARLIER` rows when the question asks about restarts or failures, and the system-namespace line, with no patch:
+When `workload_triage.py` ends with `unhealthy: 0`, `result` is the scan's summary line, any initializing pods by name, the `RESTARTED EARLIER` and `FAILED EARLIER` rows when the question asks about restarts or failures, and the system-namespace lines, with no patch:
 
 ```
 kanban_complete(
-  result="No failing workloads. <pods: N (healthy N, initializing N, unhealthy 0) ...>. <initializing pods>. <restarted-earlier rows, if asked>. <system namespaces line>",
+  result="No failing workloads. <pods: N (healthy N, initializing N, unhealthy 0) ...>. <initializing pods>. <restarted-earlier rows, if asked>. <system namespace lines>. Scanned <UTC time> on <context>.",
   summary="No failing workloads: N pods healthy, N initializing",
   metadata={"unhealthy": 0}
 )

@@ -71,6 +71,8 @@ def stub(pods=(), controllers=(), events=(), fail=None):
         calls.append(args)
         if fail and fail in args:
             return 1, "", "forbidden"
+        if args == workload_triage.CONTEXT_ARGS:
+            return 0, "test-context\n", ""
         if args == workload_triage.PODS_ARGS:
             items = pods
         elif args == workload_triage.CONTROLLERS_ARGS:
@@ -250,8 +252,21 @@ class SystemNamespaceTest(unittest.TestCase):
             workload_triage.main([], run=run, now=NOW)
         text = out.getvalue()
         self.assertIn("kube-system: 0/1 pods unhealthy", text)
-        self.assertIn("restarted pods: netd-x 2", text)
+        self.assertIn("restarted pods: netd-x 2x, last 5h ago", text)
         self.assertTrue(text.rstrip().endswith("unhealthy: 0"))
+
+    def test_system_restart_in_window_is_named_first_despite_the_cap(self):
+        boot = {"exitCode": 255, "reason": "Unknown", "finishedAt": stamp(3000)}
+        pods = [pod(f"sys-{i}", namespace="kube-system", last_term=boot, restarts=9) for i in range(7)]
+        recent = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(10)}
+        pods.append(pod("netd-new", namespace="kube-system", last_term=recent, restarts=1))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            workload_triage.main([], run=stub(pods=pods), now=NOW)
+        line = [ln for ln in out.getvalue().splitlines() if ln.startswith("kube-system:")][0]
+        self.assertIn("1/8 pods unhealthy (RecentRestart 1)", line)
+        self.assertIn("restarted pods: netd-new 1x, last 10m ago (in window), sys-", line)
+        self.assertIn("(+3 more; --include-system lists them)", line)
 
     def test_include_system_lists_them(self):
         report = triage(
@@ -287,14 +302,15 @@ class MainTest(unittest.TestCase):
             code = workload_triage.main(argv, run=run, now=NOW)
         return code, out.getvalue(), err.getvalue()
 
-    def test_healthy_cluster_ends_with_zero_and_three_reads(self):
+    def test_healthy_cluster_ends_with_zero_and_three_api_reads(self):
         run = stub(pods=[pod("web")], controllers=[deploy("web")])
         code, out, _ = self.run_main([], run)
         self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[0], "scanned 2026-09-09T12:00:00Z context test-context")
         self.assertTrue(out.rstrip().endswith("unhealthy: 0"))
-        self.assertEqual(len(run.calls), 3)
-        for args in run.calls:
-            self.assertEqual(args[0], "get")
+        api_reads = [a for a in run.calls if a[0] == "get"]
+        self.assertEqual(len(api_reads), 3)
+        self.assertEqual([a for a in run.calls if a[0] != "get"], [workload_triage.CONTEXT_ARGS])
 
     def test_text_output_names_the_skill(self):
         run = stub(pods=[pod("api", ready=False, waiting="CrashLoopBackOff")])
@@ -310,7 +326,7 @@ class MainTest(unittest.TestCase):
         run = stub(pods=[pod("web", last_term=old_term, restarts=3), evicted])
         code, out, _ = self.run_main([], run)
         self.assertEqual(code, 0)
-        self.assertIn("failed earlier 1)", out.splitlines()[0])
+        self.assertIn("failed earlier 1)", out.splitlines()[1])
         self.assertIn("RESTARTED EARLIER", out)
         self.assertIn("137 OOMKilled", out)
         self.assertIn("FAILED EARLIER", out)
