@@ -26,11 +26,11 @@ kanban_complete(
 
 ## Healthy scan
 
-When `workload_triage.py` ends with `unhealthy: 0`, `result` is the scan's summary line, any initializing pods by name, and the system-namespace line, with no patch:
+When `workload_triage.py` ends with `unhealthy: 0`, `result` is the scan's summary line, any initializing pods by name, the `RESTARTED EARLIER` and `FAILED EARLIER` rows when the question asks about restarts or failures, and the system-namespace line, with no patch:
 
 ```
 kanban_complete(
-  result="No failing workloads. <pods: N (healthy N, initializing N, unhealthy 0) ...>. <system namespaces line>",
+  result="No failing workloads. <pods: N (healthy N, initializing N, unhealthy 0) ...>. <initializing pods>. <restarted-earlier rows, if asked>. <system namespaces line>",
   summary="No failing workloads: N pods healthy, N initializing",
   metadata={"unhealthy": 0}
 )
@@ -42,4 +42,4 @@ Give each investigated workload its own `##` section with cause, evidence and pa
 
 ## Cannot proceed
 
-If an input is missing or the scope is ambiguous, call `kanban_block(kind="needs_input", ...)` instead. Your final chat reply is a brief acknowledgement, never the finding. The Platform Agent reads the completed card and decides whether to open or update a pull request.
+If an input is missing or the scope is ambiguous, call `kanban_block(kind="needs_input", ...)` instead. Do the same when the cluster cannot be read: `workload_triage.py` exiting 2, or a kubectl read refused or unreachable. Put the exact stderr line in the reason, as `AGENTS.md` asks under "Fail loud". Your final chat reply is a brief acknowledgement, never the finding. The Platform Agent reads the completed card and decides whether to open or update a pull request.
