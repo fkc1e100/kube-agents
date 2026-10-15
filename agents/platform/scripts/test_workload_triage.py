@@ -242,6 +242,17 @@ class SystemNamespaceTest(unittest.TestCase):
         self.assertEqual(report["system_namespaces"]["kube-system"]["unhealthy"], 1)
         self.assertIn("gmp-system", report["system_namespaces_healthy"])
 
+    def test_system_restarts_ride_on_the_summary_line(self):
+        old = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(300)}
+        run = stub(pods=[pod("netd-x", namespace="kube-system", last_term=old, restarts=2), pod("web")])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            workload_triage.main([], run=run, now=NOW)
+        text = out.getvalue()
+        self.assertIn("kube-system: 0/1 pods unhealthy", text)
+        self.assertIn("restarted pods: netd-x 2", text)
+        self.assertTrue(text.rstrip().endswith("unhealthy: 0"))
+
     def test_include_system_lists_them(self):
         report = triage(
             pods=[pod("netd", namespace="kube-system", ready=False, waiting="CrashLoopBackOff")],

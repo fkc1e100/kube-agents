@@ -63,6 +63,9 @@ DEFAULT_INIT_GRACE_MINUTES = 10
 DEFAULT_EVENTS_MINUTES = 60
 DEFAULT_MAX_ROWS = 25
 EVENT_MESSAGE_CHARS = 140
+# How many restarted pods a system namespace's summary line names, most
+# restarts first; the rest are counted.
+SYSTEM_RESTARTS_NAMED = 5
 
 # The focused skill each symptom hands off to.
 SKILL_CRASHLOOP = "pod-crashloop-oom"
@@ -353,7 +356,12 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
     system: dict[str, dict] = {}
 
     def system_entry(namespace: str) -> dict:
-        return system.setdefault(namespace, {"pods": 0, "unhealthy": 0, "reasons": {}, "controllers_short": 0, "warnings": 0})
+        return system.setdefault(
+            namespace, {"pods": 0, "unhealthy": 0, "reasons": {}, "controllers_short": 0, "warnings": 0, "restarted": []}
+        )
+
+    def has_findings(e: dict) -> bool:
+        return bool(e["unhealthy"] or e["controllers_short"] or e["warnings"] or e["restarted"])
 
     rows: dict[str, list[dict]] = {
         CATEGORY_UNHEALTHY: [],
@@ -373,6 +381,10 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
             if row and row["category"] == CATEGORY_UNHEALTHY:
                 entry["unhealthy"] += 1
                 entry["reasons"][row["reason"]] = entry["reasons"].get(row["reason"], 0) + 1
+            # Restart counts answer "which pods restarted?" without listing
+            # the namespace, so they ride on the summary line.
+            if row and row["restarts"]:
+                entry["restarted"].append((row["pod"], row["restarts"]))
             continue
         counted += 1
         if row is None:
@@ -423,13 +435,13 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
         "stale_failed": stale_failed,
         "controllers_below_desired": short,
         "warning_events": warnings,
-        "system_namespaces": {ns: e for ns, e in sorted(system.items()) if e["unhealthy"] or e["controllers_short"] or e["warnings"]},
+        "system_namespaces": {ns: e for ns, e in sorted(system.items()) if has_findings(e)},
         "node_warning_events": {
             "count": node_events["count"],
             "nodes": len(node_events["nodes"]),
             "reasons": dict(sorted(node_events["reasons"].items(), key=lambda kv: -kv[1])),
         },
-        "system_namespaces_healthy": sorted(ns for ns, e in system.items() if not (e["unhealthy"] or e["controllers_short"] or e["warnings"])),
+        "system_namespaces_healthy": sorted(ns for ns, e in system.items() if not has_findings(e)),
         "errors": errors,
     }
 
@@ -504,12 +516,22 @@ def render_text(report: dict, max_rows: int) -> str:
                 f"{ns}: {e['unhealthy']}/{e['pods']} pods unhealthy"
                 + (f" ({reasons})" if reasons else "")
                 + f", {e['controllers_short']} controllers below desired, {e['warnings']} warning events"
+                + _restarted_clause(e["restarted"])
             )
         if report["system_namespaces_healthy"]:
             out.append(f"no findings: {', '.join(report['system_namespaces_healthy'])}")
     out.append("")
     out.append(f"unhealthy: {s['unhealthy']}")
     return "\n".join(out)
+
+
+def _restarted_clause(restarted: list[tuple[str, int]]) -> str:
+    if not restarted:
+        return ""
+    ranked = sorted(restarted, key=lambda r: -r[1])
+    named = ", ".join(f"{pod} {count}" for pod, count in ranked[:SYSTEM_RESTARTS_NAMED])
+    more = len(ranked) - SYSTEM_RESTARTS_NAMED
+    return f", restarted pods: {named}" + (f" (+{more} more)" if more > 0 else "")
 
 
 def build_parser() -> argparse.ArgumentParser:
