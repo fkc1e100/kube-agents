@@ -53,6 +53,7 @@ var sessionSkills = []string{
 	"pod-crashloop-oom",
 	"pod-pending-scheduling",
 	"service-connectivity",
+	"workload-triage-scan",
 }
 
 func main() {
