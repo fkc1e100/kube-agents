@@ -15,7 +15,7 @@ Answer a cluster-wide "what is failing / is it healthy" question from one batche
    python3 /opt/data/scripts/workload_triage.py
    ```
 
-   It ends with `unhealthy: <count>`: unhealthy pods plus controllers below desired, outside system namespaces. Exit code 2 means it could not read pods; block the card with its stderr line (`kanban_block(kind="needs_input", ...)`).
+   It ends with `unhealthy: <count>`: unhealthy pods plus controllers below desired, outside system namespaces. Exit code 2 means the pod read failed or returned output it could not parse; block the card with its stderr line, as the reference's "Cannot proceed" section says.
 
 2. If the last line is `unhealthy: 0`, stop here. Report the summary line (pods healthy, initializing, controllers below desired, warning events), any initializing pods by name, the `RESTARTED EARLIER` rows when the question is about restarts, and the system-namespace line as written. Run no further command.
 

@@ -411,7 +411,7 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, h in enumerate(headers)]
     lines = ["  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip()]
     for row in rows:
         lines.append("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())

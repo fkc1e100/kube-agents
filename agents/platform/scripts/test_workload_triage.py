@@ -230,6 +230,17 @@ class SystemNamespaceTest(unittest.TestCase):
             self.assertFalse(workload_triage.is_system_namespace(ns), ns)
 
 
+class SkillNamesTest(unittest.TestCase):
+    def test_every_handoff_names_a_shipped_cluster_skill(self):
+        """The SKILL column is read by the agent as a skill to load, so each value must exist."""
+        skills_dir = os.path.join(os.path.dirname(__file__), "..", "..", "cluster", "skills")
+        for name in (workload_triage.SKILL_CRASHLOOP, workload_triage.SKILL_PENDING, workload_triage.SKILL_CREATING):
+            self.assertTrue(os.path.isfile(os.path.join(skills_dir, name, "SKILL.md")), name)
+
+    def test_table_renders_headers_alone(self):
+        self.assertEqual(workload_triage._table(["A", "BB"], []), ["A  BB"])
+
+
 class MainTest(unittest.TestCase):
     def run_main(self, argv, run):
         out, err = io.StringIO(), io.StringIO()
