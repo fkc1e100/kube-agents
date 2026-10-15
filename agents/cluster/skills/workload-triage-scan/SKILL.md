@@ -1,0 +1,38 @@
+---
+name: workload-triage-scan
+description: Answers cluster-wide workload health questions with one read-only scan. Use for "what is failing or degraded", "is the cluster healthy", "which pods are crashlooping or restarting", and "are all DaemonSet or Deployment pods scheduled and ready" when no single workload is named. Lists unhealthy pods, controllers below desired and recent Warning events, then hands each finding to pod-crashloop-oom, pod-pending-scheduling, pod-container-creating or service-connectivity.
+---
+
+# Task
+
+Answer a cluster-wide "what is failing / is it healthy" question from one batched read, finish at once when nothing is unhealthy, and otherwise name each finding's cause through the focused skill that owns its symptom.
+
+# Workflow
+
+1. Run the scan once. It reads pods, Deployments, StatefulSets, DaemonSets and Warning events across all namespaces in three `kubectl get -o json` calls and prints only what needs attention:
+
+   ```bash
+   python3 /opt/data/scripts/workload_triage.py
+   ```
+
+   It ends with `unhealthy: <count>`: unhealthy pods plus controllers below desired, outside system namespaces. Exit code 2 means it could not read pods; block the card with its stderr line (`kanban_block(kind="needs_input", ...)`).
+
+2. If the last line is `unhealthy: 0`, stop here. Report the summary line (pods healthy, initializing, controllers below desired, warning events), any initializing pods by name, and the system-namespace line as written. Run no further command.
+
+3. Otherwise, group the `UNHEALTHY PODS` rows by owning workload (the pod name minus its ReplicaSet or ordinal suffix). Pods of one workload share a cause: investigate one representative pod.
+
+4. Take up to three workloads, in this order: `CrashLoopBackOff`, `Error`, `OOMKilled` or `RecentRestart` first, then `Unschedulable`/`Pending`, then image, mount and config errors, then `NotReady`. Load the skill in the row's `SKILL` column and run its first step for the representative pod. List any further workloads with their scan row only, and say they were not investigated.
+
+5. A controller in `CONTROLLERS BELOW DESIRED` with no unhealthy pod row is still rolling out or its pods are initializing: report the counts as read, without waiting.
+
+6. A `WARNING EVENTS` row with no matching pod row: `FailedScheduling` goes to `pod-pending-scheduling`; `FailedMount`, `ProvisioningFailed` and `FailedAttachVolume` go to `pod-container-creating`; anything else is reported as the event says.
+
+7. Record the result as [`references/reporting.md`](references/reporting.md) describes.
+
+# Rules
+
+- Keep the scan question to about six commands, the script included. A deeper investigation belongs to the focused skill, and only for the workloads step 4 selected.
+- Report the current state only. Never `sleep`, `--watch`, or re-run the scan to see whether a pod comes up. A pod in `INITIALIZING` is reported as initializing.
+- Do not explore system namespaces (`kube-*`, `gke-*`, `gmp-*`, `*-system`) or node events. Quote their summary line. Run `--include-system` only when the card asks about a system component.
+- Do not list pods, nodes or controllers again in other shapes. The scan output is the inventory.
+- Do not run `gcloud container clusters get-credentials`. Preflight has already pinned the kubeconfig to this cluster.

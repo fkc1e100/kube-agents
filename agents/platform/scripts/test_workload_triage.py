@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Unit tests for workload_triage.py: fixture objects, kubectl stubbed."""
+
+import io
+import json
+import os
+import sys
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
+
+sys.path.insert(0, os.path.dirname(__file__))
+import workload_triage  # noqa: E402
+
+NOW = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def stamp(minutes_ago: float) -> str:
+    return (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def pod(name, namespace="shop", phase="Running", ready=True, age=120, waiting=None, last_term=None, restarts=0, scheduled=None):
+    cs = {"name": "app", "ready": ready, "restartCount": restarts, "state": {}}
+    if waiting:
+        cs["state"] = {"waiting": {"reason": waiting}}
+    else:
+        cs["state"] = {"running": {}}
+    if last_term:
+        cs["lastState"] = {"terminated": last_term}
+    conditions = [{"type": "Ready", "status": "True" if ready else "False"}]
+    if scheduled is not None:
+        conditions.append({"type": "PodScheduled", "status": "False", "reason": scheduled})
+    status = {"phase": phase, "conditions": conditions}
+    if phase != "Pending" or waiting:
+        status["containerStatuses"] = [cs]
+    return {
+        "metadata": {"name": name, "namespace": namespace, "creationTimestamp": stamp(age)},
+        "spec": {"containers": [{"name": "app"}]},
+        "status": status,
+    }
+
+
+def deploy(name, namespace="shop", replicas=2, ready=2, kind="Deployment"):
+    if kind == "DaemonSet":
+        status = {"desiredNumberScheduled": replicas, "numberReady": ready, "updatedNumberScheduled": replicas}
+        spec = {}
+    else:
+        status = {"readyReplicas": ready, "updatedReplicas": replicas}
+        spec = {"replicas": replicas}
+    return {"kind": kind, "metadata": {"name": name, "namespace": namespace}, "spec": spec, "status": status}
+
+
+def event(obj, reason, minutes_ago, namespace="shop", kind="Pod", count=1, message="msg"):
+    return {
+        "metadata": {"namespace": namespace},
+        "involvedObject": {"kind": kind, "name": obj, "namespace": namespace},
+        "reason": reason,
+        "lastTimestamp": stamp(minutes_ago),
+        "count": count,
+        "message": message,
+    }
+
+
+def stub(pods=(), controllers=(), events=(), fail=None):
+    calls = []
+
+    def run(args):
+        calls.append(args)
+        if fail and fail in args:
+            return 1, "", "forbidden"
+        if args == workload_triage.PODS_ARGS:
+            items = pods
+        elif args == workload_triage.CONTROLLERS_ARGS:
+            items = controllers
+        elif args == workload_triage.EVENTS_ARGS:
+            items = events
+        else:
+            raise AssertionError(f"unexpected kubectl call {args}")
+        return 0, json.dumps({"items": list(items)}), ""
+
+    run.calls = calls
+    return run
+
+
+def triage(**kw):
+    include = kw.pop("include_system", False)
+    return workload_triage.triage(stub(**kw), NOW, include, 10, 60)
+
+
+class ClassifyPodTest(unittest.TestCase):
+    def test_healthy_running_pod_is_not_reported(self):
+        report = triage(pods=[pod("web")])
+        self.assertEqual(report["summary"]["unhealthy"], 0)
+        self.assertEqual(report["summary"]["healthy"], 1)
+
+    def test_crashloop_reports_last_exit_and_hands_to_crashloop_skill(self):
+        term = {"exitCode": 137, "reason": "OOMKilled", "finishedAt": stamp(3)}
+        report = triage(pods=[pod("api", ready=False, waiting="CrashLoopBackOff", last_term=term, restarts=7)])
+        row = report["unhealthy_pods"][0]
+        self.assertEqual(row["status"], "CrashLoopBackOff")
+        self.assertEqual(row["last_exit"], "137 OOMKilled")
+        self.assertEqual(row["restarts"], 7)
+        self.assertEqual(row["skill"], "pod-crashloop-oom")
+
+    def test_image_pull_and_config_errors_go_to_container_creating(self):
+        report = triage(
+            pods=[
+                pod("a", ready=False, waiting="ImagePullBackOff"),
+                pod("b", ready=False, waiting="CreateContainerConfigError"),
+            ]
+        )
+        self.assertEqual({r["skill"] for r in report["unhealthy_pods"]}, {"pod-container-creating"})
+
+    def test_unschedulable_old_pod_goes_to_pending_skill(self):
+        report = triage(pods=[pod("p", phase="Pending", ready=False, scheduled="Unschedulable", age=60)])
+        self.assertEqual(report["unhealthy_pods"][0]["skill"], "pod-pending-scheduling")
+
+    def test_young_starting_pods_are_initializing_not_unhealthy(self):
+        report = triage(
+            pods=[
+                pod("new1", phase="Pending", ready=False, scheduled="Unschedulable", age=2),
+                pod("new2", phase="Pending", ready=False, waiting="ContainerCreating", age=3),
+                pod("new3", ready=False, age=1),
+            ]
+        )
+        self.assertEqual(report["summary"]["unhealthy"], 0)
+        self.assertEqual(report["summary"]["initializing"], 3)
+        self.assertEqual({r["status"] for r in report["initializing"]}, {"initializing"})
+
+    def test_stuck_container_creating_past_grace_is_unhealthy(self):
+        report = triage(pods=[pod("old", phase="Pending", ready=False, waiting="ContainerCreating", age=30)])
+        self.assertEqual(report["unhealthy_pods"][0]["skill"], "pod-container-creating")
+
+    def test_recent_restart_on_ready_pod_is_reported_old_restart_is_not(self):
+        recent = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(20)}
+        old = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(600)}
+        report = triage(pods=[pod("flaky", last_term=recent, restarts=1), pod("settled", last_term=old, restarts=1)])
+        self.assertEqual([r["pod"] for r in report["unhealthy_pods"]], ["flaky"])
+        self.assertEqual(report["unhealthy_pods"][0]["status"], "RecentRestart")
+
+    def test_succeeded_pods_are_ignored_and_failed_pods_reported(self):
+        done = pod("job-1", phase="Succeeded", ready=False)
+        failed = pod("job-2", phase="Failed", ready=False)
+        failed["status"]["reason"] = "Evicted"
+        report = triage(pods=[done, failed])
+        self.assertEqual(report["summary"]["pods"], 1)
+        self.assertEqual(report["unhealthy_pods"][0]["status"], "Evicted")
+
+
+class ControllerTest(unittest.TestCase):
+    def test_only_controllers_below_desired_are_listed(self):
+        report = triage(
+            controllers=[
+                deploy("ok"),
+                deploy("short", replicas=3, ready=1),
+                deploy("scaled-down", replicas=0, ready=0),
+                deploy("ds", replicas=4, ready=3, kind="DaemonSet"),
+            ]
+        )
+        self.assertEqual(
+            [r["controller"] for r in report["controllers_below_desired"]],
+            ["Deployment/short", "DaemonSet/ds"],
+        )
+        self.assertEqual(report["summary"]["unhealthy"], 2)
+
+
+class EventsTest(unittest.TestCase):
+    def test_events_outside_window_are_dropped_and_repeats_grouped(self):
+        report = triage(
+            events=[
+                event("api", "BackOff", 5, count=3),
+                event("api", "BackOff", 2, count=2, message="newest"),
+                event("api", "FailedMount", 120),
+            ]
+        )
+        rows = report["warning_events"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 5)
+        self.assertEqual(rows[0]["message"], "newest")
+
+    def test_node_events_are_folded_into_one_summary(self):
+        report = triage(events=[event("n1", "KubeletStart", 5, namespace="default", kind="Node")])
+        self.assertEqual(report["warning_events"], [])
+        self.assertEqual(report["node_warning_events"]["count"], 1)
+
+
+class SystemNamespaceTest(unittest.TestCase):
+    def test_system_namespaces_are_summarised_not_listed(self):
+        term = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(3)}
+        report = triage(
+            pods=[
+                pod("netd", namespace="kube-system", ready=False, waiting="CrashLoopBackOff", last_term=term),
+                pod("collector", namespace="gmp-system"),
+                pod("web"),
+            ],
+            events=[event("netd", "BackOff", 3, namespace="kube-system")],
+        )
+        self.assertEqual(report["summary"]["unhealthy"], 0)
+        self.assertEqual(report["summary"]["pods"], 1)
+        self.assertEqual(report["system_namespaces"]["kube-system"]["unhealthy"], 1)
+        self.assertIn("gmp-system", report["system_namespaces_healthy"])
+
+    def test_include_system_lists_them(self):
+        report = triage(
+            pods=[pod("netd", namespace="kube-system", ready=False, waiting="CrashLoopBackOff")],
+            include_system=True,
+        )
+        self.assertEqual(report["summary"]["unhealthy"], 1)
+
+    def test_namespace_rules(self):
+        for ns in ("kube-system", "gke-managed-cim", "gmp-public", "cnrm-system"):
+            self.assertTrue(workload_triage.is_system_namespace(ns), ns)
+        for ns in ("default", "prod", "systemd-tools"):
+            self.assertFalse(workload_triage.is_system_namespace(ns), ns)
+
+
+class MainTest(unittest.TestCase):
+    def run_main(self, argv, run):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = workload_triage.main(argv, run=run, now=NOW)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_healthy_cluster_ends_with_zero_and_three_reads(self):
+        run = stub(pods=[pod("web")], controllers=[deploy("web")])
+        code, out, _ = self.run_main([], run)
+        self.assertEqual(code, 0)
+        self.assertTrue(out.rstrip().endswith("unhealthy: 0"))
+        self.assertEqual(len(run.calls), 3)
+        for args in run.calls:
+            self.assertEqual(args[0], "get")
+
+    def test_text_output_names_the_skill(self):
+        run = stub(pods=[pod("api", ready=False, waiting="CrashLoopBackOff")])
+        code, out, _ = self.run_main([], run)
+        self.assertEqual(code, 0)
+        self.assertIn("pod-crashloop-oom", out)
+        self.assertTrue(out.rstrip().endswith("unhealthy: 1"))
+
+    def test_json_output(self):
+        code, out, _ = self.run_main(["--json"], stub(pods=[pod("web")]))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["summary"]["unhealthy"], 0)
+
+    def test_failed_pod_read_exits_2(self):
+        code, out, err = self.run_main([], stub(fail="pods"))
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("cannot read pods", err)
+
+    def test_failed_event_read_still_reports(self):
+        code, out, err = self.run_main([], stub(pods=[pod("web")], fail="events"))
+        self.assertEqual(code, 0)
+        self.assertIn("cannot read warning events", err)
+        self.assertIn("unhealthy: 0", out)
+
+    def test_abbreviated_flags_are_refused(self):
+        with self.assertRaises(SystemExit):
+            self.run_main(["--include"], stub())
+
+
+if __name__ == "__main__":
+    unittest.main()
