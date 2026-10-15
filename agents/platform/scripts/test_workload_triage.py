@@ -134,17 +134,33 @@ class ClassifyPodTest(unittest.TestCase):
     def test_recent_restart_on_ready_pod_is_reported_old_restart_is_not(self):
         recent = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(20)}
         old = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(600)}
-        report = triage(pods=[pod("flaky", last_term=recent, restarts=1), pod("settled", last_term=old, restarts=1)])
+        report = triage(pods=[pod("flaky", last_term=recent, restarts=1), pod("settled", last_term=old, restarts=4)])
         self.assertEqual([r["pod"] for r in report["unhealthy_pods"]], ["flaky"])
         self.assertEqual(report["unhealthy_pods"][0]["status"], "RecentRestart")
+        self.assertEqual(report["summary"]["unhealthy"], 1)
+        earlier = report["restarted_earlier"]
+        self.assertEqual([(r["pod"], r["restarts"], r["last_restart"]) for r in earlier], [("settled", 4, "10h ago")])
+        self.assertEqual(earlier[0]["skill"], "")
 
     def test_succeeded_pods_are_ignored_and_failed_pods_reported(self):
         done = pod("job-1", phase="Succeeded", ready=False)
-        failed = pod("job-2", phase="Failed", ready=False)
+        failed = pod("job-2", phase="Failed", ready=False, age=20)
         failed["status"]["reason"] = "Evicted"
         report = triage(pods=[done, failed])
         self.assertEqual(report["summary"]["pods"], 1)
         self.assertEqual(report["unhealthy_pods"][0]["status"], "Evicted")
+        self.assertEqual(report["summary"]["unhealthy"], 1)
+
+    def test_pods_that_failed_before_the_window_are_history_not_unhealthy(self):
+        old = pod("evicted", phase="Failed", ready=False, age=600)
+        old["status"]["reason"] = "Evicted"
+        term = {"exitCode": 1, "reason": "Error", "finishedAt": stamp(30)}
+        recent = pod("job-run", phase="Failed", ready=False, age=600, last_term=term)
+        report = triage(pods=[old, recent, pod("web")])
+        self.assertEqual([r["pod"] for r in report["stale_failed"]], ["evicted"])
+        self.assertEqual([r["pod"] for r in report["unhealthy_pods"]], ["job-run"])
+        self.assertEqual(report["summary"]["healthy"], 1)
+        self.assertEqual(report["summary"]["unhealthy"], 1)
 
 
 class ControllerTest(unittest.TestCase):

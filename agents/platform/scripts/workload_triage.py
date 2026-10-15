@@ -14,6 +14,9 @@ It prints only what needs attention:
 - unhealthy pods, with phase, reason, ready count, restarts, last exit code and
   the focused skill that owns the symptom;
 - pods that are still starting, reported as initializing and never waited on;
+- pods that are Ready now but restarted before the events window, and pods
+  that failed before it (Evicted, a finished Job's pod), listed as history and
+  not counted;
 - controllers whose ready count is below the desired count;
 - Warning events seen within ``--events-minutes`` (default 60), grouped by
   object and reason.
@@ -72,6 +75,17 @@ CONFIG_WAITING_REASONS = frozenset({"CreateContainerConfigError", "CreateContain
 STARTING_WAITING_REASONS = frozenset({"ContainerCreating", "PodInitializing"})
 
 STATUS_INITIALIZING = "initializing"
+
+# What a pod row is for. Only CATEGORY_UNHEALTHY rows count toward `unhealthy:`
+# and name a skill; the others are context the answer quotes without digging.
+CATEGORY_UNHEALTHY = "unhealthy"
+CATEGORY_INITIALIZING = "initializing"
+# Running and Ready now, restarted before the events window: the restart count
+# a "find the restarting pods" question asks for, not a live failure.
+CATEGORY_RESTARTED_EARLIER = "restarted_earlier"
+# Failed (Evicted, a finished Job's pod) before the events window. The pod
+# object lingers until garbage collection; its controller has replaced it.
+CATEGORY_STALE_FAILED = "stale_failed"
 
 
 def run_kubectl(args: tuple[str, ...]) -> tuple[int, str, str]:
@@ -149,8 +163,10 @@ def _last_exit(statuses: list[dict]) -> str:
 def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) -> dict | None:
     """One row for a pod that needs attention, or None for a healthy or finished pod.
 
-    The row's ``status`` is ``initializing`` for a pod still starting inside the
-    grace period; every other row is unhealthy and names its ``skill``.
+    The row's ``category`` says what it is: ``unhealthy`` rows name the ``skill``
+    that owns their symptom; ``initializing`` rows are pods still starting inside
+    the grace period; ``restarted_earlier`` and ``stale_failed`` rows are history
+    from before the events window, reported but not counted.
     """
     meta = pod.get("metadata", {})
     status = pod.get("status", {})
@@ -175,14 +191,24 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
         "age": format_age(created, now),
     }
 
-    def verdict(reason: str, skill: str | None) -> dict:
-        row["status"] = reason if skill else STATUS_INITIALIZING
+    def verdict(reason: str, skill: str | None, category: str | None = None) -> dict:
+        row["category"] = category or (CATEGORY_UNHEALTHY if skill else CATEGORY_INITIALIZING)
+        row["status"] = STATUS_INITIALIZING if row["category"] == CATEGORY_INITIALIZING else reason
         row["reason"] = reason
-        row["skill"] = skill or ""
+        row["skill"] = skill if row["category"] == CATEGORY_UNHEALTHY else ""
         return row
 
+    finishes = [
+        parse_time(((cs.get(key) or {}).get("terminated") or {}).get("finishedAt"))
+        for cs in all_statuses
+        for key in ("state", "lastState")
+    ]
+    last_finished = max((f for f in finishes if f is not None), default=None)
+
     if phase == "Failed":
-        return verdict(status.get("reason") or "Failed", SKILL_CRASHLOOP)
+        ended = last_finished or parse_time(status.get("startTime")) or created
+        stale = ended is not None and now - ended > window
+        return verdict(status.get("reason") or "Failed", SKILL_CRASHLOOP, CATEGORY_STALE_FAILED if stale else None)
 
     waiting = [((cs.get("state") or {}).get("waiting") or {}).get("reason") or "" for cs in all_statuses]
     for reason in waiting:
@@ -209,11 +235,11 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
         return verdict("NotReady", None if young else SKILL_CRASHLOOP)
 
     # Running and Ready, but restarted inside the events window: an intermittent crash.
-    for cs in all_statuses:
-        term = (cs.get("lastState") or {}).get("terminated") or {}
-        finished = parse_time(term.get("finishedAt"))
-        if finished is not None and now - finished < window:
-            return verdict("RecentRestart", SKILL_CRASHLOOP)
+    if restarts and last_finished is not None and now - last_finished < window:
+        return verdict("RecentRestart", SKILL_CRASHLOOP)
+    if restarts:
+        row["last_restart"] = format_age(last_finished, now) + " ago" if last_finished else "?"
+        return verdict("RestartedEarlier", SKILL_CRASHLOOP, CATEGORY_RESTARTED_EARLIER)
     return None
 
 
@@ -305,7 +331,12 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
     def system_entry(namespace: str) -> dict:
         return system.setdefault(namespace, {"pods": 0, "unhealthy": 0, "reasons": {}, "controllers_short": 0, "warnings": 0})
 
-    unhealthy, initializing = [], []
+    rows: dict[str, list[dict]] = {
+        CATEGORY_UNHEALTHY: [],
+        CATEGORY_INITIALIZING: [],
+        CATEGORY_RESTARTED_EARLIER: [],
+        CATEGORY_STALE_FAILED: [],
+    }
     counted = 0
     for pod in pods:
         namespace = pod.get("metadata", {}).get("namespace", "")
@@ -315,14 +346,17 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
         if not shown(namespace):
             entry = system_entry(namespace)
             entry["pods"] += 1
-            if row and row["skill"]:
+            if row and row["category"] == CATEGORY_UNHEALTHY:
                 entry["unhealthy"] += 1
                 entry["reasons"][row["reason"]] = entry["reasons"].get(row["reason"], 0) + 1
             continue
         counted += 1
         if row is None:
             continue
-        (unhealthy if row["skill"] else initializing).append(row)
+        rows[row["category"]].append(row)
+    unhealthy, initializing = rows[CATEGORY_UNHEALTHY], rows[CATEGORY_INITIALIZING]
+    restarted_earlier, stale_failed = rows[CATEGORY_RESTARTED_EARLIER], rows[CATEGORY_STALE_FAILED]
+    restarted_earlier.sort(key=lambda r: -r["restarts"])
 
     short = []
     for obj in controllers or []:
@@ -349,9 +383,11 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
     return {
         "summary": {
             "pods": counted,
-            "healthy": counted - len(unhealthy) - len(initializing),
+            "healthy": counted - len(unhealthy) - len(initializing) - len(stale_failed),
             "initializing": len(initializing),
             "unhealthy_pods": len(unhealthy),
+            "restarted_earlier": len(restarted_earlier),
+            "stale_failed": len(stale_failed),
             "controllers_below_desired": len(short),
             "warning_events": len(warnings),
             "events_minutes": events_minutes,
@@ -359,6 +395,8 @@ def triage(run, now: datetime, include_system: bool, grace_minutes: int, events_
         },
         "unhealthy_pods": unhealthy,
         "initializing": initializing,
+        "restarted_earlier": restarted_earlier,
+        "stale_failed": stale_failed,
         "controllers_below_desired": short,
         "warning_events": warnings,
         "system_namespaces": {ns: e for ns, e in sorted(system.items()) if e["unhealthy"] or e["controllers_short"] or e["warnings"]},
@@ -383,7 +421,8 @@ def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
 def render_text(report: dict, max_rows: int) -> str:
     s = report["summary"]
     out = [
-        f"pods: {s['pods']} (healthy {s['healthy']}, initializing {s['initializing']}, unhealthy {s['unhealthy_pods']})"
+        f"pods: {s['pods']} (healthy {s['healthy']}, initializing {s['initializing']}, unhealthy {s['unhealthy_pods']}"
+        f"{', failed earlier ' + str(s['stale_failed']) if s['stale_failed'] else ''})"
         f"  controllers below desired: {s['controllers_below_desired']}"
         f"  warning events ({s['events_minutes']}m): {s['warning_events']}"
     ]
@@ -406,6 +445,16 @@ def render_text(report: dict, max_rows: int) -> str:
         "INITIALIZING (still starting; report as initializing, do not wait)",
         ["NAMESPACE", "POD", "REASON", "AGE"],
         [[r["namespace"], r["pod"], r["reason"], r["age"]] for r in report["initializing"]],
+    )
+    section(
+        "RESTARTED EARLIER (Ready now; last restart before the events window; not counted)",
+        ["NAMESPACE", "POD", "RESTARTS", "LAST EXIT", "LAST RESTART"],
+        [[r["namespace"], r["pod"], str(r["restarts"]), r["last_exit"], r["last_restart"]] for r in report["restarted_earlier"]],
+    )
+    section(
+        "FAILED EARLIER (ended before the events window; replaced by their controller; not counted)",
+        ["NAMESPACE", "POD", "REASON", "LAST EXIT", "AGE"],
+        [[r["namespace"], r["pod"], r["reason"], r["last_exit"], r["age"]] for r in report["stale_failed"]],
     )
     section(
         "CONTROLLERS BELOW DESIRED",
