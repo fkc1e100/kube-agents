@@ -15,9 +15,9 @@ Answer a cluster-wide "what is failing / is it healthy" question from one batche
    python3 /opt/data/scripts/workload_triage.py
    ```
 
-   It ends with `unhealthy: <count>`: unhealthy pods plus controllers below desired, outside system namespaces. Exit code 2 means the pod read failed or returned output it could not parse: block the card as `needs_input`, quoting the stderr line (the reference's "Cannot proceed" section covers this case).
+   It ends with `unhealthy: <count>`: unhealthy pods plus controllers below desired, outside system namespaces. Its rules, for reading the objects yourself where the script cannot run: a pod is unhealthy when a container waits in `CrashLoopBackOff`, an image pull error or a config error, when it is `Pending` or not Ready for more than 10 minutes, when a container restarted in the last hour, or when it `Failed` and no ReplicaSet, StatefulSet or DaemonSet replaces it; the same starting states under 10 minutes are initializing; Warning events count from the last hour. Exit code 2 means the pod read failed or returned output it could not parse: block the card as `needs_input`, quoting the stderr line (the reference's "Cannot proceed" section covers this case).
 
-2. If the last line is `unhealthy: 0`, stop here. Report the summary line (pods healthy, initializing, controllers below desired, warning events), any initializing pods by name, the `RESTARTED EARLIER` rows when the question is about restarts, and the system-namespace line as written. Run no further command.
+2. If the last line is `unhealthy: 0`, stop here. Report the summary line (pods healthy, initializing, controllers below desired, warning events), any initializing pods by name, the `RESTARTED EARLIER` and `FAILED EARLIER` rows when the question is about restarts or failures, and the system-namespace line as written. Run no further command.
 
 3. Otherwise, group the `UNHEALTHY PODS` rows by owning workload (the pod name minus its ReplicaSet or ordinal suffix). Pods of one workload share a cause: investigate one representative pod.
 
@@ -33,7 +33,7 @@ Answer a cluster-wide "what is failing / is it healthy" question from one batche
 
 # Rules
 
-- Keep the scan question to about six commands, the script included. A deeper investigation belongs to the focused skill, and only for the workloads step 4 selected.
+- Keep the scan itself to about six commands, the script included. Each workload step 4 selects adds its focused skill's steps on top of that, usually two commands.
 - Report the current state only. Never `sleep`, `--watch`, or re-run the scan to see whether a pod comes up. A pod in `INITIALIZING` is reported as initializing.
 - Do not explore system namespaces (`kube-*`, `gke-*`, `gmp-*`, `*-system`) or node events. Quote their summary line. Run `--include-system` only when the card asks about a system component.
 - Do not list pods, nodes or controllers again in other shapes. The scan output is the inventory.

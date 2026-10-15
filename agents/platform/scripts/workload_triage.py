@@ -15,8 +15,8 @@ It prints only what needs attention:
   the focused skill that owns the symptom;
 - pods that are still starting, reported as initializing and never waited on;
 - pods that are Ready now but restarted before the events window, and pods
-  that failed before it (Evicted, a finished Job's pod), listed as history and
-  not counted;
+  that failed before it and belong to a controller that replaces them (an
+  evicted ReplicaSet pod), listed as history and not counted;
 - controllers whose ready count is below the desired count;
 - Warning events seen within ``--events-minutes`` (default 60), grouped by
   object and reason.
@@ -83,9 +83,11 @@ CATEGORY_INITIALIZING = "initializing"
 # Running and Ready now, restarted before the events window: the restart count
 # a "find the restarting pods" question asks for, not a live failure.
 CATEGORY_RESTARTED_EARLIER = "restarted_earlier"
-# Failed (Evicted, a finished Job's pod) before the events window. The pod
-# object lingers until garbage collection; its controller has replaced it.
+# Failed (an eviction, say) before the events window, owned by a controller
+# that replaces its pods. The pod object lingers until garbage collection; a
+# shortfall in its replacement shows in CONTROLLERS BELOW DESIRED instead.
 CATEGORY_STALE_FAILED = "stale_failed"
+REPLACING_OWNER_KINDS = frozenset({"ReplicaSet", "StatefulSet", "DaemonSet"})
 
 
 def run_kubectl(args: tuple[str, ...]) -> tuple[int, str, str]:
@@ -145,19 +147,31 @@ def _condition(pod: dict, ctype: str) -> dict:
     return {}
 
 
-def _last_exit(statuses: list[dict]) -> str:
-    """The most recent non-running termination across containers: `<code> <reason>`."""
-    best: tuple[str, str] | None = None
-    for cs in statuses:
-        for state_key in ("state", "lastState"):
-            term = (cs.get(state_key) or {}).get("terminated")
-            if not term:
-                continue
-            finished = term.get("finishedAt") or ""
-            label = f"{term.get('exitCode', '?')} {term.get('reason') or ''}".strip()
-            if best is None or finished > best[0]:
-                best = (finished, label)
-    return best[1] if best else "-"
+def _terminations(init_statuses: list[dict], statuses: list[dict]) -> list[tuple[datetime | None, str]]:
+    """Every recorded container termination as (finishedAt, `<code> <reason>`).
+
+    An init container that exited 0 did its job, so its termination is not a
+    failure and is left out: otherwise every pod with an init container would
+    show `0 Completed` as its last exit.
+    """
+    out = []
+    for is_init, group in ((True, init_statuses), (False, statuses)):
+        for cs in group:
+            for state_key in ("state", "lastState"):
+                term = (cs.get(state_key) or {}).get("terminated")
+                if not term or (is_init and term.get("exitCode") == 0):
+                    continue
+                label = f"{term.get('exitCode', '?')} {term.get('reason') or ''}".strip()
+                out.append((parse_time(term.get("finishedAt")), label))
+    return out
+
+
+def _last_exit(terminations: list[tuple[datetime | None, str]]) -> str:
+    """The label of the most recent termination, or `-`."""
+    dated = [t for t in terminations if t[0] is not None]
+    if dated:
+        return max(dated, key=lambda t: t[0])[1]
+    return terminations[-1][1] if terminations else "-"
 
 
 def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) -> dict | None:
@@ -179,6 +193,7 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
     statuses = status.get("containerStatuses") or []
     all_statuses = init_statuses + statuses
     restarts = sum(int(cs.get("restartCount") or 0) for cs in all_statuses)
+    terminations = _terminations(init_statuses, statuses)
     ready_count = sum(1 for cs in statuses if cs.get("ready"))
     total = len(pod.get("spec", {}).get("containers") or statuses)
     row = {
@@ -187,7 +202,7 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
         "phase": phase,
         "ready": f"{ready_count}/{total}",
         "restarts": restarts,
-        "last_exit": _last_exit(all_statuses),
+        "last_exit": _last_exit(terminations),
         "age": format_age(created, now),
     }
 
@@ -198,17 +213,26 @@ def classify_pod(pod: dict, now: datetime, grace: timedelta, window: timedelta) 
         row["skill"] = skill if row["category"] == CATEGORY_UNHEALTHY else ""
         return row
 
-    finishes = [
-        parse_time(((cs.get(key) or {}).get("terminated") or {}).get("finishedAt"))
-        for cs in all_statuses
-        for key in ("state", "lastState")
-    ]
-    last_finished = max((f for f in finishes if f is not None), default=None)
+    last_finished = max((t[0] for t in terminations if t[0] is not None), default=None)
 
     if phase == "Failed":
-        ended = last_finished or parse_time(status.get("startTime")) or created
+        # When the pod failed: its last container exit, else the newest
+        # condition change (an eviction often records no finishedAt), and only
+        # then its start.
+        transitions = [parse_time(c.get("lastTransitionTime")) for c in status.get("conditions") or []]
+        ended = (
+            last_finished
+            or max((t for t in transitions if t is not None), default=None)
+            or parse_time(status.get("startTime"))
+            or created
+        )
         stale = ended is not None and now - ended > window
-        return verdict(status.get("reason") or "Failed", SKILL_CRASHLOOP, CATEGORY_STALE_FAILED if stale else None)
+        # History only when a controller replaces the pod. A Job's or a bare
+        # pod's failure stays a failure however old it is.
+        owners = {o.get("kind") for o in meta.get("ownerReferences") or []}
+        replaced = bool(owners & REPLACING_OWNER_KINDS)
+        category = CATEGORY_STALE_FAILED if stale and replaced else None
+        return verdict(status.get("reason") or "Failed", SKILL_CRASHLOOP, category)
 
     waiting = [((cs.get("state") or {}).get("waiting") or {}).get("reason") or "" for cs in all_statuses]
     for reason in waiting:
