@@ -17,17 +17,19 @@ Answer a cluster-wide "what is failing / is it healthy" question from one batche
 
    It ends with `unhealthy: <count>`: unhealthy pods plus controllers below desired, outside system namespaces. Exit code 2 means it could not read pods; block the card with its stderr line (`kanban_block(kind="needs_input", ...)`).
 
-2. If the last line is `unhealthy: 0`, stop here. Report the summary line (pods healthy, initializing, controllers below desired, warning events), any initializing pods by name, and the system-namespace line as written. Run no further command.
+2. If the last line is `unhealthy: 0`, stop here. Report the summary line (pods healthy, initializing, controllers below desired, warning events), any initializing pods by name, the `RESTARTED EARLIER` rows when the question is about restarts, and the system-namespace line as written. Run no further command.
 
 3. Otherwise, group the `UNHEALTHY PODS` rows by owning workload (the pod name minus its ReplicaSet or ordinal suffix). Pods of one workload share a cause: investigate one representative pod.
 
-4. Take up to three workloads, in this order: `CrashLoopBackOff`, `Error`, `OOMKilled` or `RecentRestart` first, then `Unschedulable`/`Pending`, then image, mount and config errors, then `NotReady`. Load the skill in the row's `SKILL` column and run its first step for the representative pod. List any further workloads with their scan row only, and say they were not investigated.
+4. Take up to three workloads, in this order: `CrashLoopBackOff`, `Error`, `OOMKilled` or `RecentRestart` first, then `Unschedulable`/`Pending`, then image, mount and config errors, then `NotReady`. Load the skill in the row's `SKILL` column and follow it for the representative pod until the cause is named, usually its first two steps. List any further workloads with their scan row only, and say they were not investigated.
 
-5. A controller in `CONTROLLERS BELOW DESIRED` with no unhealthy pod row is still rolling out or its pods are initializing: report the counts as read, without waiting.
+5. `RESTARTED EARLIER` rows (Ready now, last restart before the events window) and `FAILED EARLIER` rows (pods that ended before the window and were replaced) are history. List them when the question asks about restarts or failures; do not investigate them.
 
-6. A `WARNING EVENTS` row with no matching pod row: `FailedScheduling` goes to `pod-pending-scheduling`; `FailedMount`, `ProvisioningFailed` and `FailedAttachVolume` go to `pod-container-creating`; anything else is reported as the event says.
+6. A controller in `CONTROLLERS BELOW DESIRED` with no unhealthy pod row is still rolling out or its pods are initializing: report the counts as read, without waiting.
 
-7. Record the result as [`references/reporting.md`](references/reporting.md) describes.
+7. A `WARNING EVENTS` row with no matching pod row: `FailedScheduling` goes to `pod-pending-scheduling`; `FailedMount`, `ProvisioningFailed` and `FailedAttachVolume` go to `pod-container-creating`; anything else is reported as the event says.
+
+8. Record the result as [`references/reporting.md`](references/reporting.md) describes.
 
 # Rules
 
