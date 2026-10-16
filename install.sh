@@ -454,6 +454,9 @@ PARAM_AICORE_CLIENT_SECRET="${AICORE_CLIENT_SECRET:-}"
 PARAM_AICORE_AUTH_URL="${AICORE_AUTH_URL:-}"
 PARAM_AICORE_BASE_URL="${AICORE_BASE_URL:-}"
 PARAM_AICORE_RESOURCE_GROUP="${AICORE_RESOURCE_GROUP:-}"
+# Set when a discrete --aicore-* credential flag was typed on this run, so a
+# flag can move an install from a recorded service key to client credentials.
+PARAM_AICORE_DISCRETE_FROM_FLAG="false"
 PARAM_GITOPS_ORG="${GITOPS_ORG:-${GITHUB_ORG:-}}"
 PARAM_GITOPS_REPO="${GITOPS_REPO:-${GITHUB_REPO:-}}"
 PARAM_GITHUB_APP_ID="${GITHUB_APP_ID:-}"
@@ -1091,10 +1094,10 @@ parse_args() {
       --openai-compatible-ca-secret-name=*) PARAM_OPENAI_COMPATIBLE_CA_SECRET_NAME="${1#*=}"; shift ;;
       --openai-compatible-api-key=*) PARAM_OPENAI_COMPATIBLE_API_KEY="${1#*=}"; shift ;;
       --aicore-service-key-file=*) PARAM_AICORE_SERVICE_KEY_FILE="${1#*=}"; shift ;;
-      --aicore-client-id=*) PARAM_AICORE_CLIENT_ID="${1#*=}"; shift ;;
-      --aicore-client-secret=*) PARAM_AICORE_CLIENT_SECRET="${1#*=}"; shift ;;
-      --aicore-auth-url=*) PARAM_AICORE_AUTH_URL="${1#*=}"; shift ;;
-      --aicore-base-url=*) PARAM_AICORE_BASE_URL="${1#*=}"; shift ;;
+      --aicore-client-id=*) PARAM_AICORE_CLIENT_ID="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
+      --aicore-client-secret=*) PARAM_AICORE_CLIENT_SECRET="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
+      --aicore-auth-url=*) PARAM_AICORE_AUTH_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
+      --aicore-base-url=*) PARAM_AICORE_BASE_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
       --aicore-resource-group=*) PARAM_AICORE_RESOURCE_GROUP="${1#*=}"; shift ;;
       --gitops-org=*) PARAM_GITOPS_ORG="${1#*=}"; shift ;;
       --gitops-repo=*) PARAM_GITOPS_REPO="${1#*=}"; shift ;;
@@ -3576,31 +3579,46 @@ read_sap_ai_core_service_key_file() {
   normalize_sap_ai_core_service_key
 }
 
+# Clear the credential shape the operator is leaving, so the one being named is
+# the one LiteLLM reads (it takes the service key first and ignores the rest).
+clear_sap_ai_core_service_key() {
+  export AICORE_SERVICE_KEY=""
+}
+clear_sap_ai_core_discrete_values() {
+  export AICORE_CLIENT_ID="" AICORE_CLIENT_SECRET="" AICORE_AUTH_URL="" AICORE_BASE_URL=""
+}
+
 # Ask for SAP AI Core credentials in either shape LiteLLM accepts: a service key
-# file, or the client id, client secret and two URLs. A key the install already
-# holds is kept on an empty answer, so a re-run that changes nothing loses
-# nothing; the discrete values are asked only when there is no service key,
-# because LiteLLM would ignore them beside one.
+# file, or the client id, client secret and two URLs. Whatever the install
+# already holds is the default, so a re-run that changes nothing loses nothing,
+# and choosing the other shape clears the one being left.
 prompt_sap_ai_core_credentials() {
-  local key_file=""
-  if [ -n "${AICORE_SERVICE_KEY:-}" ]; then
-    prompt_read "Path to a new SAP AI Core service key JSON (empty keeps the current one)" key_file ""
-    if [ -n "$key_file" ]; then
+  local shape_choice="2" key_file=""
+  if [ -n "${AICORE_SERVICE_KEY:-}" ] || sap_ai_core_discrete_named; then
+    shape_choice="1"
+  fi
+  prompt_menu "SAP AI Core credentials:" \
+    "Keep the credentials this install already holds" \
+    "Load a service key JSON file" \
+    "Enter the client id, client secret, auth URL and AI API URL" \
+    shape_choice
+  case "$shape_choice" in
+    2)
+      prompt_read "Path to the SAP AI Core service key JSON" key_file ""
       read_sap_ai_core_service_key_file "$key_file" || return 1
-    fi
-    return 0
-  fi
-  prompt_read "Path to the SAP AI Core service key JSON (empty to enter the client credentials instead)" key_file ""
-  if [ -n "$key_file" ]; then
-    read_sap_ai_core_service_key_file "$key_file" || return 1
-    return 0
-  fi
-  prompt_read "SAP AI Core client id" AICORE_CLIENT_ID "${AICORE_CLIENT_ID:-}"
-  prompt_read "SAP AI Core client secret" AICORE_CLIENT_SECRET "${AICORE_CLIENT_SECRET:-}" true
-  prompt_read "SAP AI Core auth URL (https://<subdomain>.authentication.<region>.hana.ondemand.com)" AICORE_AUTH_URL "${AICORE_AUTH_URL:-}"
-  prompt_read "SAP AI Core AI API URL (https://api.ai.prod.<region>.<hyperscaler>.ml.hana.ondemand.com)" AICORE_BASE_URL "${AICORE_BASE_URL:-}"
-  prompt_read "SAP AI Core resource group" AICORE_RESOURCE_GROUP "${AICORE_RESOURCE_GROUP:-}" false "default"
-  export AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL AICORE_RESOURCE_GROUP
+      clear_sap_ai_core_discrete_values
+      ;;
+    3)
+      clear_sap_ai_core_service_key
+      prompt_read "SAP AI Core client id" AICORE_CLIENT_ID "${AICORE_CLIENT_ID:-}"
+      prompt_read "SAP AI Core client secret" AICORE_CLIENT_SECRET "${AICORE_CLIENT_SECRET:-}" true
+      prompt_read "SAP AI Core auth URL (https://<subdomain>.authentication.<region>.hana.ondemand.com)" AICORE_AUTH_URL "${AICORE_AUTH_URL:-}"
+      prompt_read "SAP AI Core AI API URL (https://api.ai.prod.<region>.<hyperscaler>.ml.hana.ondemand.com)" AICORE_BASE_URL "${AICORE_BASE_URL:-}"
+      export AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL
+      ;;
+  esac
+  prompt_read "SAP AI Core resource group" AICORE_RESOURCE_GROUP "${AICORE_RESOURCE_GROUP:-}" false "$SAP_AI_CORE_DEFAULT_RESOURCE_GROUP"
+  export AICORE_RESOURCE_GROUP
 }
 
 # How long each deployment gets to report ready in the post-install health check.
@@ -6040,11 +6058,15 @@ run_menu_system() {
           save_env_var OPENAI_COMPATIBLE_CA_SECRET_NAME "$openai_compatible_ca_secret_name"
           save_secret_env_var OPENAI_COMPATIBLE_API_KEY "$openai_compatible_api_key"
         fi
-        # Only the SAP AI Core keys that hold a value, so an install on another
-        # provider does not gain six empty lines.
+        # On a sap install all six, empty ones included, so the shape the panel
+        # cleared is cleared in the file too and cannot come back on the next
+        # upgrade.sh. On any other provider only the ones that hold a value, so
+        # the file does not gain six empty lines.
         local sap_save_key
         for sap_save_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
-          [ -z "${!sap_save_key:-}" ] || save_secret_env_var "$sap_save_key" "${!sap_save_key}"
+          if [ "$model_provider" = "sap" ] || [ -n "${!sap_save_key:-}" ]; then
+            save_secret_env_var "$sap_save_key" "${!sap_save_key:-}"
+          fi
         done
         save_env_var ALLOWED_USERS "$allowed_users"
         save_env_var CHAT_TOPIC_NAME "$chat_topic_name"
@@ -7071,6 +7093,17 @@ main() {
       print_info "Serving ${model_default_name} from ${openai_compatible_api_base} through the gateway."
       ;;
     sap)
+      # A shape typed on this run replaces the recorded one, since install.env
+      # does not record credentials and the flag is the only way to say so
+      # non-interactively. Typing both shapes, or recording both, is refused.
+      if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" != "true" ] && sap_ai_core_discrete_named; then
+        print_warning "--aicore-service-key-file replaces the client credentials this install held; the service key is what the gateway will use."
+        clear_sap_ai_core_discrete_values
+      elif [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] && [ -z "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$AICORE_SERVICE_KEY" ]; then
+        print_warning "The --aicore-* client credentials replace the service key this install held. If ${INSTALL_ENV_FILE} records AICORE_SERVICE_KEY, remove it, or upgrade.sh will refuse to run with both."
+        clear_sap_ai_core_service_key
+      fi
+      refuse_both_sap_ai_core_credential_shapes || exit 1
       normalize_sap_ai_core_service_key || exit 1
       if has_sap_ai_core_credentials; then
         print_info "Serving ${model_default_name} through SAP AI Core. LiteLLM exchanges the OAuth2 client credentials for a bearer token and refreshes it before it expires."

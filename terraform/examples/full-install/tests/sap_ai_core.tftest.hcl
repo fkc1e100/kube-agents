@@ -116,6 +116,16 @@ run "sap_without_credentials_warns" {
   expect_failures = [check.sap_ai_core_credentials_present]
 }
 
+run "both_credential_shapes_warn" {
+  command = plan
+  variables {
+    model_provider     = "sap"
+    aicore_service_key = "{\"clientid\":\"sb-client\"}"
+    aicore_client_id   = "sb-other"
+  }
+  expect_failures = [check.sap_ai_core_one_credential_shape]
+}
+
 run "an_unknown_provider_is_refused" {
   command = plan
   variables {

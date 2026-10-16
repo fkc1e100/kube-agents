@@ -45,17 +45,18 @@ Two things have to name that alias, not one. The profile config covers Chat, whi
 
 The two substituted values come from the install (`MODEL_PROVIDER` and `MODEL_DEFAULT_NAME`, saved in `install.env` and carried into the chart values). Supported providers and their shipping defaults:
 
-| `MODEL_PROVIDER`    | Default `MODEL_DEFAULT_NAME` | Notes                                                                                                                                 |
-| ------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `gemini` (default)  | `gemini-3.5-flash`           | Uses `GEMINI_API_KEY`.                                                                                                                |
-| `anthropic`         | `claude-opus-5`              | Uses `ANTHROPIC_API_KEY`.                                                                                                             |
-| `openai`            | `gpt-5.4`                    | Uses `OPENAI_API_KEY`.                                                                                                                |
-| `vertex_ai`         | `gemini-3.5-flash`           | No API key — Workload Identity. See below.                                                                                            |
-| `openai_compatible` | none; required               | Optional `OPENAI_COMPATIBLE_API_KEY`. The base URL is required too. See [below](#openai-compatible-endpoints-self-hosted-or-private). |
+| `MODEL_PROVIDER`    | Default `MODEL_DEFAULT_NAME`   | Notes                                                                                                                                 |
+| ------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `gemini` (default)  | `gemini-3.5-flash`             | Uses `GEMINI_API_KEY`.                                                                                                                |
+| `anthropic`         | `claude-opus-5`                | Uses `ANTHROPIC_API_KEY`.                                                                                                             |
+| `openai`            | `gpt-5.4`                      | Uses `OPENAI_API_KEY`.                                                                                                                |
+| `vertex_ai`         | `gemini-3.5-flash`             | No API key — Workload Identity. See below.                                                                                            |
+| `openai_compatible` | none; required                 | Optional `OPENAI_COMPATIBLE_API_KEY`. The base URL is required too. See [below](#openai-compatible-endpoints-self-hosted-or-private). |
+| `sap`               | `anthropic--claude-4.5-sonnet` | OAuth2 client credentials (`AICORE_*`). See below.                                                                                    |
 
 Any model string the chosen provider accepts is valid — there is no allow-list in the harness. For example, [`examples/litellm-gemini/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-gemini) pins `gemini-3.1-flash-lite`.
 
-For a Claude model (`anthropic`, or `vertex_ai` with a `claude-` model name) the chart adds `additional_drop_params: ["temperature", "top_p", "top_k"]` under every alias. Claude Opus 5 refuses all three with a `400`, and a caller can send them without knowing which model sits behind `model-default`, so the gateway removes them from every request before it reaches the provider. A caller therefore cannot set sampling on any Claude model through the gateway. The kustomize dev copy does not render the key.
+For a Claude model (`anthropic`, `vertex_ai` with a `claude-` model name, or `sap` with an `anthropic--` model name) the chart adds `additional_drop_params: ["temperature", "top_p", "top_k"]` under every alias. Claude Opus 5 refuses all three with a `400`, and a caller can send them without knowing which model sits behind `model-default`, so the gateway removes them from every request before it reaches the provider. A caller therefore cannot set sampling on any Claude model through the gateway. The kustomize dev copy does not render the key.
 
 To change the default on an installed system, re-run the installer with `--menu` (e.g. `./install.sh --menu` or `$HOME/kube-agents/install.sh --menu`) and use the model-provider entry followed by **Save & Apply** — one `terraform apply` rewrites the LiteLLM `ConfigMap` and rolls the gateway. On a dev cluster, set the variables and redeploy the dev copy:
 
@@ -105,7 +106,7 @@ The chart is the only path that renders it. The kustomize dev copy carries no `r
 
 ### Prompt caching
 
-Agent turns are mostly re-sent context: the same system prompt, skills, and conversation tail go up again on every tool call. Anthropic-family models bill that at full price unless the request marks where the reusable prefix ends, and the marks have to be in the request — so when the default model is an Anthropic-family one (`MODEL_PROVIDER=anthropic`, or `vertex_ai` with a `claude-` model), the gateway adds them, via [`cache_control_injection_points`](https://docs.litellm.ai/docs/tutorials/prompt_caching) in its `config.yaml`:
+Agent turns are mostly re-sent context: the same system prompt, skills, and conversation tail go up again on every tool call. Anthropic-family models bill that at full price unless the request marks where the reusable prefix ends, and the marks have to be in the request — so when the default model is an Anthropic-family one (`MODEL_PROVIDER=anthropic`, or `vertex_ai` with a `claude-` model; not yet `sap`), the gateway adds them, via [`cache_control_injection_points`](https://docs.litellm.ai/docs/tutorials/prompt_caching) in its `config.yaml`:
 
 ```yaml
 router_settings:
@@ -307,7 +308,7 @@ curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSI
   --aicore-resource-group=default
 ```
 
-The token URL and AI API URL are public SAP endpoints on port 443, which the gateway's NetworkPolicy already allows. The Claude-specific settings described above, dropped sampling parameters and prompt-caching breakpoints, are not applied to `sap` models.
+The token URL and AI API URL are public SAP endpoints on port 443, which the gateway's NetworkPolicy already allows. A Claude model behind SAP (an `anthropic--` name) has its sampling parameters dropped like any other Claude model, but it gets no prompt-caching breakpoints: those have not been shown to pass SAP's orchestration API.
 
 ## vLLM (local models)
 

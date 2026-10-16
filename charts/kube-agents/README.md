@@ -222,7 +222,8 @@ uses Workload Identity, `openai_compatible`, whose key is optional (both below),
 reads SAP AI Core OAuth2 client credentials (`AICORE_SERVICE_KEY`, or `AICORE_CLIENT_ID`,
 `AICORE_CLIENT_SECRET`, `AICORE_AUTH_URL` and `AICORE_BASE_URL`, plus an optional
 `AICORE_RESOURCE_GROUP`) from the same Secret
-([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#sap-ai-core)); `litellm.modelDefaultName`
+([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#sap-ai-core));
+`sap` is chart-only and has no kustomize overlay; `litellm.modelDefaultName`
 overrides the per-provider default model; `litellm.maxTokens` (default `0`,
 meaning none) puts a `max_tokens` under every alias for a request that names
 none, which a self-hosted backend with one combined prompt-plus-output budget

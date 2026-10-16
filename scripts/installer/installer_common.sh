@@ -87,6 +87,21 @@ readonly KUBECTL_PROBE_REQUEST_TIMEOUT="10s"
 readonly GITHUB_MINTER_DEPLOYMENT="github-token-minter"
 readonly GITHUB_APP_CREDENTIALS_SECRET="github-app-credentials"
 
+# ─── SAP AI Core (MODEL_PROVIDER=sap) ─────────────────────────────────────────
+# The credentials under the names LiteLLM's sap provider reads from its
+# environment. All of them travel in the platform-agent-secrets Secret, the URLs
+# and resource group included: one path is what lets an upgrade recover them
+# from the live Secret and PERSIST_SECRETS_ON_DISK=false keep them off disk, the
+# same as an API key. There are two credential shapes, the service key JSON or
+# the four discrete values, and LiteLLM takes the first source that has any
+# value without merging the two; the resource group applies to either.
+readonly SAP_AI_CORE_DISCRETE_KEYS="AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL"
+readonly SAP_AI_CORE_CREDENTIAL_KEYS="AICORE_SERVICE_KEY ${SAP_AI_CORE_DISCRETE_KEYS} AICORE_RESOURCE_GROUP"
+# What LiteLLM uses when AICORE_RESOURCE_GROUP is unset; named for the prompts
+# that show it, not passed on.
+# shellcheck disable=SC2034  # read by install.sh
+readonly SAP_AI_CORE_DEFAULT_RESOURCE_GROUP="default"
+
 # ─── Scope cap ─────────────────────────────────────
 # The bounds the PlatformAgent puts on spec.scope.maxProjects (SCOPE_MAX_PROJECTS),
 # and its default, which the live-scope check reads an absent key as.
@@ -762,14 +777,15 @@ validate_openai_compatible_inputs() {
   fi
 }
 
-# SAP AI Core credentials, under the names LiteLLM's sap provider reads from its
-# environment. All of them travel in the platform-agent-secrets Secret, the URLs
-# and resource group included: one path is what lets an upgrade recover them
-# from the live Secret and PERSIST_SECRETS_ON_DISK=false keep them off disk, the
-# same as an API key. Give either AICORE_SERVICE_KEY (the service key JSON) or
-# the client id, client secret, auth URL and base URL; LiteLLM takes the first
-# source that has any value and does not merge the two.
-SAP_AI_CORE_CREDENTIAL_KEYS="AICORE_SERVICE_KEY AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL AICORE_RESOURCE_GROUP"
+# Whether this run names any of the four discrete SAP AI Core values. Returns 0
+# when it does.
+sap_ai_core_discrete_named() {
+  local key
+  for key in $SAP_AI_CORE_DISCRETE_KEYS; do
+    [ -z "${!key:-}" ] || return 0
+  done
+  return 1
+}
 
 # Whether this run has enough to authenticate to SAP AI Core: a service key, or
 # all four of the discrete values. Returns 0 when it does. The resource group is
@@ -778,6 +794,16 @@ has_sap_ai_core_credentials() {
   [ -n "${AICORE_SERVICE_KEY:-}" ] && return 0
   [ -n "${AICORE_CLIENT_ID:-}" ] && [ -n "${AICORE_CLIENT_SECRET:-}" ] \
     && [ -n "${AICORE_AUTH_URL:-}" ] && [ -n "${AICORE_BASE_URL:-}" ]
+}
+
+# Refuse a run that holds both SAP AI Core credential shapes, and say which key
+# to drop. LiteLLM reads the service key and silently ignores the discrete
+# values beside it, so carrying both would apply credentials the operator did
+# not mean to use. Returns non-zero after reporting. Caller defines print_error.
+refuse_both_sap_ai_core_credential_shapes() {
+  [ -n "${AICORE_SERVICE_KEY:-}" ] && sap_ai_core_discrete_named || return 0
+  print_error "Both AICORE_SERVICE_KEY and one or more of ${SAP_AI_CORE_DISCRETE_KEYS// /, } are set. LiteLLM reads the service key and ignores the others, so keep one shape: remove AICORE_SERVICE_KEY from ${INSTALL_ENV_FILE:-install.env} to use the client credentials, or remove the four discrete values to use the service key."
+  return 1
 }
 
 # Rewrite AICORE_SERVICE_KEY as single-line JSON, or report why not and return
@@ -4257,17 +4283,19 @@ write_tfvars_from_state() {
   local secret_key secret_val
   local expected_ctx
   expected_ctx="$(gke_context_name)"
-  # The SAP AI Core keys are recovered as one set, and only on a sap install: a
-  # run that names any of them owns all of them. Recovering the others key by
-  # key would let a live AICORE_SERVICE_KEY outlive an operator's switch to the
-  # discrete values, and LiteLLM reads the service key first.
+  # The SAP AI Core keys, on a sap install only, recovered by part rather than
+  # as one set: a run that rotates the client secret or names a resource group
+  # must not lose the rest, and the apply rewrites the Secret from what is
+  # recovered here. The resource group belongs to either shape and always
+  # recovers. The service key recovers only when this run names none of the
+  # four discrete values, and the discrete values only when it names no service
+  # key, so a live value of the shape the operator is leaving cannot come back
+  # and shadow the one being named (LiteLLM reads the service key first).
   local recover_keys="API_SERVER_KEY GEMINI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY OPENAI_COMPATIBLE_API_KEY SLACK_BOT_TOKEN SLACK_APP_TOKEN SESSION_KV_API_KEY SESSION_KV_SALT"
   if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
-    local sap_key sap_named=""
-    for sap_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
-      [ -z "${!sap_key:-}" ] || sap_named="true"
-    done
-    [ -n "$sap_named" ] || recover_keys="$recover_keys $SAP_AI_CORE_CREDENTIAL_KEYS"
+    recover_keys="$recover_keys AICORE_RESOURCE_GROUP"
+    sap_ai_core_discrete_named || recover_keys="$recover_keys AICORE_SERVICE_KEY"
+    [ -n "${AICORE_SERVICE_KEY:-}" ] || recover_keys="$recover_keys $SAP_AI_CORE_DISCRETE_KEYS"
   fi
   if command -v kubectl >/dev/null 2>&1 &&
     [ "$(kubectl config current-context 2>/dev/null || true)" = "$expected_ctx" ]; then
@@ -4289,6 +4317,17 @@ write_tfvars_from_state() {
         print_info "Recovered ${secret_key} from the live '${PLATFORM_AGENT_SECRET}' Secret (install.env does not persist it)."
       fi
     done
+  fi
+
+  # Here rather than only in install.sh's interview, because every front door
+  # passes through this function: upgrade.sh, uninstall.sh and the menu's Save &
+  # Apply read AICORE_SERVICE_KEY straight from install.env, where a key pasted
+  # from the SAP BTP cockpit is multi-line, and a raw newline in a quoted string
+  # is a terraform.tfvars Terraform refuses to parse. After recovery, so the
+  # refusal of two credential shapes sees what the apply would write.
+  normalize_sap_ai_core_service_key || return 1
+  if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
+    refuse_both_sap_ai_core_credential_shapes || return 1
   fi
 
   # MEMORY is the one key whose absence from install.env costs DATA rather than
