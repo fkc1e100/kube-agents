@@ -1563,9 +1563,9 @@ type ForgeSpec struct {
 	// the agent reads which forge was declared rather than guessing from the
 	// URL's text.
 	//
-	// "github" and "gitlab" are registered; the enum grows with each
+	// "github", "gitlab", and "gitea" are registered; the enum grows with each
 	// agent-side provider. Defaults to "github".
-	// +kubebuilder:validation:Enum=github;gitlab
+	// +kubebuilder:validation:Enum=github;gitlab;gitea
 	// +kubebuilder:default=github
 	// +optional
 	Provider string `json:"provider,omitempty"`
@@ -1576,7 +1576,9 @@ type ForgeSpec struct {
 	// it does serve resolves to the provider's canonical host. For GitLab it may
 	// also be a self-managed instance's hostname, which every repository on the
 	// forge must then name or leave implied; a host another provider serves is
-	// rejected.
+	// rejected. A self-managed provider such as "gitea" has no default, so the
+	// host is required there, and any DNS name is accepted; a repository on that
+	// forge may name this host and no other.
 	//
 	// The pattern is a DNS name, which every forge's host is; it is here rather
 	// than only in the webhook so the API server still refuses whitespace and
@@ -1596,9 +1598,9 @@ type ForgeSpec struct {
 	//
 	// On GitHub it is also the organisation the token minter scopes the
 	// agent's credentials to; a repository in another organisation is not
-	// given a token. On GitLab it, with the group of every repository declared
-	// on the forge, is the set of groups the credential broker serves, so a
-	// token that reaches further is still refused there.
+	// given a token. On GitLab and Gitea it, with the group or owner of every
+	// repository declared on the forge, is the set of paths the credential
+	// broker serves, so a token that reaches further is still refused there.
 	//
 	// The schema pattern is every forge's grammar at once, not GitHub's: the
 	// tight rule depends on Provider and a CRD pattern cannot dispatch on a
@@ -1610,6 +1612,22 @@ type ForgeSpec struct {
 	// +kubebuilder:validation:Pattern=`^$|^[A-Za-z0-9][A-Za-z0-9._/-]*$`
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
+
+	// Scheme is how the forge is reached: "https", the default, or "http".
+	// Only a provider that allows plain http accepts it, and only when it is
+	// written out; GitHub and GitLab are https only. Over http the token and
+	// repository contents cross the network unencrypted, so admission warns,
+	// and it is meant for a forge inside the cluster.
+	// +kubebuilder:validation:Enum=https;http
+	// +optional
+	Scheme string `json:"scheme,omitempty"`
+
+	// Port is the forge's port, for a self-managed forge not on the scheme's
+	// default port. It is refused for a hosted provider such as GitHub.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	// +optional
+	Port int32 `json:"port,omitempty"`
 
 	// CredentialsRef names a Secret in the PlatformAgent's namespace holding
 	// the credentials for this forge. It is for providers whose credentials an

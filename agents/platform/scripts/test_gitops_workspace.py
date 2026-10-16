@@ -1496,7 +1496,7 @@ class TestContextRepos(WorkspaceTestCase):
         self.assertIn("no provider for type 'gitlab'", joined)
         self.assertIn("not a GitHub repository URL", joined)
 
-    def test_get_managed_github_repos_silently_skips_supported_gitea_entries(self):
+    def test_get_managed_repos_includes_supported_gitea_entries(self):
         fake_cm = CompletedProcess(
             args=["kubectl"],
             returncode=0,
@@ -1505,7 +1505,10 @@ class TestContextRepos(WorkspaceTestCase):
         )
         with patch("subprocess.run", return_value=fake_cm):
             with self.assertNoLogs("gitops_workspace", level="WARNING"):
-                self.assertEqual(gitops_workspace.get_managed_github_repos(), [])
+                self.assertEqual(
+                    gitops_workspace.get_managed_repos(),
+                    ["gitea-http.gitea.svc.cluster.local/demo/gke-fleet-iac"],
+                )
 
     def test_get_managed_github_repos_survives_an_unparseable_url(self):
         """One malformed entry skips that entry, not the whole sweep."""
@@ -1784,7 +1787,7 @@ class TestForgeNeutralNames(unittest.TestCase):
                     ("github", "https://github.com/acme/gitea"),
                     ("github", "https://github.com/acme/infra"),
                     ("gitlab", "https://gitlab.example.com:8443/acme/fleet"),
-                    ("gitea", "https://gitea.example.com/acme/gitea"),
+                    ("forgejo", "https://gitea.example.com/acme/gitea"),
                 ),
             )
 

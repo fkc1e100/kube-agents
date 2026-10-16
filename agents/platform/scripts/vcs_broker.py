@@ -435,6 +435,7 @@ class VcsBroker:
                 outer_deadline=self._request_deadline,
                 ca_file=forge.ca_file,
                 ca_source=forge.ca_source,
+                allow_http=forge.allow_http,
             )
         raise ForgeUnsupported(
             f"{forge.name} declares the {forge.transport!r} transport, which "

@@ -547,8 +547,9 @@ func TestTheRegistryIsTheProvidersTheAgentServes(t *testing.T) {
 	// ForgeSpec.Provider grow together with the agent-side provider. If this
 	// fails, check that the CRD enum was widened to match.
 	names := GitProviderNames()
-	if strings.Join(names, ",") != GitProviderGitHub+","+GitProviderGitLab {
-		t.Errorf("GitProviderNames() = %v, expected %q and %q", names, GitProviderGitHub, GitProviderGitLab)
+	want := GitProviderGitea + "," + GitProviderGitHub + "," + GitProviderGitLab
+	if strings.Join(names, ",") != want {
+		t.Errorf("GitProviderNames() = %v, expected %s", names, want)
 	}
 }
 

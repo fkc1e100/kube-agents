@@ -53,6 +53,18 @@ const (
 	// at the host the forge declares.
 	GitProviderGitLab = "gitlab"
 
+	// GitProviderGitea names a self-managed Gitea instance.
+	GitProviderGitea = "gitea"
+
+	// ForgeSchemeHTTPS and ForgeSchemeHTTP are the `scheme` values a forge may
+	// declare. HTTPS is the default; HTTP is accepted only where the provider
+	// allows it and only when written out.
+	ForgeSchemeHTTPS = "https"
+	ForgeSchemeHTTP  = "http"
+
+	// DefaultForgeScheme is assumed when a forge's `scheme` is omitted.
+	DefaultForgeScheme = ForgeSchemeHTTPS
+
 	// DefaultGitProvider is assumed when a forge's `provider` is
 	// omitted, and is what the deprecated `spec.integration.github` alias means.
 	DefaultGitProvider = GitProviderGitHub
@@ -66,6 +78,13 @@ const (
 	// the provider's to apply, and a schema pattern cannot dispatch on a sibling
 	// field.
 	MaxGitNamespaceLength = 255
+
+	// MaxGiteaNamespaceLength bounds a Gitea user or organisation name.
+	MaxGiteaNamespaceLength = 40
+
+	// MinForgePort and MaxForgePort bound a declared TCP port.
+	MinForgePort = 1
+	MaxForgePort = 65535
 
 	// githubPathDepth is GitHub's rule: a repository is exactly `owner/name`.
 	githubPathDepth = 2
@@ -148,6 +167,10 @@ type GitProvider struct {
 	// administrator names in caBundleRef. A provider without it refuses the
 	// field: a CA that nothing reads would hide a certificate problem.
 	AcceptsCABundle bool
+	// AllowHTTP permits `scheme: http` on a forge of this provider.
+	AllowHTTP bool
+	// AllowPort permits a non-zero `port` on a forge of this provider.
+	AllowPort bool
 }
 
 // gitProviders is the registry. Adding a forge is adding an entry here and the
@@ -185,6 +208,18 @@ var gitProviders = map[string]*GitProvider{
 		ReservedSegmentSuffixes: []string{".git", ".atom"},
 		NeedsCredentials:        true,
 		AcceptsCABundle:         true,
+	},
+	GitProviderGitea: {
+		Name:               GitProviderGitea,
+		SelfManaged:        true,
+		AllowHTTP:          true,
+		AllowPort:          true,
+		NamespacePattern:   githubOrgRegex,
+		MaxNamespaceLength: MaxGiteaNamespaceLength,
+		MinPathDepth:       githubPathDepth,
+		MaxPathDepth:       githubPathDepth,
+		NeedsCredentials:   true,
+		AcceptsCABundle:    true,
 	},
 }
 
@@ -234,7 +269,13 @@ func (p *GitProvider) ValidateHost(host string) error {
 
 func (p *GitProvider) validateHost(host string, table map[string]*GitProvider) error {
 	trimmed := lowerASCII(strings.TrimSpace(host))
-	if trimmed == "" || p.Hosts[trimmed] {
+	if trimmed == "" {
+		if p.DefaultHost == "" {
+			return fmt.Errorf("%s has no default host; host is required", p.Name)
+		}
+		return nil
+	}
+	if p.Hosts[trimmed] {
 		return nil
 	}
 	if !p.SelfManaged {
@@ -250,6 +291,36 @@ func (p *GitProvider) validateHost(host string, table map[string]*GitProvider) e
 	// reached the egress policy and the broker as a host nothing resolves.
 	if len(validation.IsDNS1123Subdomain(trimmed)) > 0 || !strings.Contains(trimmed, ".") {
 		return fmt.Errorf("host %q is not a hostname", host)
+	}
+	return nil
+}
+
+// ValidateScheme reports whether scheme is accepted by this provider.
+func (p *GitProvider) ValidateScheme(scheme string) error {
+	trimmed := strings.ToLower(strings.TrimSpace(scheme))
+	switch trimmed {
+	case "", ForgeSchemeHTTPS:
+		return nil
+	case ForgeSchemeHTTP:
+		if !p.AllowHTTP {
+			return fmt.Errorf("%s does not allow scheme %q; %s is https only", p.Name, ForgeSchemeHTTP, p.Name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported scheme %q; must be %s or %s", scheme, ForgeSchemeHTTPS, ForgeSchemeHTTP)
+	}
+}
+
+// ValidatePort reports whether port is accepted by this provider.
+func (p *GitProvider) ValidatePort(port int32) error {
+	if port == 0 {
+		return nil
+	}
+	if !p.AllowPort {
+		return fmt.Errorf("%s does not accept a custom port; got %d", p.Name, port)
+	}
+	if port < MinForgePort || port > MaxForgePort {
+		return fmt.Errorf("port %d is out of range (%d..%d)", port, MinForgePort, MaxForgePort)
 	}
 	return nil
 }
@@ -498,7 +569,10 @@ func (p *GitProvider) ParseRepoRef(value string) (RepoRef, error) {
 
 // schemelessHosts is DefaultHost plus every alternative spelling in Hosts.
 func (p *GitProvider) schemelessHosts() map[string]bool {
-	hosts := map[string]bool{p.DefaultHost: true}
+	hosts := map[string]bool{}
+	if p.DefaultHost != "" {
+		hosts[p.DefaultHost] = true
+	}
 	for host := range p.Hosts {
 		hosts[host] = true
 	}

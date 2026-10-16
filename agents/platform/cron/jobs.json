@@ -147,8 +147,8 @@
       "name": "GitHub Repo Watcher",
       "schedule": {
         "kind": "cron",
-        "expr": "*/10 * * * *",
-        "display": "*/10 * * * *"
+        "expr": "* * * * *",
+        "display": "* * * * *"
       },
       "prompt": "",
       "skills": [],

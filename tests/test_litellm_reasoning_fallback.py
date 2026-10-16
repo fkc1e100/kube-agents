@@ -138,13 +138,16 @@ litellm:
         params = {e["model_name"]: e["litellm_params"] for e in config["model_list"]}
         self.assertEqual(params[f"{_MODEL}-low"]["reasoning_effort"], "low")
         self.assertTrue(config["litellm_settings"]["drop_params"])
-        self.assertEqual(config["litellm_settings"]["callbacks"], ["prometheus"])
+        self.assertEqual(
+            config["litellm_settings"]["callbacks"],
+            ["prometheus", "litellm_thinking_replay_callback.proxy_handler_instance"],
+        )
         router = config["router_settings"]
         primaries = ["model-default", "hermes-agent", _MODEL, f"{_MODEL}-high"]
         self.assertEqual(router["fallbacks"], [{p: [f"{_MODEL}-low"]} for p in primaries])
         self.assertEqual(router["timeout"], 120)
         self.assertEqual(router["num_retries"], 1)
-        self.assertIn("default_litellm_params", router)
+        self.assertNotIn("default_litellm_params", router)
 
     def test_named_fallback_alias(self) -> None:
         values = _VERTEX_VALUES + "  fallback:\n    modelName: slow-lane\n    reasoningEffort: low\n"
