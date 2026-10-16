@@ -18,6 +18,7 @@ _SCRIPT_NAME = "agent_roster.py"
 _FALLBACK_SCRIPTS_DIR = Path("/opt/defaults/scripts")
 
 _HEADER = "[SPECIALIST AGENTS AVAILABLE NOW]"
+_MODEL_HEADER = "[RUNTIME MODEL IDENTITY]"
 _FOOTER = (
     "Use one of the names above verbatim as the `assignee` of `kanban_create`. "
     "This list is current as of this turn; call `list_agents` only if an agent "
@@ -102,8 +103,18 @@ def handle_pre_llm_call(**kwargs: Any) -> Optional[Dict[str, str]]:
     # invented assignee. getattr rather than a direct read, because every other
     # module access in this hook is already defensive.
     if roster == getattr(module, "EMPTY_ROSTER", None):
-        return {"context": f"\n\n{_HEADER}\n{roster}\n"}
-    return {"context": f"\n\n{_HEADER}\n{roster}\n\n{_FOOTER}\n"}
+        block = f"\n\n{_HEADER}\n{roster}\n"
+    else:
+        block = f"\n\n{_HEADER}\n{roster}\n\n{_FOOTER}\n"
+    render_model = getattr(module, "render_model_identity", None)
+    if callable(render_model):
+        try:
+            model_identity = render_model()
+            if model_identity:
+                block = f"{block}\n{_MODEL_HEADER}\n{model_identity}\n"
+        except Exception as e:
+            logger.warning("Could not render the runtime model identity: %s", e)
+    return {"context": block}
 
 
 def register(ctx: Any) -> None:

@@ -20,8 +20,11 @@
 # Everything here degrades rather than raises. The profiles live on a shared
 # PVC, so an I/O or permission fault must not turn routing into a traceback.
 
+import json
 import os
 import sys
+import time
+import urllib.request
 
 from pathlib import Path
 
@@ -168,3 +171,86 @@ def render(base: Path | None = None) -> str | None:
     that as "say nothing about the fleet" rather than "the fleet is empty".
     """
     return format_roster(discover(base))
+
+
+_PROVIDER_LABELS = {
+    "vertex_ai": "Google Cloud Vertex AI",
+    "gemini": "Google Gemini",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+}
+_PROBE_RETRY_COOLDOWN_SECS = 30.0
+_cached_gateway_model: str | None = None
+_next_gateway_probe_at: float = 0.0
+
+
+def _split_backing(raw: str) -> tuple[str, str]:
+    """Split `<provider>/<model>` and drop placeholder `model-default` aliases."""
+    s = raw.strip()
+    if not s:
+        return "", ""
+    provider_key, model_name = s.split("/", 1) if "/" in s else ("", s)
+    provider_key, model_name = provider_key.strip(), model_name.strip()
+    if not model_name or model_name == "model-default":
+        return "", ""
+    return provider_key, model_name
+
+
+def _probe_gateway_model() -> str:
+    """Resolve the backing `<provider>/<model>` for `model-default` from LiteLLM."""
+    global _cached_gateway_model, _next_gateway_probe_at
+    if _cached_gateway_model:
+        return _cached_gateway_model
+    now = time.monotonic()
+    if now < _next_gateway_probe_at:
+        return ""
+    url = os.environ.get("LITELLM_MODEL_INFO_URL", "").strip()
+    if not url and os.environ.get("INFERENCE_GATEWAY_SERVICE_HOST", "").strip():
+        ns = os.environ.get("KUBE_DEFAULT_NAMESPACE", "kubeagents-system").strip() or "kubeagents-system"
+        url = f"http://inference-gateway.{ns}.svc.cluster.local/v1/model/info"
+    if not url:
+        return ""
+    _next_gateway_probe_at = now + _PROBE_RETRY_COOLDOWN_SECS
+    try:
+        with urllib.request.urlopen(url, timeout=0.5) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        if not isinstance(payload, dict):
+            return ""
+        for entry in payload.get("data") or ():
+            if isinstance(entry, dict) and entry.get("model_name") == "model-default":
+                params = entry.get("litellm_params")
+                model = str((params if isinstance(params, dict) else {}).get("model") or "").strip()
+                if _split_backing(model)[1]:
+                    _cached_gateway_model = model
+                    return model
+    except Exception as e:
+        log(f"cannot read model info from {url}: {e}")
+    return ""
+
+
+def render_model_identity() -> str | None:
+    """Render the backing LLM model and provider when known, or ``None``."""
+    provider_key, model_name = _split_backing(os.environ.get("LITELLM_BACKING_MODEL", ""))
+    if not model_name:
+        provider_env = os.environ.get("MODEL_PROVIDER", "").strip()
+        model_env = os.environ.get("MODEL_NAME", "").strip()
+        raw_env = f"{provider_env}/{model_env}" if (provider_env and model_env) else model_env
+        provider_key, model_name = _split_backing(raw_env)
+    if not model_name:
+        provider_key, model_name = _split_backing(_probe_gateway_model())
+    if not model_name:
+        return None
+    if provider_key and provider_key != "custom":
+        label = _PROVIDER_LABELS.get(provider_key, provider_key)
+        prov = f"Provider: {label} ({provider_key})" if label != provider_key else f"Provider: {label}"
+        return (
+            f"Backing model: {model_name}\n{prov}\n"
+            "When asked what model or provider you are running on, state this backing model "
+            "and provider directly; never report internal router alias names or the `custom` "
+            "provider placeholder."
+        )
+    return (
+        f"Backing model: {model_name}\n"
+        "When asked what model you are running on, state this backing model directly; "
+        "never report internal router alias names or the `custom` provider placeholder."
+    )

@@ -34,7 +34,17 @@ class InjectionTest(unittest.TestCase):
         shutil.copy(ROSTER_SOURCE, self.data_dir / "scripts" / "agent_roster.py")
         self.profiles = self.data_dir / "profiles"
         self.profiles.mkdir()
-        self._env = mock.patch.dict("os.environ", {"HERMES_HOME": str(self.data_dir)})
+        self._env = mock.patch.dict(
+            "os.environ",
+            {
+                "HERMES_HOME": str(self.data_dir),
+                "LITELLM_BACKING_MODEL": "",
+                "MODEL_PROVIDER": "",
+                "MODEL_NAME": "",
+                "LITELLM_MODEL_INFO_URL": "",
+                "INFERENCE_GATEWAY_SERVICE_HOST": "",
+            },
+        )
         self._env.start()
         # The module handle is cached for the process; a stale one from another
         # test would silently read the wrong tree.
@@ -135,6 +145,15 @@ class InjectionTest(unittest.TestCase):
         self._profile("default")
         self._profile("platform", "Fleet work.")
         self.assertIn("verbatim as the `assignee`", plugin.handle_pre_llm_call()["context"])
+
+    def test_injects_runtime_model_identity_when_configured(self):
+        self._profile("default")
+        self._profile("platform", "Fleet work.")
+        with mock.patch.dict(os.environ, {"LITELLM_BACKING_MODEL": "vertex_ai/gemini-3.8-flash"}):
+            context = plugin.handle_pre_llm_call()["context"]
+        self.assertIn("[RUNTIME MODEL IDENTITY]", context)
+        self.assertIn("Backing model: gemini-3.8-flash", context)
+        self.assertIn("Provider: Google Cloud Vertex AI (vertex_ai)", context)
 
     @unittest.skipIf(os.geteuid() == 0, "root bypasses the mode bits this test relies on")
     def test_an_unreadable_profiles_dir_injects_nothing(self):
