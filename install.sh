@@ -1094,11 +1094,21 @@ parse_args() {
       --openai-compatible-ca-secret-name=*) PARAM_OPENAI_COMPATIBLE_CA_SECRET_NAME="${1#*=}"; shift ;;
       --openai-compatible-api-key=*) PARAM_OPENAI_COMPATIBLE_API_KEY="${1#*=}"; shift ;;
       --aicore-service-key-file=*) PARAM_AICORE_SERVICE_KEY_FILE="${1#*=}"; shift ;;
-      --aicore-client-id=*) PARAM_AICORE_CLIENT_ID="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
-      --aicore-client-secret=*) PARAM_AICORE_CLIENT_SECRET="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
-      --aicore-auth-url=*) PARAM_AICORE_AUTH_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
-      --aicore-base-url=*) PARAM_AICORE_BASE_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"; shift ;;
-      --aicore-resource-group=*) PARAM_AICORE_RESOURCE_GROUP="${1#*=}"; shift ;;
+      --aicore-client-id=*)
+        PARAM_AICORE_CLIENT_ID="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        note_install_env_flag AICORE_CLIENT_ID "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_CLIENT_ID; shift ;;
+      --aicore-client-secret=*)
+        PARAM_AICORE_CLIENT_SECRET="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        note_install_env_flag AICORE_CLIENT_SECRET "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_CLIENT_SECRET; shift ;;
+      --aicore-auth-url=*)
+        PARAM_AICORE_AUTH_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        note_install_env_flag AICORE_AUTH_URL "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_AUTH_URL; shift ;;
+      --aicore-base-url=*)
+        PARAM_AICORE_BASE_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        note_install_env_flag AICORE_BASE_URL "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_BASE_URL; shift ;;
+      --aicore-resource-group=*)
+        PARAM_AICORE_RESOURCE_GROUP="${1#*=}"
+        note_install_env_flag AICORE_RESOURCE_GROUP "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_RESOURCE_GROUP; shift ;;
       --gitops-org=*) PARAM_GITOPS_ORG="${1#*=}"; shift ;;
       --gitops-repo=*) PARAM_GITOPS_REPO="${1#*=}"; shift ;;
       --gitops-forge=*) PARAM_GITOPS_FORGE="${1#*=}"; shift ;;
@@ -1942,7 +1952,8 @@ warn_unrecorded_interview_answers() {
     CHAT_TOPIC_NAME CHAT_SUB_NAME MODEL_PROVIDER MODEL_DEFAULT_NAME MODEL_MAX_TOKENS PLATFORM_AGENT_PERMISSION_SET
     OPENAI_COMPATIBLE_API_BASE OPENAI_COMPATIBLE_TARGET_PORT OPENAI_COMPATIBLE_EGRESS_CIDRS OPENAI_COMPATIBLE_CA_SECRET_NAME
     PLATFORM_AGENT_CUSTOM_ROLES ENABLE_GVISOR HERMES_DASHBOARD_ENABLED MEMORY
-    USER_PROFILE_ENABLED GITOPS_ORG GITOPS_REPO GITHUB_APP_ID GITOPS_FORGE GITOPS_HOST GITLAB_TOKEN_SECRET GITOPS_CA_SECRET)
+    USER_PROFILE_ENABLED GITOPS_ORG GITOPS_REPO GITHUB_APP_ID GITOPS_FORGE GITOPS_HOST GITLAB_TOKEN_SECRET GITOPS_CA_SECRET
+    AICORE_SERVICE_KEY AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL AICORE_RESOURCE_GROUP)
   # One evaluation of the file for the whole list, in this shell, so the reads
   # below land on the cache instead of re-running whatever the file's lines run.
   read_recorded_install_env_values "$file" "${interview_keys[@]}"
@@ -1967,6 +1978,11 @@ warn_unrecorded_interview_answers() {
       MEMORY) current="${PARAM_MEMORY:-}" ;;
       *) current="${!key:-}" ;;
     esac
+    # The run compacts the service key to one line, and the file may hold it as
+    # the cockpit gave it; the same key either way is not drift.
+    if [ "$key" = "AICORE_SERVICE_KEY" ] && [ -n "$recorded" ]; then
+      recorded="$(printf '%s' "$recorded" | jq -c . 2>/dev/null || printf '%s' "$recorded")"
+    fi
     [ "$recorded" != "$current" ] || continue
     # The GitHub GitOps keys follow the answer when the run commits
     # (record_github_gitops_keys), so they are not drift to report.
@@ -1987,6 +2003,13 @@ warn_unrecorded_interview_answers() {
   print_info "The next run -- or upgrade.sh, or the Day-2 menu -- regenerates from"
   print_info "the file, which will revert what you just changed. Update these keys:"
   for key in $drifted; do
+    # A credential shape the interview switched away from: the line has to go,
+    # not take a value, or LiteLLM keeps reading the service key beside the new
+    # client credentials.
+    if [[ "$key" == AICORE_* ]] && [ -z "${!key:-}" ]; then
+      print_info "  ${key}=   (remove it: this run dropped it)"
+      continue
+    fi
     case "$key" in
       *TOKEN | *_KEY | *SECRET)
         print_info "  ${key}=<the value you entered>"
@@ -3568,15 +3591,26 @@ prompt_menu() {
 # to one line. A file rather than a pasted value, because the key is multi-line
 # JSON and a one-line prompt would hand its second line to the next question.
 read_sap_ai_core_service_key_file() {
-  local path
+  local path content previous="${AICORE_SERVICE_KEY:-}"
   path="$(expand_tilde_path "$1")"
-  if [ ! -r "$path" ]; then
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
     print_error "Cannot read the SAP AI Core service key file '${path}'."
     return 1
   fi
-  AICORE_SERVICE_KEY="$(cat "$path")"
-  export AICORE_SERVICE_KEY
-  normalize_sap_ai_core_service_key
+  content="$(cat "$path")"
+  # A file the operator named that holds nothing is a mistake to refuse, not
+  # "no key given", which is what an empty AICORE_SERVICE_KEY would read as.
+  if [ -z "${content//[[:space:]]/}" ]; then
+    print_error "The SAP AI Core service key file '${path}' is empty."
+    return 1
+  fi
+  # The value is taken only once it passes, so a file that does not hold a
+  # service key leaves whatever the install held before in place.
+  export AICORE_SERVICE_KEY="$content"
+  if ! normalize_sap_ai_core_service_key; then
+    export AICORE_SERVICE_KEY="$previous"
+    return 1
+  fi
 }
 
 # Clear the credential shape the operator is leaving, so the one being named is
@@ -3588,13 +3622,53 @@ clear_sap_ai_core_discrete_values() {
   export AICORE_CLIENT_ID="" AICORE_CLIENT_SECRET="" AICORE_AUTH_URL="" AICORE_BASE_URL=""
 }
 
+# The SAP AI Core flags against an existing install.env. install.env is an input
+# this run does not rewrite (scripts/installer/README.md, "install.env"), so a
+# flag that moves an install off a credential shape the file records, or names a
+# different service key from the one it records, would hold for one run: the
+# next run without the flag, and every upgrade.sh, renders the recorded value
+# again. Refused, as check_flag_against_install_env refuses a typed credential
+# that disagrees with the file; the discrete flags each go through that check
+# too. Returns 1 having said why. Needs installer_common.sh sourced.
+refuse_sap_ai_core_flags_against_install_env() {
+  local file="${INSTALL_ENV_FILE:-}" key recorded_key recorded_discrete=""
+  [ -n "$file" ] && [ -f "$file" ] || return 0
+  [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] || [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] || return 0
+  # shellcheck disable=SC2086  # a word list by design
+  read_recorded_install_env_values "$file" $SAP_AI_CORE_CREDENTIAL_KEYS
+  recorded_key="$(recorded_install_env_value "$file" AICORE_SERVICE_KEY)"
+  for key in $SAP_AI_CORE_DISCRETE_KEYS; do
+    [ -z "$(recorded_install_env_value "$file" "$key")" ] || recorded_discrete="true"
+  done
+  if [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] && [ -n "$recorded_key" ]; then
+    print_error "The --aicore-* client credentials would replace the AICORE_SERVICE_KEY ${file} records for this run only; the next run without the flags, and every upgrade.sh, renders the recorded service key again."
+    print_info "Remove AICORE_SERVICE_KEY from ${file}, set ${SAP_AI_CORE_DISCRETE_KEYS// /, } there, and re-run without the flags, or switch with './install.sh --menu', whose Save & Apply writes them."
+    return 1
+  fi
+  if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$recorded_discrete" ]; then
+    print_error "--aicore-service-key-file would replace the client credentials ${file} records for this run only; the next run without the flag, and every upgrade.sh, renders the recorded credentials again."
+    print_info "Remove ${SAP_AI_CORE_DISCRETE_KEYS// /, } from ${file}, set AICORE_SERVICE_KEY there, and re-run without the flag, or switch with './install.sh --menu', whose Save & Apply writes it."
+    return 1
+  fi
+  if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$recorded_key" ] &&
+    [ "$(printf '%s' "$recorded_key" | jq -cS . 2>/dev/null || true)" != "$(printf '%s' "${AICORE_SERVICE_KEY:-}" | jq -cS . 2>/dev/null || true)" ]; then
+    print_error "--aicore-service-key-file gives a different AICORE_SERVICE_KEY from the one ${file} records, so it would hold for this run only."
+    print_info "Replace AICORE_SERVICE_KEY in ${file} with the new key and re-run without the flag."
+    return 1
+  fi
+  return 0
+}
+
 # Ask for SAP AI Core credentials in either shape LiteLLM accepts: a service key
 # file, or the client id, client secret and two URLs. Whatever the install
 # already holds is the default, so a re-run that changes nothing loses nothing,
 # and choosing the other shape clears the one being left.
 prompt_sap_ai_core_credentials() {
   local shape_choice="2" key_file=""
-  if [ -n "${AICORE_SERVICE_KEY:-}" ] || sap_ai_core_discrete_named; then
+  # "Keep" is the default on any install that is already sap, not only one whose
+  # environment holds a credential: with PERSIST_SECRETS_ON_DISK=false the six
+  # values live in the Secret, and the generator recovers them later.
+  if [ -n "${AICORE_SERVICE_KEY:-}" ] || sap_ai_core_discrete_named || [ "${MODEL_PROVIDER:-}" = "sap" ]; then
     shape_choice="1"
   fi
   prompt_menu "SAP AI Core credentials:" \
@@ -3604,9 +3678,20 @@ prompt_sap_ai_core_credentials() {
     shape_choice
   case "$shape_choice" in
     2)
-      prompt_read "Path to the SAP AI Core service key JSON" key_file ""
-      read_sap_ai_core_service_key_file "$key_file" || return 1
-      clear_sap_ai_core_discrete_values
+      # Asked again on a path that does not read or does not hold a service
+      # key, rather than ending the interview or the Day-2 panel and losing its
+      # unsaved edits. An empty answer leaves the credentials as they were and
+      # falls through to the caller's "no credentials" warning; a run with no
+      # TTY auto-answers empty, so it cannot loop.
+      while true; do
+        key_file=""
+        prompt_read "Path to the SAP AI Core service key JSON (empty to skip)" key_file ""
+        [ -n "$key_file" ] || break
+        if read_sap_ai_core_service_key_file "$key_file"; then
+          clear_sap_ai_core_discrete_values
+          break
+        fi
+      done
       ;;
     3)
       clear_sap_ai_core_service_key
@@ -7093,14 +7178,16 @@ main() {
       print_info "Serving ${model_default_name} from ${openai_compatible_api_base} through the gateway."
       ;;
     sap)
-      # A shape typed on this run replaces the recorded one, since install.env
-      # does not record credentials and the flag is the only way to say so
-      # non-interactively. Typing both shapes, or recording both, is refused.
+      # A shape typed on this run replaces one the run only inherited (from the
+      # environment, or from the live Secret, which the generator would
+      # recover). One install.env records is refused instead: install.env is
+      # an input this run does not rewrite, so the switch would last one run.
+      refuse_sap_ai_core_flags_against_install_env || exit 1
       if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" != "true" ] && sap_ai_core_discrete_named; then
-        print_warning "--aicore-service-key-file replaces the client credentials this install held; the service key is what the gateway will use."
+        print_info "--aicore-service-key-file replaces the client credentials this run inherited; the service key is what the gateway will use."
         clear_sap_ai_core_discrete_values
       elif [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] && [ -z "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$AICORE_SERVICE_KEY" ]; then
-        print_warning "The --aicore-* client credentials replace the service key this install held. If ${INSTALL_ENV_FILE} records AICORE_SERVICE_KEY, remove it, or upgrade.sh will refuse to run with both."
+        print_info "The --aicore-* client credentials replace the service key this run inherited."
         clear_sap_ai_core_service_key
       fi
       refuse_both_sap_ai_core_credential_shapes || exit 1

@@ -101,6 +101,10 @@ readonly SAP_AI_CORE_CREDENTIAL_KEYS="AICORE_SERVICE_KEY ${SAP_AI_CORE_DISCRETE_
 # that show it, not passed on.
 # shellcheck disable=SC2034  # read by install.sh
 readonly SAP_AI_CORE_DEFAULT_RESOURCE_GROUP="default"
+# The jq program normalize_sap_ai_core_service_key runs under -s: exactly one
+# object carrying a clientid at the top level or under "credentials", emitted
+# compact; anything else is an error and an empty result.
+readonly SAP_AI_CORE_SERVICE_KEY_FILTER='if length == 1 and (.[0] | type) == "object" and (.[0] | has("clientid") or ((.credentials | type) == "object" and (.credentials | has("clientid")))) then .[0] else error("not an SAP AI Core service key") end'
 
 # ─── Scope cap ─────────────────────────────────────
 # The bounds the PlatformAgent puts on spec.scope.maxProjects (SCOPE_MAX_PROJECTS),
@@ -802,7 +806,7 @@ has_sap_ai_core_credentials() {
 # not mean to use. Returns non-zero after reporting. Caller defines print_error.
 refuse_both_sap_ai_core_credential_shapes() {
   [ -n "${AICORE_SERVICE_KEY:-}" ] && sap_ai_core_discrete_named || return 0
-  print_error "Both AICORE_SERVICE_KEY and one or more of ${SAP_AI_CORE_DISCRETE_KEYS// /, } are set. LiteLLM reads the service key and ignores the others, so keep one shape: remove AICORE_SERVICE_KEY from ${INSTALL_ENV_FILE:-install.env} to use the client credentials, or remove the four discrete values to use the service key."
+  print_error "Both AICORE_SERVICE_KEY and one or more of ${SAP_AI_CORE_DISCRETE_KEYS// /, } are set. LiteLLM reads the service key and ignores the others, so keep one shape: remove AICORE_SERVICE_KEY to use the client credentials, or the four discrete values to use the service key, from ${INSTALL_ENV_FILE:-install.env} or, where that file does not record them, from the live '${PLATFORM_AGENT_SECRET}' Secret."
   return 1
 }
 
@@ -810,14 +814,18 @@ refuse_both_sap_ai_core_credential_shapes() {
 # non-zero. A service key is downloaded from the SAP BTP cockpit as indented,
 # multi-line JSON, and terraform.tfvars cannot carry a raw newline inside a
 # quoted string, so the generator would write a file Terraform refuses to parse.
-# Compacting also proves the value is JSON here, before any apply, rather than
-# as a LiteLLM warning at the first model call. An unset key is left alone.
-# jq is already a prerequisite of every front door. Caller defines print_error.
+# The check is that the value is one JSON object carrying a clientid, at the top
+# level or under "credentials" (the two places LiteLLM looks), not merely JSON:
+# `{}`, a list, or a key pasted twice is refused here, before any apply, rather
+# than failing inside LiteLLM at the first model call, and two documents would
+# otherwise compact to two lines and break the tfvars after all. An unset key
+# is left alone. jq is already a prerequisite of every front door. Caller
+# defines print_error.
 normalize_sap_ai_core_service_key() {
   [ -n "${AICORE_SERVICE_KEY:-}" ] || return 0
   local compacted
-  if ! compacted="$(printf '%s' "$AICORE_SERVICE_KEY" | jq -c . 2>/dev/null)" || [ -z "$compacted" ]; then
-    print_error "AICORE_SERVICE_KEY is not valid JSON. Paste the service key exactly as the SAP BTP cockpit gives it, or set AICORE_CLIENT_ID, AICORE_CLIENT_SECRET, AICORE_AUTH_URL and AICORE_BASE_URL instead."
+  if ! compacted="$(printf '%s' "$AICORE_SERVICE_KEY" | jq -cs "$SAP_AI_CORE_SERVICE_KEY_FILTER" 2>/dev/null)" || [ -z "$compacted" ]; then
+    print_error "AICORE_SERVICE_KEY is not an SAP AI Core service key: it must be one JSON object with a clientid. Paste the service key exactly as the SAP BTP cockpit gives it, or set AICORE_CLIENT_ID, AICORE_CLIENT_SECRET, AICORE_AUTH_URL and AICORE_BASE_URL instead."
     return 1
   fi
   export AICORE_SERVICE_KEY="$compacted"
@@ -4320,13 +4328,16 @@ write_tfvars_from_state() {
   fi
 
   # Here rather than only in install.sh's interview, because every front door
-  # passes through this function: upgrade.sh, uninstall.sh and the menu's Save &
-  # Apply read AICORE_SERVICE_KEY straight from install.env, where a key pasted
-  # from the SAP BTP cockpit is multi-line, and a raw newline in a quoted string
-  # is a terraform.tfvars Terraform refuses to parse. After recovery, so the
-  # refusal of two credential shapes sees what the apply would write.
-  normalize_sap_ai_core_service_key || return 1
+  # passes through this function: upgrade.sh and the menu's Save & Apply read
+  # AICORE_SERVICE_KEY straight from install.env, where a key pasted from the
+  # SAP BTP cockpit is multi-line, and a raw newline in a quoted string is a
+  # terraform.tfvars Terraform refuses to parse. After recovery, so the refusal
+  # of two credential shapes sees what the apply would write. On a sap install
+  # only: another provider never renders the keys (below), so a stray value in
+  # its install.env is not this run's to refuse. uninstall.sh renders the
+  # default provider for the same reason.
   if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
+    normalize_sap_ai_core_service_key || return 1
     refuse_both_sap_ai_core_credential_shapes || return 1
   fi
 
@@ -4745,13 +4756,16 @@ write_tfvars_from_state() {
       if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "openai_compatible" ]; then
         echo "openai_compatible_api_key = $(hcl_str "${OPENAI_COMPATIBLE_API_KEY:-}")"
       fi
-      # Only the keys that are set, so an install on another provider writes
-      # the same file it always did.
+      # Only the keys that are set, and only on a sap install, so an install on
+      # another provider writes the same file it always did, whatever a stray
+      # AICORE_* in its environment holds.
       local sap_key
-      for sap_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
-        [ -n "${!sap_key:-}" ] || continue
-        echo "$(printf '%s' "$sap_key" | tr '[:upper:]' '[:lower:]') = $(hcl_str "${!sap_key}")"
-      done
+      if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
+        for sap_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+          [ -n "${!sap_key:-}" ] || continue
+          echo "$(printf '%s' "$sap_key" | tr '[:upper:]' '[:lower:]') = $(hcl_str "${!sap_key}")"
+        done
+      fi
       if [ -n "${SESSION_KV_API_KEY:-}" ] || [ -n "${SESSION_KV_SALT:-}" ]; then
         echo "# Recovered from the live Secret: an adoption re-install must keep the"
         echo "# salt, or every chat identity re-pseudonymises."
@@ -4902,9 +4916,11 @@ write_tfvars_from_state() {
   export TF_VAR_openai_api_key="${OPENAI_API_KEY:-}"
   export TF_VAR_anthropic_api_key="${ANTHROPIC_API_KEY:-}"
   export TF_VAR_openai_compatible_api_key="${OPENAI_COMPATIBLE_API_KEY:-}"
-  local sap_tf_key
+  local sap_tf_key sap_tf_value
   for sap_tf_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
-    export "TF_VAR_$(printf '%s' "$sap_tf_key" | tr '[:upper:]' '[:lower:]')=${!sap_tf_key:-}"
+    sap_tf_value=""
+    [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" != "sap" ] || sap_tf_value="${!sap_tf_key:-}"
+    export "TF_VAR_$(printf '%s' "$sap_tf_key" | tr '[:upper:]' '[:lower:]')=${sap_tf_value}"
   done
   export TF_VAR_slack_bot_token="${SLACK_BOT_TOKEN:-}"
   export TF_VAR_slack_app_token="${SLACK_APP_TOKEN:-}"

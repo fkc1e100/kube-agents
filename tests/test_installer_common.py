@@ -2357,8 +2357,6 @@ class InstallerCommonTest(unittest.TestCase):
         "AICORE_AUTH_URL": "https://tenant.authentication.eu10.hana.ondemand.com",
         "AICORE_BASE_URL": "https://api.ai.prod.eu-central-1.aws.ml.hana.ondemand.com",
     }
-    _SAP_ALL_KEYS = ("AICORE_SERVICE_KEY", "AICORE_CLIENT_ID", "AICORE_CLIENT_SECRET",
-                     "AICORE_AUTH_URL", "AICORE_BASE_URL", "AICORE_RESOURCE_GROUP")
 
     @staticmethod
     def _sap_secret_kubectl(live_keys):
@@ -2479,11 +2477,38 @@ class InstallerCommonTest(unittest.TestCase):
             env={"AICORE_SERVICE_KEY": "clientid=sb-client"},
         )
         self.assertIn("rc=1", proc.stdout)
-        self.assertIn("AICORE_SERVICE_KEY is not valid JSON", proc.stderr + proc.stdout)
+        self.assertIn("AICORE_SERVICE_KEY is not an SAP AI Core service key", proc.stderr + proc.stdout)
+
+    def test_sap_ai_core_service_key_must_be_one_object_with_a_clientid(self):
+        # JSON that is not a service key is refused before any apply: LiteLLM
+        # would otherwise fail on it at the first model call, and two documents
+        # would compact to two lines and break terraform.tfvars after all.
+        refused = ["{}", "[]", "null", "42", '"text"', '{"clientid":"a"}\n{"clientid":"b"}']
+        for value in refused:
+            with self.subTest(value=value):
+                proc = self._run(
+                    'rc=0; normalize_sap_ai_core_service_key || rc=$?; echo "rc=$rc"',
+                    env={"AICORE_SERVICE_KEY": value},
+                )
+                self.assertIn("rc=1", proc.stdout, proc.stderr)
+        # LiteLLM also reads a clientid nested under "credentials" (the VCAP form).
+        proc = self._run(
+            'normalize_sap_ai_core_service_key; echo "rc=$?"; printf "key=%s\\n" "$AICORE_SERVICE_KEY"',
+            env={"AICORE_SERVICE_KEY": '{\n "credentials": {"clientid": "sb-client"}\n}'},
+        )
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertIn('key={"credentials":{"clientid":"sb-client"}}', proc.stdout)
+
+    def test_another_provider_ignores_a_stray_sap_ai_core_key(self):
+        # A non-sap install is never asked to parse AICORE_* (uninstall.sh and
+        # upgrade.sh must not stop on a stray value), and never renders them.
+        content, output = self._sap_tfvars({"AICORE_SERVICE_KEY": "not json", "AICORE_CLIENT_ID": "sb-client"})
+        self.assertNotIn("aicore_", content)
+        self.assertIn("tfvar=\n", output + "\n")
 
     def test_sap_ai_core_credentials_need_a_service_key_or_all_four_values(self):
         cases = [
-            ({"AICORE_SERVICE_KEY": "{}"}, "0"),
+            ({"AICORE_SERVICE_KEY": '{"clientid":"sb-client"}'}, "0"),
             (dict(list(self._SAP_DISCRETE.items())[1:]), "0"),
             ({**dict(list(self._SAP_DISCRETE.items())[1:]), "AICORE_BASE_URL": ""}, "1"),
             ({}, "1"),
