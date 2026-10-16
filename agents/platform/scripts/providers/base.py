@@ -127,6 +127,8 @@ class Forge:
     # built from: a host with no entry is refused before a token is spent.
     name = "abstract"
     hosts: tuple[str, ...] = ()
+    schemes: tuple[str, ...] = ("https",)
+    allow_http: bool = False
     # What this forge calls a change proposal, for messages the caller reads.
     proposal_noun = "change proposal"
     # Which of the collaboration verbs this forge serves. A forge that serves
