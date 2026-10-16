@@ -67,16 +67,18 @@ def _load_roster_module() -> Optional[ModuleType]:
 
 
 def handle_pre_llm_call(**kwargs: Any) -> Optional[Dict[str, str]]:
-    """Put the current specialist roster in front of the model on every turn.
+    """Put the specialist roster and runtime model identity in front of the model.
 
     The Chat Agent must name an `assignee` to delegate anything, and the set of
     specialists is dynamic — per-cluster agents appear and disappear as the
     fleet changes — so it was told to call `list_agents` before every routing
-    decision. The tool itself takes about 0.1s, but invoking it costs a whole
-    LLM roundtrip: measured on the live deployment, roughly 6s of a ~17s
-    acknowledgement went to fetching what is, underneath, a directory listing.
-    Injecting it here makes that roundtrip unnecessary in the common case; the
-    tool remains as the refresh path.
+    decision. Injecting it here makes that roundtrip unnecessary in the common
+    case; the tool remains as the refresh path.
+
+    The model identity block is independent of the specialist roster: an I/O
+    fault reading profiles on the shared PVC must not prevent injecting the
+    backing model and provider, and a failure to resolve the model must not
+    prevent injecting the roster.
 
     Fails soft in every direction. This hook runs ahead of every single user
     turn on the front door, so a raise here is a chat agent that cannot answer
@@ -85,36 +87,40 @@ def handle_pre_llm_call(**kwargs: Any) -> Optional[Dict[str, str]]:
     module = _load_roster_module()
     if module is None:
         return None
+
+    roster = None
     try:
         data_dir = Path(os.environ.get("HERMES_HOME", "/opt/data"))
         roster = module.render(data_dir / "profiles")
     except Exception as e:
         logger.warning("Could not render the agent roster: %s", e)
-        return None
-    # render() returns None when discovery itself failed. Inject nothing: the
-    # model then falls back to `list_agents`, which is the pre-injection
-    # behaviour. Injecting "no specialist agents are available" instead would
-    # state a fault as a fact and stop the front door routing at all.
-    if not roster:
-        return None
-    # An empty fleet is a fact worth stating, but the footer must not ride
-    # along with it: "use one of the names above" against a list with no names
-    # in it, on a persona forbidden from doing the work itself, invites an
-    # invented assignee. getattr rather than a direct read, because every other
-    # module access in this hook is already defensive.
-    if roster == getattr(module, "EMPTY_ROSTER", None):
-        block = f"\n\n{_HEADER}\n{roster}\n"
-    else:
-        block = f"\n\n{_HEADER}\n{roster}\n\n{_FOOTER}\n"
+
+    model_identity = None
     render_model = getattr(module, "render_model_identity", None)
     if callable(render_model):
         try:
             model_identity = render_model()
-            if model_identity:
-                block = f"{block}\n{_MODEL_HEADER}\n{model_identity}\n"
         except Exception as e:
             logger.warning("Could not render the runtime model identity: %s", e)
-    return {"context": block}
+
+    blocks: list[str] = []
+    if roster:
+        # An empty fleet is a fact worth stating, but the footer must not ride
+        # along with it: "use one of the names above" against a list with no names
+        # in it, on a persona forbidden from doing the work itself, invites an
+        # invented assignee.
+        if roster == getattr(module, "EMPTY_ROSTER", None):
+            blocks.append(f"{_HEADER}\n{roster}")
+        else:
+            blocks.append(f"{_HEADER}\n{roster}\n\n{_FOOTER}")
+
+    if model_identity:
+        blocks.append(f"{_MODEL_HEADER}\n{model_identity}")
+
+    if not blocks:
+        return None
+    body = "\n\n".join(blocks)
+    return {"context": f"\n\n{body}\n"}
 
 
 def register(ctx: Any) -> None:

@@ -154,9 +154,40 @@ class InjectionTest(unittest.TestCase):
         self.assertIn("[RUNTIME MODEL IDENTITY]", context)
         self.assertIn("Backing model: gemini-3.8-flash", context)
         self.assertIn("Provider: Google Cloud Vertex AI (vertex_ai)", context)
+        self.assertIn("[SPECIALIST AGENTS AVAILABLE NOW]", context)
+
+    def test_injects_model_identity_alone_when_roster_is_unreadable(self):
+        # Even if rendering the specialist roster raises or fails, the runtime
+        # model identity must still be injected into context.
+        self._profile("default")
+        plugin.handle_pre_llm_call()  # prime module
+        with mock.patch.object(plugin._roster_module, "render", return_value=None):
+            with mock.patch.dict(os.environ, {"LITELLM_BACKING_MODEL": "vertex_ai/gemini-3.8-flash"}):
+                result = plugin.handle_pre_llm_call()
+        self.assertIsNotNone(result)
+        context = result["context"]
+        self.assertIn("[RUNTIME MODEL IDENTITY]", context)
+        self.assertIn("Backing model: gemini-3.8-flash", context)
+        self.assertNotIn("[SPECIALIST AGENTS AVAILABLE NOW]", context)
+
+    def test_model_identity_render_failure_does_not_break_roster(self):
+        self._profile("default")
+        self._profile("platform", "Fleet work.")
+        plugin.handle_pre_llm_call()  # prime module
+        with mock.patch.object(plugin._roster_module, "render_model_identity", side_effect=RuntimeError("probe exploded")):
+            result = plugin.handle_pre_llm_call()
+        self.assertIsNotNone(result)
+        context = result["context"]
+        self.assertIn("- platform: Fleet work.", context)
+        self.assertNotIn("[RUNTIME MODEL IDENTITY]", context)
+
+    def test_returns_none_when_both_roster_and_model_identity_fail(self):
+        plugin.handle_pre_llm_call()  # prime module
+        with mock.patch.object(plugin._roster_module, "render", side_effect=OSError("PVC gone")):
+            self.assertIsNone(plugin.handle_pre_llm_call())
 
     @unittest.skipIf(os.geteuid() == 0, "root bypasses the mode bits this test relies on")
-    def test_an_unreadable_profiles_dir_injects_nothing(self):
+    def test_an_unreadable_profiles_dir_injects_nothing_when_no_model_identity(self):
         # Not the same as an empty one. Announcing "no specialist agents are
         # available" on an I/O fault would stop the front door routing at all;
         # injecting nothing leaves it exactly where it was before this plugin —
