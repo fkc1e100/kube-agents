@@ -252,7 +252,8 @@ litellm:
   # A sap model name is SAP's <publisher>--<model> form.
   modelProvider: gemini
   # Empty selects the per-provider default (mirrors common.sh).
-  # A Claude model (anthropic, or vertex_ai with a claude-* name) gets
+  # A Claude model (anthropic, vertex_ai with a claude-* name, or sap with an
+  # anthropic--* name) gets
   # additional_drop_params: temperature, top_p and top_k under every alias,
   # because Claude Opus 5 refuses them and a caller may send them anyway.
   # Chart-only; the kustomize dev base carries no such key.

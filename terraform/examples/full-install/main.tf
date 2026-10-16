@@ -360,6 +360,21 @@ check "sap_ai_core_credentials_present" {
   }
 }
 
+# A warning, because the gateway still works: LiteLLM reads the service key and
+# ignores the discrete values beside it. What it costs is credentials the
+# operator named and the gateway never uses, with nothing else saying so. The
+# installer refuses this before it writes terraform.tfvars; a hand-driven
+# apply gets this.
+check "sap_ai_core_one_credential_shape" {
+  assert {
+    condition = var.model_provider != "sap" || var.aicore_service_key == "" || (
+      var.aicore_client_id == "" && var.aicore_client_secret == "" &&
+      var.aicore_auth_url == "" && var.aicore_base_url == ""
+    )
+    error_message = "model_provider is \"sap\" and both aicore_service_key and one or more of aicore_client_id, aicore_client_secret, aicore_auth_url, aicore_base_url are set. LiteLLM reads the service key and ignores the others; unset one shape."
+  }
+}
+
 # A warning rather than a refusal, for the same reason as slack_tokens_present:
 # an exclusion written before its project joins the scope, or left after it
 # leaves, is a legitimate order of operations. A misspelled one is not, and

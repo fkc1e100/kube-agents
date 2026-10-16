@@ -109,6 +109,29 @@ class TestSapProviderRender(unittest.TestCase):
                 env = self._env(deployment)
                 self.assertFalse([name for name in env if name.startswith("AICORE_")], provider)
 
+    def test_a_claude_model_drops_the_sampling_keys_but_gets_no_cache_markers(self):
+        # LiteLLM's sap provider forwards temperature and top_p into the
+        # orchestration request, so a Claude model behind SAP needs the same
+        # drop as one behind anthropic or vertex_ai. The prompt-caching markers
+        # stay off: they have not been shown to pass SAP's orchestration API.
+        configmap, _ = self._documents(["--set", "litellm.modelProvider=sap"])
+        config = yaml.safe_load(configmap["data"]["config.yaml"])
+        for entry in config["model_list"]:
+            self.assertEqual(
+                entry["litellm_params"].get("additional_drop_params"),
+                ["temperature", "top_p", "top_k"],
+                entry["model_name"],
+            )
+        self.assertNotIn("router_settings", config)
+
+    def test_a_non_claude_sap_model_keeps_its_sampling_keys(self):
+        configmap, _ = self._documents(
+            ["--set", "litellm.modelProvider=sap", "--set-string", "litellm.modelDefaultName=gpt-4o"]
+        )
+        config = yaml.safe_load(configmap["data"]["config.yaml"])
+        for entry in config["model_list"]:
+            self.assertNotIn("additional_drop_params", entry["litellm_params"], entry["model_name"])
+
     def test_an_unknown_provider_names_sap_among_the_choices(self):
         proc = self._render(["--set", "litellm.modelProvider=sap_ai_core"])
         self.assertNotEqual(proc.returncode, 0)
