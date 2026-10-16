@@ -15,7 +15,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 # Add the directory containing agent_roster.py to sys.path so it can be imported.
-sys.path.insert(0, str(Path(__file__).parent.absolute()))
+_scripts_dir = str(Path(__file__).parent.absolute())
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+if "agent_roster" in sys.modules and getattr(sys.modules["agent_roster"], "__file__", "") != str(Path(__file__).parent / "agent_roster.py"):
+    del sys.modules["agent_roster"]
 
 import agent_roster  # noqa: E402
 
