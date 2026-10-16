@@ -302,7 +302,8 @@ An agent given that prompt, or reading this file on its own, follows these steps
    `<RELEASE_VERSION>` below.
 2. Read the operator's environment and confirm the target with them before going further —
    project, cluster, its location (the zone, not the region, for a zonal cluster, exactly as
-   `clusters list` shows it), model provider (`gemini`, `vertex_ai`, `anthropic`, `openai` or `openai_compatible`),
+   `clusters list` shows it), model provider (`gemini`, `vertex_ai`, `anthropic`, `openai`, `openai_compatible` or
+   `sap`),
    where the model credential comes from, and, if the operator wants GitOps pull requests, the
    forge that holds the GitOps repository (GitHub or GitLab) and its path:
 

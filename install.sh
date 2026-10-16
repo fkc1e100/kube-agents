@@ -438,6 +438,15 @@ PARAM_OPENAI_COMPATIBLE_TARGET_PORT="${OPENAI_COMPATIBLE_TARGET_PORT:-}"
 PARAM_OPENAI_COMPATIBLE_EGRESS_CIDRS="${OPENAI_COMPATIBLE_EGRESS_CIDRS:-}"
 PARAM_OPENAI_COMPATIBLE_CA_SECRET_NAME="${OPENAI_COMPATIBLE_CA_SECRET_NAME:-}"
 PARAM_OPENAI_COMPATIBLE_API_KEY="${OPENAI_COMPATIBLE_API_KEY:-}"
+# SAP AI Core (MODEL_PROVIDER=sap), under LiteLLM's own variable names. The
+# service key also has a file flag, because it is multi-line JSON.
+PARAM_AICORE_SERVICE_KEY="${AICORE_SERVICE_KEY:-}"
+PARAM_AICORE_SERVICE_KEY_FILE=""
+PARAM_AICORE_CLIENT_ID="${AICORE_CLIENT_ID:-}"
+PARAM_AICORE_CLIENT_SECRET="${AICORE_CLIENT_SECRET:-}"
+PARAM_AICORE_AUTH_URL="${AICORE_AUTH_URL:-}"
+PARAM_AICORE_BASE_URL="${AICORE_BASE_URL:-}"
+PARAM_AICORE_RESOURCE_GROUP="${AICORE_RESOURCE_GROUP:-}"
 PARAM_GITOPS_ORG="${GITOPS_ORG:-${GITHUB_ORG:-}}"
 PARAM_GITOPS_REPO="${GITOPS_REPO:-${GITHUB_REPO:-}}"
 PARAM_GITHUB_APP_ID="${GITHUB_APP_ID:-}"
@@ -670,7 +679,8 @@ Flags for AI Agents & Automation:
                                 namespace, so changing it is for CI and second installs
   --model-provider=PROVIDER     Model provider: gemini | vertex_ai | anthropic | openai |
                                 openai_compatible (a server speaking the OpenAI chat
-                                completions API: vLLM, TGI, an internal gateway)
+                                completions API: vLLM, TGI, an internal gateway) |
+                                sap (SAP AI Core)
                                 (default: DEFAULT_MODEL_PROVIDER, currently gemini)
   --model-default-name=NAME     Default model name for the provider
   --model-max-tokens=N          Output tokens the gateway asks the provider for on a
@@ -719,6 +729,17 @@ Flags for AI Agents & Automation:
                                 under the key ca.crt; trusted for this server only
   --openai-compatible-api-key=KEY
                                 openai_compatible only: the server's API key (optional)
+  --aicore-service-key-file=PATH
+                                SAP AI Core service key JSON file (--model-provider=sap).
+                                Or give the four values below instead; LiteLLM reads the
+                                service key first and does not merge the two
+  --aicore-client-id=ID         SAP AI Core OAuth2 client id
+  --aicore-client-secret=SECRET SAP AI Core OAuth2 client secret
+  --aicore-auth-url=URL         SAP AI Core OAuth2 token URL
+                                (https://<subdomain>.authentication.<region>.hana.ondemand.com)
+  --aicore-base-url=URL         SAP AI Core AI API URL
+                                (https://api.ai.prod.<region>.<hyperscaler>.ml.hana.ondemand.com)
+  --aicore-resource-group=NAME  SAP AI Core resource group (LiteLLM's default: default)
   --gitops-org=ORG              GitHub organization of the GitOps repo (GitHub only)
   --gitops-repo=REPO            GitOps IaC repository: on GitHub its name (default:
                                 DEFAULT_GITOPS_REPO, currently gke-fleet-iac); on GitLab the
@@ -1053,6 +1074,12 @@ parse_args() {
       --openai-compatible-egress-cidrs=*) PARAM_OPENAI_COMPATIBLE_EGRESS_CIDRS="${1#*=}"; shift ;;
       --openai-compatible-ca-secret-name=*) PARAM_OPENAI_COMPATIBLE_CA_SECRET_NAME="${1#*=}"; shift ;;
       --openai-compatible-api-key=*) PARAM_OPENAI_COMPATIBLE_API_KEY="${1#*=}"; shift ;;
+      --aicore-service-key-file=*) PARAM_AICORE_SERVICE_KEY_FILE="${1#*=}"; shift ;;
+      --aicore-client-id=*) PARAM_AICORE_CLIENT_ID="${1#*=}"; shift ;;
+      --aicore-client-secret=*) PARAM_AICORE_CLIENT_SECRET="${1#*=}"; shift ;;
+      --aicore-auth-url=*) PARAM_AICORE_AUTH_URL="${1#*=}"; shift ;;
+      --aicore-base-url=*) PARAM_AICORE_BASE_URL="${1#*=}"; shift ;;
+      --aicore-resource-group=*) PARAM_AICORE_RESOURCE_GROUP="${1#*=}"; shift ;;
       --gitops-org=*) PARAM_GITOPS_ORG="${1#*=}"; shift ;;
       --gitops-repo=*) PARAM_GITOPS_REPO="${1#*=}"; shift ;;
       --gitops-forge=*) PARAM_GITOPS_FORGE="${1#*=}"; shift ;;
@@ -2777,6 +2804,10 @@ bootstrap_install_env_file() {
     write_env_var "$tmp" OPENAI_COMPATIBLE_CA_SECRET_NAME "${OPENAI_COMPATIBLE_CA_SECRET_NAME:-}"
     write_secret_env_var "$tmp" OPENAI_COMPATIBLE_API_KEY "${OPENAI_COMPATIBLE_API_KEY:-}"
   fi
+  local sap_env_key
+  for sap_env_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+    write_secret_env_var "$tmp" "$sap_env_key" "${!sap_env_key:-}"
+  done
   write_env_var "$tmp" ALLOWED_USERS "${ALLOWED_USERS:-}"
   write_env_var "$tmp" CHAT_TOPIC_NAME "${CHAT_TOPIC_NAME:-}"
   write_env_var "$tmp" CHAT_SUB_NAME "${CHAT_SUB_NAME:-}"
@@ -3502,6 +3533,48 @@ prompt_menu() {
       print_error "Invalid selection. Please enter a number between 1 and ${#options[@]}." >/dev/tty
     fi
   done
+}
+
+# Load an SAP AI Core service key from a file into AICORE_SERVICE_KEY, compacted
+# to one line. A file rather than a pasted value, because the key is multi-line
+# JSON and a one-line prompt would hand its second line to the next question.
+read_sap_ai_core_service_key_file() {
+  local path
+  path="$(expand_tilde_path "$1")"
+  if [ ! -r "$path" ]; then
+    print_error "Cannot read the SAP AI Core service key file '${path}'."
+    return 1
+  fi
+  AICORE_SERVICE_KEY="$(cat "$path")"
+  export AICORE_SERVICE_KEY
+  normalize_sap_ai_core_service_key
+}
+
+# Ask for SAP AI Core credentials in either shape LiteLLM accepts: a service key
+# file, or the client id, client secret and two URLs. A key the install already
+# holds is kept on an empty answer, so a re-run that changes nothing loses
+# nothing; the discrete values are asked only when there is no service key,
+# because LiteLLM would ignore them beside one.
+prompt_sap_ai_core_credentials() {
+  local key_file=""
+  if [ -n "${AICORE_SERVICE_KEY:-}" ]; then
+    prompt_read "Path to a new SAP AI Core service key JSON (empty keeps the current one)" key_file ""
+    if [ -n "$key_file" ]; then
+      read_sap_ai_core_service_key_file "$key_file" || return 1
+    fi
+    return 0
+  fi
+  prompt_read "Path to the SAP AI Core service key JSON (empty to enter the client credentials instead)" key_file ""
+  if [ -n "$key_file" ]; then
+    read_sap_ai_core_service_key_file "$key_file" || return 1
+    return 0
+  fi
+  prompt_read "SAP AI Core client id" AICORE_CLIENT_ID "${AICORE_CLIENT_ID:-}"
+  prompt_read "SAP AI Core client secret" AICORE_CLIENT_SECRET "${AICORE_CLIENT_SECRET:-}" true
+  prompt_read "SAP AI Core auth URL (https://<subdomain>.authentication.<region>.hana.ondemand.com)" AICORE_AUTH_URL "${AICORE_AUTH_URL:-}"
+  prompt_read "SAP AI Core AI API URL (https://api.ai.prod.<region>.<hyperscaler>.ml.hana.ondemand.com)" AICORE_BASE_URL "${AICORE_BASE_URL:-}"
+  prompt_read "SAP AI Core resource group" AICORE_RESOURCE_GROUP "${AICORE_RESOURCE_GROUP:-}" false "default"
+  export AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL AICORE_RESOURCE_GROUP
 }
 
 # How long each deployment gets to report ready in the post-install health check.
@@ -5759,6 +5832,7 @@ run_menu_system() {
           "OpenAI ($(default_model_for_provider openai))" \
           "Anthropic ($(default_model_for_provider anthropic))" \
           "OpenAI-compatible server (vLLM, TGI, an internal gateway; you name the model)" \
+          "SAP AI Core ($(default_model_for_provider sap) / OAuth2 service key or client credentials)" \
           m_opt
         case "$m_opt" in
           1)
@@ -5796,6 +5870,11 @@ run_menu_system() {
             prompt_openai_compatible_settings model_default_name openai_compatible_api_base \
               openai_compatible_target_port openai_compatible_egress_cidrs \
               openai_compatible_api_key openai_compatible_ca_secret_name
+            ;;
+          6)
+            model_provider="sap"
+            prompt_sap_ai_core_credentials || return 1
+            prompt_read "SAP AI Core model name (<publisher>--<model>, e.g. $(default_model_for_provider sap))" model_default_name "$(default_model_for_provider sap)"
             ;;
         esac
         ;;
@@ -5898,6 +5977,12 @@ run_menu_system() {
           save_env_var OPENAI_COMPATIBLE_CA_SECRET_NAME "$openai_compatible_ca_secret_name"
           save_secret_env_var OPENAI_COMPATIBLE_API_KEY "$openai_compatible_api_key"
         fi
+        # Only the SAP AI Core keys that hold a value, so an install on another
+        # provider does not gain six empty lines.
+        local sap_save_key
+        for sap_save_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+          [ -z "${!sap_save_key:-}" ] || save_secret_env_var "$sap_save_key" "${!sap_save_key}"
+        done
         save_env_var ALLOWED_USERS "$allowed_users"
         save_env_var CHAT_TOPIC_NAME "$chat_topic_name"
         save_env_var CHAT_SUB_NAME "$chat_sub_name"
@@ -6687,8 +6772,20 @@ main() {
   print_step "7. AI Model Provider Credentials"
   local model_provider="$PARAM_MODEL_PROVIDER"
   if ! is_valid_model_provider "$model_provider"; then
-    print_error "Unsupported model provider '$model_provider'. Use gemini, vertex_ai, anthropic, openai, or openai_compatible."
+    print_error "Unsupported model provider '$model_provider'. Use gemini, vertex_ai, anthropic, openai, openai_compatible, or sap."
     exit 1
+  fi
+  # SAP AI Core values: a flag wins over install.env and the environment, which
+  # seeded the PARAM_ copies. Exported under LiteLLM's names, because those are
+  # what the tfvars generator and install.env record.
+  export AICORE_SERVICE_KEY="$PARAM_AICORE_SERVICE_KEY"
+  export AICORE_CLIENT_ID="$PARAM_AICORE_CLIENT_ID"
+  export AICORE_CLIENT_SECRET="$PARAM_AICORE_CLIENT_SECRET"
+  export AICORE_AUTH_URL="$PARAM_AICORE_AUTH_URL"
+  export AICORE_BASE_URL="$PARAM_AICORE_BASE_URL"
+  export AICORE_RESOURCE_GROUP="$PARAM_AICORE_RESOURCE_GROUP"
+  if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ]; then
+    read_sap_ai_core_service_key_file "$PARAM_AICORE_SERVICE_KEY_FILE" || exit 1
   fi
   local model_default_name="${PARAM_MODEL_DEFAULT_NAME:-${MODEL_DEFAULT_NAME:-}}"
   if [ -z "$model_default_name" ]; then
@@ -6768,6 +6865,7 @@ main() {
       openai) model_choice="3" ;;
       anthropic) model_choice="4" ;;
       openai_compatible) model_choice="5" ;;
+      sap) model_choice="6" ;;
     esac
     prompt_menu "Select Model Provider for the Platform Agent:" \
       "Google Gemini (Recommended: $(default_model_for_provider gemini) / Gemini API)" \
@@ -6775,6 +6873,7 @@ main() {
       "OpenAI ($(default_model_for_provider openai) / OpenAI API)" \
       "Anthropic ($(default_model_for_provider anthropic) / Anthropic API)" \
       "OpenAI-compatible server (vLLM, TGI, an internal gateway; you name the model)" \
+      "SAP AI Core ($(default_model_for_provider sap) / OAuth2 service key or client credentials)" \
       model_choice
 
     # A model the install already pins survives a re-run that leaves the
@@ -6828,6 +6927,16 @@ main() {
           openai_compatible_target_port openai_compatible_egress_cidrs \
           openai_compatible_api_key openai_compatible_ca_secret_name
         ;;
+      6)
+        model_provider="sap"
+        prompt_sap_ai_core_credentials || exit 1
+        local sap_model_default
+        sap_model_default="$(default_model_for_provider sap)"
+        if [ "$model_provider_was" = "sap" ] && [ -n "$model_name_was" ]; then
+          sap_model_default="$model_name_was"
+        fi
+        prompt_read "SAP AI Core model name (<publisher>--<model>, e.g. $(default_model_for_provider sap))" model_default_name "$sap_model_default"
+        ;;
     esac
   fi
 
@@ -6868,6 +6977,14 @@ main() {
       validate_openai_compatible_inputs "$model_provider" "$model_default_name" "$openai_compatible_api_base" \
         "$openai_compatible_target_port" "$openai_compatible_egress_cidrs" "$openai_compatible_ca_secret_name" || exit 1
       print_info "Serving ${model_default_name} from ${openai_compatible_api_base} through the gateway."
+      ;;
+    sap)
+      normalize_sap_ai_core_service_key || exit 1
+      if has_sap_ai_core_credentials; then
+        print_info "Serving ${model_default_name} through SAP AI Core. LiteLLM exchanges the OAuth2 client credentials for a bearer token and refreshes it before it expires."
+      else
+        print_warning "No SAP AI Core credentials were provided (AICORE_SERVICE_KEY, or AICORE_CLIENT_ID, AICORE_CLIENT_SECRET, AICORE_AUTH_URL and AICORE_BASE_URL); the agent will require a credential update before model calls can succeed."
+      fi
       ;;
   esac
 

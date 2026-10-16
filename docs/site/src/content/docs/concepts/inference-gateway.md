@@ -14,6 +14,7 @@ The Platform Agent talks to an LLM through a **Completions API** proxy so provid
 | Fastest path with a hosted frontier model           | **LiteLLM → Gemini** (default)                                    | One API key, no GPU node pool, no cluster egress beyond the LiteLLM pod.                                                                                          |
 | Provider redundancy or A/B                          | **LiteLLM → Gemini + Anthropic + OpenAI**                         | LiteLLM handles the router config; agent config is unchanged.                                                                                                     |
 | Inference billed to your own GCP project            | **LiteLLM → Vertex AI / Model Garden**                            | Workload Identity instead of an API key; Gemini plus Model Garden publishers. See [below](#vertex-ai-and-model-garden).                                           |
+| Model traffic through your SAP AI Core tenant       | **LiteLLM → SAP AI Core**                                         | OAuth2 client credentials instead of an API key; the gateway handles the token exchange. See [below](#sap-ai-core).                                               |
 | Free local prototyping with a consumer subscription | **LiteLLM → ChatGPT subscription** (OAuth device flow)            | See [`examples/litellm-chatgpt-subscription/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-chatgpt-subscription).                          |
 | Model traffic kept off hosted model providers       | **LiteLLM → your OpenAI-compatible server** (`openai_compatible`) | vLLM, TGI or an internal gateway, in the cluster or on your network. Google APIs stay required. See [below](#openai-compatible-endpoints-self-hosted-or-private). |
 | Deterministic demos / cheap tests                   | **Any of the above + inference-replay proxy**                     | Caches responses in a PVC; replays on cache hit.                                                                                                                  |
@@ -266,6 +267,29 @@ A self-hosted server refuses a request whose prompt and `max_tokens` do not fit 
 - The kustomize dev copy (`make -C k8s-operator deploy-litellm`) does not carry the provider, and the admin console's provider catalog does not list it. Install through `install.sh`, the Terraform example or the chart.
 - The repository ships no OpenAI-compatible server. The [vLLM example](#vllm-local-models) does not serve the OpenAI API as it ships.
 - A self-hosted model does not make the install offline. The agent still needs Google APIs, and some of its tools reach the internet on their own. [Security and IAM](/kube-agents/reference/security-and-iam/#egress-when-model-data-must-stay-off-hosted-providers) lists each destination, which ones are required, and how to turn off the rest. A fully disconnected cluster is not supported.
+
+### SAP AI Core
+
+`MODEL_PROVIDER=sap` routes `model-default` through [SAP AI Core](https://help.sap.com/docs/sap-ai-core)'s orchestration service, for an organization that requires model traffic to go through its SAP Generative AI Hub tenant. The gateway uses LiteLLM's own [SAP provider](https://docs.litellm.ai/docs/providers/sap), so nothing extra runs in the cluster.
+
+SAP AI Core does not take a static API key. It takes OAuth2 client credentials, which LiteLLM exchanges at your tenant's token URL for a short-lived bearer token, caches, and refreshes before it expires. Give the install one of two shapes:
+
+- **The service key.** The JSON the SAP BTP cockpit gives you when you [create a service key](https://help.sap.com/docs/sap-ai-core/sap-ai-core-service-guide/create-service-key) for your SAP AI Core instance. It carries the client id, client secret, token URL and AI API URL. Pass the file with `--aicore-service-key-file=PATH`, or set `AICORE_SERVICE_KEY` in `install.env`.
+- **The four values.** `AICORE_CLIENT_ID`, `AICORE_CLIENT_SECRET`, `AICORE_AUTH_URL` (the token URL, `https://<subdomain>.authentication.<region>.hana.ondemand.com`) and `AICORE_BASE_URL` (the AI API URL, `https://api.ai.prod.<region>.<hyperscaler>.ml.hana.ondemand.com`), each with a matching `--aicore-*` flag. These are the same fields [kagent's SAP AI Core provider](https://kagent.dev/docs/kagent/0.x/supported-providers/sap-ai-core/) asks for.
+
+LiteLLM reads the service key first and does not merge it with the four values, so give one shape, not both. `AICORE_RESOURCE_GROUP` names the resource group that holds your orchestration deployment and defaults to `default`. All six travel in `platform-agent-secrets` under these names, so an upgrade recovers them the way it recovers an API key, and `PERSIST_SECRETS_ON_DISK=false` keeps them off disk.
+
+Before the first model call, the gateway looks up your tenant's most recent deployment of the `orchestration` scenario in that resource group and sends every request there, so one must exist. `MODEL_DEFAULT_NAME` is SAP's model name, in its `<publisher>--<model>` form for partner models (the default is `anthropic--claude-4.5-sonnet`). Which models you can call depends on your SAP AI Core plan; a name your tenant does not offer surfaces as an error from the gateway on the first request, not at install time.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSION>/install.sh | bash -s -- \
+  --model-provider=sap \
+  --model-default-name=anthropic--claude-4.5-sonnet \
+  --aicore-service-key-file=./aicore-service-key.json \
+  --aicore-resource-group=default
+```
+
+The token URL and AI API URL are public SAP endpoints on port 443, which the gateway's NetworkPolicy already allows. The Claude-specific settings described above, dropped sampling parameters and prompt-caching breakpoints, are not applied to `sap` models.
 
 ## vLLM (local models)
 

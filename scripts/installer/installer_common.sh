@@ -442,12 +442,13 @@ default_model_for_provider() {
     anthropic) echo "$DEFAULT_MODEL_ANTHROPIC" ;;
     # No default: the model is whatever the server serves.
     openai_compatible) echo "" ;;
+    sap) echo "$DEFAULT_MODEL_SAP" ;;
     *) echo "$DEFAULT_MODEL_GEMINI" ;;
   esac
 }
 
 is_valid_model_provider() {
-  [[ "${1:-}" =~ ^(gemini|vertex_ai|anthropic|openai|openai_compatible)$ ]]
+  [[ "${1:-}" =~ ^(gemini|vertex_ai|anthropic|openai|openai_compatible|sap)$ ]]
 }
 
 # An OpenAI-compatible base URL → "<host> <port>", the host lowercased and an
@@ -740,6 +741,41 @@ validate_openai_compatible_inputs() {
     print_error "OPENAI_COMPATIBLE_CA_SECRET_NAME='${ca_bundle_name}' is not a valid Kubernetes Secret name."
     return 1
   fi
+}
+
+# SAP AI Core credentials, under the names LiteLLM's sap provider reads from its
+# environment. All of them travel in the platform-agent-secrets Secret, the URLs
+# and resource group included: one path is what lets an upgrade recover them
+# from the live Secret and PERSIST_SECRETS_ON_DISK=false keep them off disk, the
+# same as an API key. Give either AICORE_SERVICE_KEY (the service key JSON) or
+# the client id, client secret, auth URL and base URL; LiteLLM takes the first
+# source that has any value and does not merge the two.
+SAP_AI_CORE_CREDENTIAL_KEYS="AICORE_SERVICE_KEY AICORE_CLIENT_ID AICORE_CLIENT_SECRET AICORE_AUTH_URL AICORE_BASE_URL AICORE_RESOURCE_GROUP"
+
+# Whether this run has enough to authenticate to SAP AI Core: a service key, or
+# all four of the discrete values. Returns 0 when it does. The resource group is
+# optional either way (LiteLLM falls back to "default").
+has_sap_ai_core_credentials() {
+  [ -n "${AICORE_SERVICE_KEY:-}" ] && return 0
+  [ -n "${AICORE_CLIENT_ID:-}" ] && [ -n "${AICORE_CLIENT_SECRET:-}" ] \
+    && [ -n "${AICORE_AUTH_URL:-}" ] && [ -n "${AICORE_BASE_URL:-}" ]
+}
+
+# Rewrite AICORE_SERVICE_KEY as single-line JSON, or report why not and return
+# non-zero. A service key is downloaded from the SAP BTP cockpit as indented,
+# multi-line JSON, and terraform.tfvars cannot carry a raw newline inside a
+# quoted string, so the generator would write a file Terraform refuses to parse.
+# Compacting also proves the value is JSON here, before any apply, rather than
+# as a LiteLLM warning at the first model call. An unset key is left alone.
+# jq is already a prerequisite of every front door. Caller defines print_error.
+normalize_sap_ai_core_service_key() {
+  [ -n "${AICORE_SERVICE_KEY:-}" ] || return 0
+  local compacted
+  if ! compacted="$(printf '%s' "$AICORE_SERVICE_KEY" | jq -c . 2>/dev/null)" || [ -z "$compacted" ]; then
+    print_error "AICORE_SERVICE_KEY is not valid JSON. Paste the service key exactly as the SAP BTP cockpit gives it, or set AICORE_CLIENT_ID, AICORE_CLIENT_SECRET, AICORE_AUTH_URL and AICORE_BASE_URL instead."
+    return 1
+  fi
+  export AICORE_SERVICE_KEY="$compacted"
 }
 
 # MODEL_MAX_TOKENS: a whole number of output tokens, 0 meaning none. Digits
@@ -4051,17 +4087,29 @@ write_tfvars_from_state() {
   local secret_key secret_val
   local expected_ctx
   expected_ctx="$(gke_context_name)"
+  # The SAP AI Core keys are recovered as one set, and only on a sap install: a
+  # run that names any of them owns all of them. Recovering the others key by
+  # key would let a live AICORE_SERVICE_KEY outlive an operator's switch to the
+  # discrete values, and LiteLLM reads the service key first.
+  local recover_keys="API_SERVER_KEY GEMINI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY OPENAI_COMPATIBLE_API_KEY SLACK_BOT_TOKEN SLACK_APP_TOKEN SESSION_KV_API_KEY SESSION_KV_SALT"
+  if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
+    local sap_key sap_named=""
+    for sap_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+      [ -z "${!sap_key:-}" ] || sap_named="true"
+    done
+    [ -n "$sap_named" ] || recover_keys="$recover_keys $SAP_AI_CORE_CREDENTIAL_KEYS"
+  fi
   if command -v kubectl >/dev/null 2>&1 &&
     [ "$(kubectl config current-context 2>/dev/null || true)" = "$expected_ctx" ]; then
-    for secret_key in API_SERVER_KEY GEMINI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY OPENAI_COMPATIBLE_API_KEY SLACK_BOT_TOKEN SLACK_APP_TOKEN SESSION_KV_API_KEY SESSION_KV_SALT; do
+    for secret_key in $recover_keys; do
       [ -z "${!secret_key:-}" ] || continue
       # Every stage exits 0 on its own (|| true inside the substitution):
       # install.sh runs an inherited ERR trap (set -E), and a failing kubectl
       # here — no cluster yet, stale context — must be a silent no-op, not a
       # trap-and-abort the outer || can never see. --request-timeout bounds
       # the other stale-context failure mode: a context whose cluster was
-      # just destroyed black-holes TCP instead of refusing, and eight keys
-      # times a hung connect stalls the install for minutes.
+      # just destroyed black-holes TCP instead of refusing, and a hung connect
+      # per key stalls the install for minutes.
       secret_val="$({ kubectl get secret "${PLATFORM_AGENT_SECRET}" -n "${NAMESPACE:-$DEFAULT_NAMESPACE}" \
         --context "$expected_ctx" \
         --request-timeout="${KUBECTL_PROBE_REQUEST_TIMEOUT}" \
@@ -4488,6 +4536,13 @@ write_tfvars_from_state() {
       if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "openai_compatible" ]; then
         echo "openai_compatible_api_key = $(hcl_str "${OPENAI_COMPATIBLE_API_KEY:-}")"
       fi
+      # Only the keys that are set, so an install on another provider writes
+      # the same file it always did.
+      local sap_key
+      for sap_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+        [ -n "${!sap_key:-}" ] || continue
+        echo "$(printf '%s' "$sap_key" | tr '[:upper:]' '[:lower:]') = $(hcl_str "${!sap_key}")"
+      done
       if [ -n "${SESSION_KV_API_KEY:-}" ] || [ -n "${SESSION_KV_SALT:-}" ]; then
         echo "# Recovered from the live Secret: an adoption re-install must keep the"
         echo "# salt, or every chat identity re-pseudonymises."
@@ -4638,6 +4693,10 @@ write_tfvars_from_state() {
   export TF_VAR_openai_api_key="${OPENAI_API_KEY:-}"
   export TF_VAR_anthropic_api_key="${ANTHROPIC_API_KEY:-}"
   export TF_VAR_openai_compatible_api_key="${OPENAI_COMPATIBLE_API_KEY:-}"
+  local sap_tf_key
+  for sap_tf_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+    export "TF_VAR_$(printf '%s' "$sap_tf_key" | tr '[:upper:]' '[:lower:]')=${!sap_tf_key:-}"
+  done
   export TF_VAR_slack_bot_token="${SLACK_BOT_TOKEN:-}"
   export TF_VAR_slack_app_token="${SLACK_APP_TOKEN:-}"
   export TF_VAR_session_kv_api_key="${SESSION_KV_API_KEY:-}"
