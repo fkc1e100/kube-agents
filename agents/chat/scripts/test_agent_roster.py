@@ -191,5 +191,153 @@ class TestDiscoveryDegradesOnIOError(unittest.TestCase):
             self.assertIn("No specialist agents", agent_roster.render())
 
 
+class TestHostAndFleetScopeRendering(unittest.TestCase):
+    """The roster renders Host Cluster Identity and Fleet Clusters & GCP Projects in Scope."""
+
+    def _setup_three_cluster_fleet(self, tmp: str) -> Path:
+        root = Path(tmp)
+        base = root / "profiles"
+        for name in (
+            "default",
+            "platform",
+            "cluster-gca-gke-2025-kcc-gitops-hub-us-east1-c",
+            "cluster-gca-gke-2025-openrl-gpu-hub-us-east1-c",
+            "cluster-kube-agents-demo-platform-agent-host-us-central1",
+        ):
+            (base / name).mkdir(parents=True)
+        (base / "platform" / "CAPABILITIES.md").write_text("Fleet + GitOps write path.")
+        cluster_cap = "Read-only diagnostics for one GKE cluster."
+        identities = {
+            "cluster-gca-gke-2025-kcc-gitops-hub-us-east1-c": (
+                "gca-gke-2025",
+                "kcc-gitops-hub",
+                "us-east1-c",
+            ),
+            "cluster-gca-gke-2025-openrl-gpu-hub-us-east1-c": (
+                "gca-gke-2025",
+                "openrl-gpu-hub",
+                "us-east1-c",
+            ),
+            "cluster-kube-agents-demo-platform-agent-host-us-central1": (
+                "kube-agents-demo",
+                "platform-agent-host",
+                "us-central1",
+            ),
+        }
+        for prof, (proj, clust, loc) in identities.items():
+            (base / prof / "CAPABILITIES.md").write_text(cluster_cap)
+            (base / prof / "config.yaml").write_text(
+                f"cluster_identity:\n  cluster: {clust}\n  location: {loc}\n  project: {proj}\n"
+            )
+        agent_roster.PROFILES_BASE = base
+        return base
+
+    def test_renders_host_identity_and_fleet_scope_from_env_and_scope_files(self):
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            scope_file = Path(tmp) / "scope.json"
+            scope_file.write_text('{"present": true, "projects": ["gca-gke-2025"]}\n')
+            env = {
+                "GKE_CLUSTER_NAME": "platform-agent-host",
+                "GKE_PROJECT_ID": "kube-agents-demo",
+                "GKE_LOCATION": "us-central1",
+                "KUBEAGENTS_SCOPE_FILE": str(scope_file),
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                out = agent_roster.render(base)
+
+        self.assertIsNotNone(out)
+        self.assertIn(
+            'Host Cluster Identity ("this cluster" / "this host cluster"):\n'
+            "- cluster=platform-agent-host, project=kube-agents-demo, "
+            "location=us-central1, "
+            "assignee=cluster-kube-agents-demo-platform-agent-host-us-central1",
+            out,
+        )
+        self.assertIn(
+            "- GCP projects in scope (2): gca-gke-2025, kube-agents-demo",
+            out,
+        )
+        self.assertIn("- Managed GKE clusters (3):", out)
+        self.assertIn(
+            "  - kcc-gitops-hub (project=gca-gke-2025, location=us-east1-c, "
+            "assignee=cluster-gca-gke-2025-kcc-gitops-hub-us-east1-c)",
+            out,
+        )
+        self.assertIn(
+            "  - openrl-gpu-hub (project=gca-gke-2025, location=us-east1-c, "
+            "assignee=cluster-gca-gke-2025-openrl-gpu-hub-us-east1-c)",
+            out,
+        )
+        self.assertIn(
+            "  - platform-agent-host (project=kube-agents-demo, location=us-central1, "
+            "assignee=cluster-kube-agents-demo-platform-agent-host-us-central1, host cluster)",
+            out,
+        )
+        self.assertNotIn("default", out)
+
+    def test_reads_fleet_scope_json_and_excludes_excluded_projects(self):
+        from unittest import mock
+
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            fleet_scope = Path(tmp) / "fleet_scope.json"
+            fleet_scope.write_text(
+                '{"projects": ['
+                '{"id": "gca-gke-2025", "state": "in-scope"}, '
+                '{"id": "kube-agents-demo", "state": "in-scope"}, '
+                '{"id": "sandbox-Scratch", "state": "excluded"}'
+                "]}\n"
+            )
+            with mock.patch.dict(os.environ, {}, clear=False):
+                out = agent_roster.render(base)
+
+        self.assertIn("- GCP projects in scope (2): gca-gke-2025, kube-agents-demo", out)
+        self.assertNotIn("sandbox-Scratch", out)
+
+    def test_stdlib_cluster_identity_parser_fallback_and_malformed_config(self):
+        from unittest import mock
+
+        text = (
+            "# comment\n"
+            "agent:\n"
+            "  environment_probe: false\n"
+            "cluster_identity:\n"
+            "  cluster: 'kcc-gitops-hub'\n"
+            '  location: "us-east1-c"\n'
+            "  project: gca-gke-2025\n"
+            "context_file_max_chars: 100000\n"
+        )
+        with mock.patch.dict(sys.modules, {"yaml": None}):
+            parsed = agent_roster._parse_cluster_identity_text(text)
+        self.assertEqual(
+            parsed,
+            {
+                "project": "gca-gke-2025",
+                "cluster": "kcc-gitops-hub",
+                "location": "us-east1-c",
+            },
+        )
+        self.assertIsNone(agent_roster._parse_cluster_identity_text("not: [valid: yaml"))
+        self.assertIsNone(
+            agent_roster._parse_cluster_identity_text("cluster_identity:\n  cluster: only-one\n")
+        )
+
+
+class TestChatSoulHostAndFleetRules(unittest.TestCase):
+    """agents/chat/SOUL.md instructs direct static answers and host cluster disambiguation."""
+
+    def test_soul_contains_static_fleet_and_host_routing_rules(self):
+        soul_path = Path(__file__).resolve().parents[1] / "SOUL.md"
+        text = soul_path.read_text(encoding="utf-8")
+        self.assertIn("## 1.4 Static Identity, Fleet Scope & Host Cluster Resolution", text)
+        self.assertIn("Host Cluster Identity", text)
+        self.assertIn("Fleet Clusters & GCP Projects in Scope", text)
+        self.assertIn("without calling `kanban_create`", text)
+        self.assertIn("never ask which cluster they mean", text)
+
+
 if __name__ == "__main__":
     unittest.main()
