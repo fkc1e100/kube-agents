@@ -112,6 +112,7 @@ var (
 	eventReasonPattern    = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Event Reason|What):\*{0,2}\s*(.+)$`)
 	eventWarningPattern   = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Warning Message|Who):\*{0,2}\s*(.+)$`)
 	kanbanHeaderPattern   = regexp.MustCompile(`^\[kanban\] Task (t_[0-9a-zA-Z_-]+) ([^\r\n]+?)\.?\s*(?:\r?\n|$)`)
+	kanbanTaskIDPattern   = regexp.MustCompile(`^t_[0-9a-zA-Z_-]{1,40}$`)
 	kanbanTitlePattern    = regexp.MustCompile(`(?m)^Title:\s*(.+)$`)
 	kanbanAssigneePattern = regexp.MustCompile(`(?m)^Assignee:\s*(.+)$`)
 	kanbanResultPattern   = regexp.MustCompile(`(?ms)\n(?:Result|Reason):\s*(.+?)(?:\n\nThis is an automatic task-status notification|\z)`)
@@ -455,6 +456,24 @@ func (s *server) parseKanbanCard(text string) (*messageCard, bool) {
 		card.Summary = strings.TrimSpace(rm[1])
 	}
 	return card, true
+}
+
+// toolKanbanCreate is the tool a routing turn calls to hand work to a card.
+const toolKanbanCreate = "kanban_create"
+
+// kanbanCreateTaskID reads the task_id out of a kanban_create result row.
+func kanbanCreateTaskID(content string) string {
+	var out struct {
+		OK     bool   `json:"ok"`
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(content), &out); err != nil || !out.OK {
+		return ""
+	}
+	if !kanbanTaskIDPattern.MatchString(out.TaskID) {
+		return ""
+	}
+	return out.TaskID
 }
 
 func (s *server) shortenAssignee(raw, title string) string {

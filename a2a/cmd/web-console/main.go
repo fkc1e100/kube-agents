@@ -123,6 +123,11 @@ const (
 	messagesTimeout      = 10 * time.Second
 	sessionLookupTimeout = 10 * time.Second
 
+	// defaultDelegationPollInterval is how often runTurn polls session
+	// messages while waiting for a kanban_create card filed during the turn
+	// to reach a terminal status.
+	defaultDelegationPollInterval = 350 * time.Millisecond
+
 	// agentBusyWindow is how recently an agent session must have been
 	// active for an unanswered newest message to count as a turn in
 	// progress. Older than this, the turn is taken to have died, and a
@@ -156,6 +161,7 @@ const (
 	// from a delegated result that landed before it.
 	roleAssistant = "assistant"
 	roleUser      = "user"
+	roleTool      = "tool"
 
 	sessionIDPrefix    = "web-console-"
 	sessionIDRandBytes = 16
@@ -268,6 +274,11 @@ type server struct {
 	// streamCeiling bounds one streamed turn; streamTurnCeiling, or less
 	// in tests.
 	streamCeiling time.Duration
+
+	// delegationPollInterval is how often runTurn polls session messages
+	// when a synchronous /api/chat turn files a kanban_create card; tests
+	// lower it.
+	delegationPollInterval time.Duration
 }
 
 func newServer(cfg config) *server {
@@ -280,7 +291,8 @@ func newServer(cfg config) *server {
 		summaries: summaryCache{
 			entries: map[string]summaryEntry{},
 		},
-		streamCeiling: streamTurnCeiling,
+		streamCeiling:          streamTurnCeiling,
+		delegationPollInterval: defaultDelegationPollInterval,
 	}
 	s.fetchMetrics = s.fetchPeerMetrics
 	return s
@@ -566,6 +578,7 @@ type hermesMessage struct {
 	Role      string   `json:"role"`
 	Content   *string  `json:"content"`
 	Timestamp *float64 `json:"timestamp"`
+	ToolName  *string  `json:"tool_name,omitempty"`
 }
 
 // upstreamFailure is an error response to send when a Hermes call fails.
@@ -875,8 +888,16 @@ func (s *server) createSession(parent context.Context, sid string) error {
 
 // runTurn sends one message on a session and returns the agent's reply, per
 // Hermes' POST /api/sessions/{id}/chat: request {"message": ...}, response
-// {"message": {"role": "assistant", "content": ...}}.
+// {"message": {"role": "assistant", "content": ...}}. When the turn files one
+// or more kanban_create cards on the session, runTurn waits for those cards to
+// reach a terminal status and returns the completed card report (or a
+// subsequent assistant synthesis message) instead of the routing stub.
 func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
+	var beforeID int64
+	if latest, failure := s.fetchMessagesPage(ctx, fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=1&offset=0", url.PathEscape(sid))); failure == nil && len(latest) > 0 {
+		beforeID = latest[len(latest)-1].ID
+	}
+
 	resp, err := s.hermes(ctx, http.MethodPost, "/api/sessions/"+url.PathEscape(sid)+"/chat", map[string]string{"message": msg})
 	if err != nil {
 		return "", err
@@ -900,7 +921,108 @@ func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
 	if err := json.Unmarshal(out.Message, &m); err != nil {
 		return "", fmt.Errorf("agent gateway reply has no message object: %w", err)
 	}
-	return m.Content, nil
+	return s.awaitDelegatedKanbanReply(ctx, sid, beforeID, m.Content)
+}
+
+func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, beforeID int64, initialReply string) (string, error) {
+	rows, _, failure := s.pageMessages(ctx, sid, beforeID, nil)
+	if failure != nil {
+		return initialReply, nil
+	}
+	if reply, settled, delegated := s.resolveDelegatedTurn(rows, beforeID); !delegated {
+		return initialReply, nil
+	} else if settled {
+		return reply, nil
+	}
+
+	interval := s.delegationPollInterval
+	if interval <= 0 {
+		interval = defaultDelegationPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if strings.TrimSpace(initialReply) != "" {
+				return initialReply, nil
+			}
+			return "", ctx.Err()
+		case <-ticker.C:
+			rows, _, failure = s.pageMessages(ctx, sid, beforeID, nil)
+			if failure != nil {
+				continue
+			}
+			if reply, settled, _ := s.resolveDelegatedTurn(rows, beforeID); settled {
+				return reply, nil
+			}
+		}
+	}
+}
+
+func (s *server) resolveDelegatedTurn(rows []hermesMessage, beforeID int64) (string, bool, bool) {
+	var orderedIDs []string
+	pending := map[string]bool{}
+	completed := map[string]*messageCard{}
+	var lastCardMsgID int64
+	var synthesis string
+
+	for _, m := range rows {
+		if m.ID <= beforeID {
+			continue
+		}
+		if m.Role == roleTool && m.Content != nil && (m.ToolName == nil || *m.ToolName == toolKanbanCreate) {
+			if id := kanbanCreateTaskID(*m.Content); id != "" && !pending[id] {
+				pending[id] = true
+				orderedIDs = append(orderedIDs, id)
+			}
+		}
+		if m.Role == roleUser && m.Content != nil {
+			if card, ok := s.parseKanbanCard(*m.Content); ok && pending[card.TaskID] && isTerminalKanbanStatus(card.Status) {
+				completed[card.TaskID] = card
+				if m.ID > lastCardMsgID {
+					lastCardMsgID = m.ID
+				}
+			}
+		}
+		if m.Role == roleAssistant && m.Content != nil && lastCardMsgID > 0 && m.ID > lastCardMsgID {
+			if text := strings.TrimSpace(*m.Content); text != "" && !strings.EqualFold(text, "[SILENT]") {
+				synthesis = text
+			}
+		}
+	}
+
+	if len(orderedIDs) == 0 {
+		return "", false, false
+	}
+	for _, id := range orderedIDs {
+		if _, ok := completed[id]; !ok {
+			return "", false, true
+		}
+	}
+	if synthesis != "" {
+		return synthesis, true, true
+	}
+	var summaries []string
+	for _, id := range orderedIDs {
+		if sum := strings.TrimSpace(completed[id].Summary); sum != "" {
+			summaries = append(summaries, sum)
+		}
+	}
+	if len(summaries) > 0 {
+		return strings.Join(summaries, "\n\n"), true, true
+	}
+	return "", false, true
+}
+
+func isTerminalKanbanStatus(status string) bool {
+	switch status {
+	case "completed", "done", "blocked", "failed", "timed_out", "crashed", "gave_up":
+		return true
+	default:
+		return false
+	}
 }
 
 // hermes sends one request to the gateway with the API key attached.

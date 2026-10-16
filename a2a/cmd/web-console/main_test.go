@@ -76,6 +76,9 @@ type fakeHermes struct {
 	postTurnWake string
 	chatEntered  chan struct{}
 	chatGate     chan struct{}
+	toolName     string
+	toolContent  string
+	onChat       func(sid string)
 }
 
 func newFakeHermes() *fakeHermes {
@@ -96,8 +99,16 @@ func (f *fakeHermes) seed(id, source, title string) {
 // post appends a message to a session, as a turn or a card's wake does.
 // Callers hold f.mu. A nil content models a tool-call-only assistant row.
 func (f *fakeHermes) post(sid, role string, content any) int64 {
+	return f.postTool(sid, role, "", content)
+}
+
+func (f *fakeHermes) postTool(sid, role, toolName string, content any) int64 {
 	f.nextID++
-	f.messages[sid] = append(f.messages[sid], map[string]any{"id": f.nextID, "session_id": sid, "role": role, "content": content})
+	row := map[string]any{"id": f.nextID, "session_id": sid, "role": role, "content": content}
+	if toolName != "" {
+		row["tool_name"] = toolName
+	}
+	f.messages[sid] = append(f.messages[sid], row)
 	return f.nextID
 }
 
@@ -221,13 +232,20 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.post(sid, "user", body["message"])
 		f.post(sid, "assistant", nil)
-		f.post(sid, "tool", "pod list")
+		toolName, toolContent, onChat := f.toolName, f.toolContent, f.onChat
+		if toolContent == "" {
+			toolContent = "pod list"
+		}
+		f.postTool(sid, "tool", toolName, toolContent)
 		f.post(sid, "assistant", reply)
 		if f.postTurnWake != "" {
 			f.post(sid, "user", "[kanban] card completed")
 			f.post(sid, "assistant", f.postTurnWake)
 		}
 		f.mu.Unlock()
+		if onChat != nil {
+			onChat(sid)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"object":     "hermes.session.chat.completion",
 			"session_id": sid,
@@ -957,6 +975,102 @@ func TestReplyIntoABusyAgentSessionIsRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunTurnWithoutDelegationReturnsImmediately(t *testing.T) {
+	_, s := setupServer(t)
+	s.delegationPollInterval = 500 * time.Millisecond
+	h := s.routes()
+
+	start := time.Now()
+	rec := serve(h, chatReq(`{"message":"what is your agent role?"}`))
+	elapsed := time.Since(start)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	got := decode[chatResponse](t, rec)
+	if got.Reply != "pods are healthy" {
+		t.Errorf("reply = %q, want direct reply", got.Reply)
+	}
+	if elapsed >= 250*time.Millisecond {
+		t.Errorf("direct turn without kanban_create waited %s, want no polling delay", elapsed)
+	}
+}
+
+func TestRunTurnAwaitsDelegatedKanbanCardResult(t *testing.T) {
+	t.Run("returns card summary when wake is silent", func(t *testing.T) {
+		fake, s := setupServer(t)
+		s.delegationPollInterval = 5 * time.Millisecond
+		h := s.routes()
+
+		fake.mu.Lock()
+		fake.reply = "checking pods in kubeagents-system."
+		fake.toolName = toolKanbanCreate
+		fake.toolContent = `{"ok": true, "task_id": "t_1122aabb", "status": "ready"}`
+		fake.onChat = func(sid string) {
+			go func() {
+				time.Sleep(15 * time.Millisecond)
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				fake.post(sid, roleUser, "[kanban] Task t_1122aabb completed.\n"+
+					"Title: Check running pods in kubeagents-system\n"+
+					"Assignee: @cluster-kube-agents-demo-platform-agent-host-us-central1\n"+
+					"Board: default\n\n"+
+					"Check the result or decide the next step.\n"+
+					"Result: All 6 pods in kubeagents-system are Running (1/1 Ready) with 0 restarts.\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleAssistant, "[SILENT]")
+			}()
+		}
+		fake.mu.Unlock()
+
+		rec := serve(h, chatReq(`{"message":"what pods are running in kubeagents-system?"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		got := decode[chatResponse](t, rec)
+		want := "All 6 pods in kubeagents-system are Running (1/1 Ready) with 0 restarts."
+		if got.Reply != want {
+			t.Errorf("reply = %q, want %q", got.Reply, want)
+		}
+		if fake.gets(got.SessionID) < 3 {
+			t.Errorf("message gets = %d, want >= 3 showing polling occurred", fake.gets(got.SessionID))
+		}
+	})
+
+	t.Run("prefers subsequent assistant synthesis over raw card summary", func(t *testing.T) {
+		fake, s := setupServer(t)
+		s.delegationPollInterval = 5 * time.Millisecond
+		h := s.routes()
+
+		fake.mu.Lock()
+		fake.reply = "delegating node check."
+		fake.toolName = toolKanbanCreate
+		fake.toolContent = `{"ok": true, "task_id": "t_3344ccdd", "status": "ready"}`
+		fake.onChat = func(sid string) {
+			go func() {
+				time.Sleep(15 * time.Millisecond)
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				fake.post(sid, roleUser, "[kanban] Task t_3344ccdd completed.\n"+
+					"Title: Inspect nodes\n"+
+					"Result: raw node output\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleAssistant, "All 3 nodes in platform-agent-host are Ready on v1.33.5-gke.1308000.")
+			}()
+		}
+		fake.mu.Unlock()
+
+		rec := serve(h, chatReq(`{"message":"what nodes are in this cluster?"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		got := decode[chatResponse](t, rec)
+		want := "All 3 nodes in platform-agent-host are Ready on v1.33.5-gke.1308000."
+		if got.Reply != want {
+			t.Errorf("reply = %q, want %q", got.Reply, want)
+		}
+	})
 }
 
 func TestPageHarnessCoversThreadsUnreadStatusStepsTimerAndCards(t *testing.T) {
