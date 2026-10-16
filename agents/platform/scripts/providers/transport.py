@@ -497,8 +497,9 @@ class HttpTransport:
         ca_file: str = "",
         ca_source: str = "",
         whoami_graphql: str = "",
+        allow_http: bool = False,
     ) -> None:
-        if not base_url.startswith("https://"):
+        if not base_url.startswith(("https://", "http://") if allow_http else "https://"):
             raise ValueError("a forge API is reached over https only")
         self._base = base_url.rstrip("/")
         self._host = self._base.split("://", 1)[1].split("/", 1)[0]

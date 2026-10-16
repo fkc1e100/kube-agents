@@ -177,7 +177,11 @@ DEFAULT_PROPOSAL_NOUN = "pull request"
 #: broker's dependencies, and an import there would fail every consumer on
 #: every install. Kept in step with the forge classes by
 #: `test_gitops_workspace.TestForgeTable`, which runs where `providers` is.
-FORGE_PROPOSAL_NOUNS = {GITHUB_REPO_TYPE: "pull request", "gitlab": "merge request"}
+FORGE_PROPOSAL_NOUNS = {
+    GITHUB_REPO_TYPE: "pull request",
+    "gitlab": "merge request",
+    "gitea": "pull request",
+}
 
 #: How a host-qualified name's `/` is spelt in its workspace directory name.
 ENCODED_SEPARATOR = "%2F"
@@ -825,6 +829,14 @@ def qualify(repo: str, managed: list[str] | None = None) -> str:
     qualified = f"{repo_ref.GITHUB_CANONICAL_HOST}/{bare}"
     if any(isinstance(name, str) and name.lower() == qualified.lower() for name in managed):
         return qualified
+    if not any(isinstance(name, str) and name.lower() == bare.lower() for name in managed):
+        matches = [
+            name
+            for name in managed
+            if isinstance(name, str) and split_host(name)[1].lower() == bare.lower()
+        ]
+        if len(matches) == 1:
+            return matches[0]
     return bare
 
 
@@ -1269,13 +1281,12 @@ def _github_entries(
     for entry in entries:
         url = entry.get("url", "")
         if entry.get("type") != GITHUB_REPO_TYPE:
-            if entry.get("type") not in SWEEPABLE_REPO_TYPES:
-                LOGGER.warning(
-                    "Skipping %s repository %r: no provider for type %r.",
-                    key,
-                    url,
-                    entry.get("type"),
-                )
+            LOGGER.warning(
+                "Skipping %s repository %r: no provider for type %r.",
+                key,
+                url,
+                entry.get("type"),
+            )
             continue
         slug = extract_github_slug(url)
         found = None if slug else github_enterprise_ref(url, install_host)
@@ -1506,7 +1517,7 @@ def _forge_repo_names(
         if kind not in served:
             LOGGER.warning("Skipping %s repository %r: no provider for type %r.", key, url, kind)
             continue
-        if _names_a_port(url):
+        if _names_a_port(url) and kind != "gitea":
             # Before parsing: the parser reads a URL's host without its port
             # and a bare `host:8443/path` as an scp remote, so either would
             # come back named on another endpoint than the one registered.

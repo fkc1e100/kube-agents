@@ -5670,10 +5670,6 @@ class TestStallInject(unittest.TestCase):
 
 class TestReadOnlyActivityFeed(unittest.TestCase):
     """Read-only HTTP activity feed for intercepted events and kanban tasks."""
-=======
-class TestTaskWorkerStepsFeed(unittest.TestCase):
-    """`GET /v1/tasks/{id}` returns the worker's live Hermes steps from `state.db`."""
->>>>>>> 1098806f (feat(session-kv): include worker Hermes steps in GET /v1/tasks/{id})
 
     def setUp(self):
         import sqlite3
@@ -5684,7 +5680,6 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
         self.root = Path(self._tmpdir.name)
         self.kanban_path = self.root / "kanban.db"
 
-<<<<<<< HEAD
         with sqlite3.connect(temp_db_path) as conn:
             conn.execute("DELETE FROM intercepted_events")
             conn.execute("DELETE FROM alert_quota")
@@ -5713,8 +5708,6 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
     def _create_kanban_schema(self):
         import sqlite3
 
-=======
->>>>>>> 1098806f (feat(session-kv): include worker Hermes steps in GET /v1/tasks/{id})
         with sqlite3.connect(self.kanban_path) as conn:
             conn.executescript(
                 """
@@ -5762,7 +5755,6 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
                 );
                 """
             )
-<<<<<<< HEAD
 
     @patch.object(session_kv_server, "trigger_agent_troubleshooter")
     def test_intercepted_events_feed_returns_statuses_and_paginates_by_since_id(self, _mock_trigger):

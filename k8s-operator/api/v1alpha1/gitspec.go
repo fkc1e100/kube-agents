@@ -28,7 +28,9 @@ package v1alpha1
 import (
 	"errors"
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -64,6 +66,10 @@ type ResolvedForge struct {
 	ProviderDeclared bool
 	// Host is the declared host, empty for the provider's default.
 	Host string
+	// Scheme is the declared scheme ("https" or "http"), lowercased, or empty.
+	Scheme string
+	// Port is the declared port, or 0 for the scheme's default.
+	Port int32
 	// Namespace is the declared organisation, user, or group path.
 	Namespace string
 	// CredentialsSecret is the name credentialsRef points at, if any.
@@ -161,6 +167,8 @@ func resolveLists(forges []ForgeSpec, repositories []RepositorySpec) *ResolvedIn
 			Name:             strings.TrimSpace(f.Name),
 			Provider:         provider,
 			Host:             strings.TrimSpace(f.Host),
+			Scheme:           strings.ToLower(strings.TrimSpace(f.Scheme)),
+			Port:             f.Port,
 			Namespace:        strings.TrimSpace(f.Namespace),
 		}
 		if f.CredentialsRef != nil {
@@ -215,6 +223,8 @@ func (f *ResolvedForge) valid() bool {
 		provider.ValidateHost(f.Host) == nil &&
 		validateDeclaredValue(gitNamespaceField, f.Namespace, MaxGitNamespaceLength) == nil &&
 		provider.ValidateNamespaceOn(f.Host, f.Namespace) == nil &&
+		provider.ValidateScheme(f.Scheme) == nil &&
+		provider.ValidatePort(f.Port) == nil &&
 		f.credentialsProblem(provider) == nil &&
 		f.caBundleProblem(provider) == nil
 }
@@ -356,6 +366,25 @@ func (ri *ResolvedIntegration) gitHubForge() *ResolvedForge {
 	return nil
 }
 
+// EffectiveScheme is the scheme the forge is reached over.
+func (f *ResolvedForge) EffectiveScheme() string {
+	if f.Scheme == "" {
+		return DefaultForgeScheme
+	}
+	return f.Scheme
+}
+
+// RepoURL is the URL a resolved repository on this forge is seeded as: the
+// forge's scheme, the ref's host, the declared port if any, and the path.
+// For a GitHub forge it is ref.URL(), so existing entries are unchanged.
+func (f *ResolvedForge) RepoURL(ref RepoRef) string {
+	authority := ref.Host
+	if f.Port != 0 {
+		authority = net.JoinHostPort(ref.Host, strconv.Itoa(int(f.Port)))
+	}
+	return f.EffectiveScheme() + schemeSeparator + authority + pathSeparator + ref.Path
+}
+
 // caBundleProblem is why a forge's caBundleRef cannot be used, or nil.
 //
 // A provider that does not read a CA bundle refuses the field rather than
@@ -447,7 +476,7 @@ func (r *ResolvedRepository) ManagedRepoEntry() (ManagedRepoEntry, error) {
 	if err != nil {
 		return ManagedRepoEntry{}, err
 	}
-	return ManagedRepoEntry{Type: r.Forge.Provider, URL: ref.URL()}, nil
+	return ManagedRepoEntry{Type: r.Forge.Provider, URL: r.Forge.RepoURL(ref)}, nil
 }
 
 // GitOps returns the repository with role gitops, or nil.
@@ -672,6 +701,8 @@ const (
 	gitNamespaceField     = "namespace"
 	gitCredentialsField   = "credentialsRef"
 	gitCABundleField      = "caBundleRef"
+	gitSchemeField        = "scheme"
+	gitPortField          = "port"
 	gitRepositoryField    = "repository"
 	gitRepoForgeField     = "forge"
 	gitRepoRoleField      = "role"
@@ -799,6 +830,12 @@ func (ri *ResolvedIntegration) check() ([]IntegrationProblem, map[*ResolvedRepos
 			add(ri.forgePath(f, gitNamespaceField), f.Namespace, err)
 		} else if err := provider.ValidateNamespaceOn(f.Host, f.Namespace); err != nil {
 			add(ri.forgePath(f, gitNamespaceField), f.Namespace, err)
+		}
+		if err := provider.ValidateScheme(f.Scheme); err != nil {
+			add(ri.forgePath(f, gitSchemeField), f.Scheme, err)
+		}
+		if err := provider.ValidatePort(f.Port); err != nil {
+			add(ri.forgePath(f, gitPortField), strconv.Itoa(int(f.Port)), err)
 		}
 		if err := f.credentialsProblem(provider); err != nil {
 			add(ri.forgePath(f, gitCredentialsField), f.CredentialsSecret, err)
@@ -943,6 +980,11 @@ func (ri *ResolvedIntegration) Warnings() []string {
 				"spec.integration.%s is ignored for provider %s: GitHub credentials come from the install's GitHub App through the token minter",
 				ri.forgePath(f, gitCredentialsField), GitProviderGitHub))
 		}
+		if f.Scheme == ForgeSchemeHTTP && f.valid() {
+			warnings = append(warnings, fmt.Sprintf(
+				"spec.integration.%s is http: the forge token and repository contents cross the network unencrypted; use it only for a forge inside the cluster",
+				ri.forgePath(f, gitSchemeField)))
+		}
 	}
 	return warnings
 }
@@ -1014,6 +1056,8 @@ type BrokerForge struct {
 	Name     string `json:"-"`
 	Provider string `json:"provider"`
 	Host     string `json:"host"`
+	Scheme   string `json:"scheme,omitempty"`
+	Port     int32  `json:"port,omitempty"`
 	// CredentialsSecret is the Secret the token is projected from. Not read by
 	// the broker, which is handed the file instead.
 	CredentialsSecret string `json:"-"`
@@ -1079,6 +1123,8 @@ func (ri *ResolvedIntegration) BrokerForges(tokenDir, caDir string) []BrokerForg
 			Name:              f.Name,
 			Provider:          provider.Name,
 			Host:              provider.canonicalHost(f.Host),
+			Scheme:            f.Scheme,
+			Port:              f.Port,
 			CredentialsSecret: f.CredentialsSecret,
 			TokenPath:         tokenDir + pathSeparator + f.Name + pathSeparator + ForgeCredentialsTokenKey,
 			AllowedPaths:      allowed,

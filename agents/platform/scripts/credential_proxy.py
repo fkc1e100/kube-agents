@@ -3812,6 +3812,24 @@ def _ca_reading_entries(entries) -> tuple[dict[str, str], ...]:
     )
 
 
+def _forge_protocols(entries) -> tuple[str, ...]:
+    """The git protocols (`GIT_ALLOW_PROTOCOL`) this install's forges use."""
+    try:
+        forges = providers.build_forges({"forges": list(entries or ())}) if entries else ()
+    except ValueError:
+        return ("https",)
+    return tuple(
+        sorted(
+            {
+                scheme
+                for forge in forges
+                for scheme in getattr(forge, "schemes", ("https",))
+            }
+            or {"https"}
+        )
+    )
+
+
 def _configured_forge_entries():
     """The forge configuration's entries, or () when there is none or it is unreadable.
 
@@ -5374,7 +5392,8 @@ class CommandExecutor:
         # From the built forges, not the raw file: only a forge that reads its
         # CA in its API client gets git pinned to it, so the two clients never
         # disagree about a host's certificate.
-        entries = _ca_reading_entries(_configured_forge_entries())
+        raw_entries = _configured_forge_entries()
+        entries = _ca_reading_entries(raw_entries)
         self.forge_ca_config = forge_ca_git_config(entries)
         self.forge_ca_sources = forge_ca_sources(entries)
         self.forge_ca_files = {entry["host"]: entry["ca_file"] for entry in entries}
@@ -5429,7 +5448,7 @@ class CommandExecutor:
             # clone and both become arbitrary code execution again. They are on
             # the argv refusal list below so that widening is survivable, but
             # anyone reaching for `https:file` should read that list first.
-            "GIT_ALLOW_PROTOCOL": "https",
+            "GIT_ALLOW_PROTOCOL": ":".join(_forge_protocols(raw_entries)),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": str(self.git_config_global),
             # An editor is a command git runs, and `core.editor` is settable

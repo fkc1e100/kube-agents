@@ -23,10 +23,11 @@ import repo_ref
 from workspace_paths import WorkspaceError
 
 from .base import Forge, ForgeUnsupported, StubForge
+from .gitea import GiteaForge
 from .github import GitHubForge
 from .gitlab import GitLabForge
 
-AVAILABLE: tuple[type[Forge], ...] = (GitHubForge, GitLabForge)
+AVAILABLE: tuple[type[Forge], ...] = (GitHubForge, GitLabForge, GiteaForge)
 
 
 # Hosts this design has a name and a shape for but no implementation of yet.
@@ -104,18 +105,23 @@ def load_forge_entries(path: str | None = None) -> list[dict[str, Any]] | None:
         ca_file = item.get("caFile")
         if ca_file is not None and (not isinstance(ca_file, str) or not os.path.isabs(ca_file.strip())):
             raise ValueError(f"forges[{index}].caFile in {path} must be an absolute path")
-        entries.append(
-            {
-                "provider": provider,
-                "host": host,
-                "token_path": str(item.get("tokenPath") or "").strip(),
-                "ca_file": (ca_file or "").strip(),
-                "ca_source": _ca_source(item),
-                # Passed through unfiltered: an entry that trims to nothing is
-                # the forge's to refuse, not the loader's to drop.
-                "allowed_paths": None if allowed is None else tuple(allowed),
-            }
-        )
+        entry: dict[str, Any] = {
+            "provider": provider,
+            "host": host,
+            "token_path": str(item.get("tokenPath") or item.get("tokenFile") or "").strip(),
+            "ca_file": (ca_file or "").strip(),
+            "ca_source": _ca_source(item),
+            # Passed through unfiltered: an entry that trims to nothing is
+            # the forge's to refuse, not the loader's to drop.
+            "allowed_paths": None if allowed is None else tuple(allowed),
+        }
+        if item.get("name") is not None:
+            entry["name"] = str(item.get("name") or "").strip()
+        if item.get("scheme") is not None:
+            entry["scheme"] = str(item.get("scheme") or "").strip().lower()
+        if item.get("port") is not None:
+            entry["port"] = item.get("port")
+        entries.append(entry)
     return entries
 
 
@@ -228,6 +234,20 @@ class Registry:
                     for forge in self.forges
                     if forge.transport == "cli" and forge.cli
                 }
+            )
+        )
+
+    @property
+    def protocols(self) -> tuple[str, ...]:
+        """The git protocols (`GIT_ALLOW_PROTOCOL`) this install's forges use."""
+        return tuple(
+            sorted(
+                {
+                    scheme
+                    for forge in self.forges
+                    for scheme in getattr(forge, "schemes", ("https",))
+                }
+                or {"https"}
             )
         )
 
