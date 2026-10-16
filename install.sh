@@ -797,7 +797,9 @@ Flags for AI Agents & Automation:
                                 (default: DEFAULT_ENABLE_WEBUI, currently false)
   --enable-web-console[=true|false]
                                 Deploy the in-cluster web console, a browser chat
-                                page for the agent reached by kubectl port-forward
+                                page for the agent reached by kubectl port-forward.
+                                Requires NetworkPolicy enforcement on the cluster
+                                (cannot be combined with --accept-no-network-policy)
                                 (default: DEFAULT_ENABLE_WEB_CONSOLE, currently false)
   --enable-gke-backup-plan[=true|false]
                                 Provision a GKE Backup Plan for the cluster
@@ -887,10 +889,13 @@ Flags for AI Agents & Automation:
   --enable-network-policy       Authorize enabling the legacy Calico NetworkPolicy addon and
                                 enforcement on an existing GKE Standard cluster that has neither it
                                 nor Dataplane V2. May recreate nodes and restart workloads. One of
-                                two answers for such a cluster; the other is below, and without
+                                two answers for such a cluster (or the only answer when
+                                --enable-web-console is on); the other is below, and without
                                 either the cluster is refused unchanged (REFUSED_MISSING_NETWORK_POLICY).
                                 The cluster's owner decides this.
-  --accept-no-network-policy    Install onto such a cluster without modifying it. Every NetworkPolicy
+  --accept-no-network-policy    Install onto such a cluster without modifying it (unavailable when
+                                --enable-web-console / WEB_CONSOLE_ENABLED=true is enabled, as the
+                                web console requires NetworkPolicy enforcement). Every NetworkPolicy
                                 kube-agents ships is then inert, including the ones that confine the
                                 agent's shell sandbox; the choice is recorded in the install report
                                 and on the PlatformAgent. Mutually exclusive with the flag above.
@@ -4231,12 +4236,16 @@ print_no_network_policy_consequences() {
 }
 
 # The interactive fork for an adopted cluster that enforces no NetworkPolicy.
-# Three answers, and the default is the one that changes nothing: enable
-# Calico (a control-plane update that may recreate nodes), install without
-# enforcement (the cluster is untouched; print_no_network_policy_consequences
-# says what that costs), or stop. Sets the two PARAM_ variables; the caller
-# acts on them. Never reached without a controlling TTY: an agent-driven run
-# has to pass one of the two flags, and the skill tells it to ask first.
+# Three answers when the web console is off, and the default is the one that
+# changes nothing: enable Calico (a control-plane update that may recreate
+# nodes), install without enforcement (the cluster is untouched;
+# print_no_network_policy_consequences says what that costs), or stop. When
+# the web console is on (--enable-web-console / WEB_CONSOLE_ENABLED=true),
+# installing without enforcement is not offered: the operator either enables
+# Calico or stops (writing REFUSED_MISSING_NETWORK_POLICY before install.env
+# is created). Sets the two PARAM_ variables; the caller acts on them. Never
+# reached without a controlling TTY: an agent-driven run has to pass one of
+# the applicable flags, and the skill tells it to ask first.
 prompt_network_policy_choice() {
   local cluster_name="$1"
   local np_choice=""
@@ -4253,6 +4262,7 @@ prompt_network_policy_choice() {
         ;;
       *)
         print_info "Stopping without modifying the cluster or writing install.env."
+        write_json_report "REFUSED_MISSING_NETWORK_POLICY"
         exit 1
         ;;
     esac
@@ -4286,11 +4296,15 @@ prompt_network_policy_choice() {
 # Clusters created by this repository's gke-cluster module have Dataplane V2;
 # clusters created by other Terraform configurations or pre-existing Standard
 # clusters may have neither Dataplane V2 nor Calico. Such a cluster has three
-# outcomes, and the operator picks: enable the legacy Calico addon
-# (--enable-network-policy, a control-plane update), install without
-# enforcement (--accept-no-network-policy, the cluster untouched and the
-# choice on record), or refuse. The gke-cluster module's postcondition
-# backstops bare-Terraform installs, relaxed by the same variable.
+# outcomes when the web console is off, and the operator picks: enable the
+# legacy Calico addon (--enable-network-policy, a control-plane update),
+# install without enforcement (--accept-no-network-policy, the cluster
+# untouched and the choice on record), or refuse. When the web console is on
+# (--enable-web-console / WEB_CONSOLE_ENABLED=true), installing without
+# enforcement is refused by the preflight and by the composition's
+# precondition, leaving only Calico enablement or refusal. The gke-cluster
+# module's postcondition backstops bare-Terraform installs, relaxed by the
+# same variable when the console is off.
 ensure_existing_cluster_network_policy() {
   local project_id="$1" cluster_name="$2" region="$3"
   local cluster_info
@@ -4439,9 +4453,14 @@ prompt_existing_cluster_opt_ins() {
 settle_network_policy_acceptance() {
   local project_id="$1" cluster_name="$2" region="$3" tfvars_file="$4" image_tag="$5"
   # When the web console is on, check_existing_cluster_network_policy_preflight
-  # refuses the combination and writes the report; do not persist or regenerate
-  # an acceptance that cannot proceed.
+  # runs here (before bootstrap_install_env_file writes install.env) so a
+  # refused non-interactive or no-TTY first install does not leave a stale
+  # install.env with WEB_CONSOLE_ENABLED=true on disk, while an enforcing
+  # cluster sets NETWORK_POLICY_ENFORCEMENT=enforced and proceeds.
   if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+    if [ "${PARAM_DRY_RUN:-false}" != "true" ]; then
+      check_existing_cluster_network_policy_preflight "$1" "$2" "$3"
+    fi
     return 0
   fi
   if is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-false}" && ! is_truthy "${ACCEPT_NO_NETWORK_POLICY:-false}"; then
@@ -4564,7 +4583,7 @@ check_existing_cluster_network_policy_preflight() {
   if is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}"; then
     if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
       print_error "Existing cluster '$cluster_name' enforces no NetworkPolicy, and the web console (--enable-web-console / WEB_CONSOLE_ENABLED=true) requires NetworkPolicy enforcement."
-      print_info "The web console holds the Platform Agent's API key with no login of its own; without NetworkPolicy enforcement, any pod in the cluster can reach it. Enable NetworkPolicy (--enable-network-policy) or disable the web console (--enable-web-console=false)."
+      print_info "The web console holds the Platform Agent's API key with no login of its own; without NetworkPolicy enforcement, any pod in the cluster can reach it. Enable NetworkPolicy (--enable-network-policy, and remove ACCEPT_NO_NETWORK_POLICY=true from install.env) or disable the web console (--enable-web-console=false / WEB_CONSOLE_ENABLED=false)."
       write_json_report "REFUSED_WEB_CONSOLE_WITHOUT_NETWORK_POLICY"
       exit 1
     fi
@@ -4732,19 +4751,31 @@ validate_existing_cluster_opt_in_flags() {
     if [ "${PARAM_ENABLE_NETWORK_POLICY_PASSED:-false}" = "true" ] && [ "${PARAM_ACCEPT_NO_NETWORK_POLICY_PASSED:-false}" != "true" ]; then
       print_info "--enable-network-policy overrides the ACCEPT_NO_NETWORK_POLICY=true your install configuration records, for this run. Remove that line once Calico is on, or every later upgrade waives the enforcement check."
       PARAM_ACCEPT_NO_NETWORK_POLICY="false"
+      export ACCEPT_NO_NETWORK_POLICY="false"
     elif [ "${PARAM_ACCEPT_NO_NETWORK_POLICY_PASSED:-false}" = "true" ] && [ "${PARAM_ENABLE_NETWORK_POLICY_PASSED:-false}" != "true" ]; then
       print_info "--accept-no-network-policy overrides the ENABLE_NETWORK_POLICY=true your install configuration records, for this run."
       PARAM_ENABLE_NETWORK_POLICY="false"
+      export ENABLE_NETWORK_POLICY="false"
     else
       print_error "--enable-network-policy and --accept-no-network-policy are two answers to one question; pass one (as flags, or as ENABLE_NETWORK_POLICY / ACCEPT_NO_NETWORK_POLICY in install.env)."
       print_info "The first enables the legacy Calico addon on the cluster (may recreate nodes); the second installs without NetworkPolicy enforcement and changes nothing."
       exit 1
     fi
   fi
-  if is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}" && \
+  # Refuse up front only when --accept-no-network-policy was passed on the
+  # command line. When ACCEPT_NO_NETWORK_POLICY=true was only inherited from
+  # install.env, check_existing_cluster_network_policy_preflight probes the
+  # live cluster first: if the cluster still enforces nothing it refuses with
+  # REFUSED_WEB_CONSOLE_WITHOUT_NETWORK_POLICY, and if the cluster has since
+  # enabled Dataplane V2 or Calico (the "confine it later" path) it proceeds
+  # and note_stale_network_policy_acceptance tells the operator to remove the
+  # stale line from install.env.
+  if [ "${PARAM_ACCEPT_NO_NETWORK_POLICY_PASSED:-false}" = "true" ] && \
+     is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-false}" && \
      is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
     print_error "--enable-web-console (WEB_CONSOLE_ENABLED=true) cannot be combined with --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true)."
-    print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement (--enable-network-policy or Dataplane V2), or leave the web console off (--enable-web-console=false)."
+    print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement (--enable-network-policy or Dataplane V2, and remove any stale ACCEPT_NO_NETWORK_POLICY=true from install.env), or leave the web console off (--enable-web-console=false)."
+    write_json_report "REFUSED_WEB_CONSOLE_WITHOUT_NETWORK_POLICY"
     exit 1
   fi
 }
@@ -5526,6 +5557,8 @@ summarize_existing_cluster_mutations() {
   else
     if is_truthy "${PARAM_ENABLE_NETWORK_POLICY:-${ENABLE_NETWORK_POLICY:-false}}"; then
       echo -e "    • ${C_CYAN}NetworkPolicy Enforcement:${C_RESET} ${C_YELLOW}Will enable${C_RESET} legacy Calico addon & enforcement (${C_YELLOW}may recreate nodes, restart workloads${C_RESET})"
+    elif is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
+      echo -e "    • ${C_CYAN}NetworkPolicy Enforcement:${C_RESET} ${C_RED}Refused${C_RESET} (the web console requires NetworkPolicy enforcement; pass --enable-network-policy or --enable-web-console=false; install will abort)"
     elif is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}"; then
       echo -e "    • ${C_CYAN}NetworkPolicy Enforcement:${C_RESET} ${C_YELLOW}Absent, accepted${C_RESET} (--accept-no-network-policy: cluster unchanged; ${C_YELLOW}every NetworkPolicy kube-agents ships is inert, the agent sandbox included${C_RESET}; recorded on the PlatformAgent)"
     else
@@ -7850,13 +7883,13 @@ main() {
       is_existing_cluster_network_policy_satisfied "$project_id" "$cluster_name" "$region" || np_status=$?
       if [ "$np_status" -eq 2 ]; then
         print_warning "Dry-run: skipping terraform plan because existing cluster '$cluster_name' could not be queried."
-      elif [ "$np_status" -ne 0 ] && ! is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}"; then
+      elif [ "$np_status" -ne 0 ] && { ! is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-${ACCEPT_NO_NETWORK_POLICY:-false}}" || is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; }; then
         if is_truthy "${PARAM_ENABLE_NETWORK_POLICY:-${ENABLE_NETWORK_POLICY:-false}}"; then
           print_info "Dry-run: skipping terraform plan because Calico has not yet been applied to the live cluster (a real run enables Calico prior to apply)."
         else
           print_warning "Dry-run: skipping terraform plan because existing cluster '$cluster_name' enforces no NetworkPolicy (postcondition would fail)."
           if is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
-            print_info "A real run will abort unless NetworkPolicy enforcement is enabled: --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon, a control-plane update that may recreate nodes (--accept-no-network-policy cannot be combined with --enable-web-console)."
+            print_info "A real run will abort unless NetworkPolicy enforcement is enabled: --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon, a control-plane update that may recreate nodes (--accept-no-network-policy / ACCEPT_NO_NETWORK_POLICY=true cannot be combined with --enable-web-console)."
           else
             print_info "A real run will abort unless told which way to go: --enable-network-policy (ENABLE_NETWORK_POLICY=true) enables the legacy Calico addon, a control-plane update that may recreate nodes; --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true) installs without enforcement and leaves the cluster as it is."
           fi

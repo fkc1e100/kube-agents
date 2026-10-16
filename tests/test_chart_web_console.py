@@ -66,19 +66,24 @@ class WebConsoleChartTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.template = TEMPLATE.read_text()
-        cls.docs = {_kind(d): d for d in _documents(cls.template)}
+        cls.raw_docs = _documents(cls.template)
+        cls.docs = {_kind(d): d for d in cls.raw_docs}
 
     def test_service_type_is_a_literal_cluster_ip(self) -> None:
+        self.assertEqual([_kind(d) for d in self.raw_docs], ["Deployment", "Service", "NetworkPolicy"])
         service = self.docs["Service"]
         self.assertRegex(service, r"(?m)^\s+type: ClusterIP$")
-        self.assertNotIn(".Values.webConsole.service.type", self.template)
+        self.assertRegex(service, r"(?m)^\s+port: 8080$")
+        self.assertNotIn(".Values.webConsole.service", self.template)
         self.assertNotIn("nodePort", self.template)
 
     def test_schema_refuses_a_service_type(self) -> None:
         schema = json.loads(SCHEMA.read_text())
-        service = schema["properties"]["webConsole"]["properties"]["service"]
-        self.assertFalse(service.get("additionalProperties", True))
-        self.assertEqual(set(service["properties"]), {"port"})
+        web_console = schema["properties"]["webConsole"]
+        self.assertFalse(web_console.get("additionalProperties", True))
+        self.assertNotIn("service", web_console["properties"])
+        values = yaml.safe_load(VALUES.read_text())
+        self.assertNotIn("service", values["webConsole"])
 
     def test_network_policy_refuses_all_ingress(self) -> None:
         self.assertIn("NetworkPolicy", self.docs, "the console renders without its NetworkPolicy")

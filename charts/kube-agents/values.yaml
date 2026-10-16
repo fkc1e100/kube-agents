@@ -1289,8 +1289,6 @@ webConsole:
     repository: ghcr.io/gke-labs/kube-agents/web-console
     tag: "" # defaults to platformAgent.deployment.image.tag, then Chart.appVersion
     pullPolicy: "" # defaults to Always for the latest tag, IfNotPresent otherwise
-  service:
-    port: 8080
   resources:
     limits:
       cpu: 200m

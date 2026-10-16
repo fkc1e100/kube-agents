@@ -1196,17 +1196,6 @@
             }
           }
         },
-        "service": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "port": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 65535
-            }
-          }
-        },
         "resources": {
           "type": "object"
         },

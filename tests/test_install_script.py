@@ -1371,12 +1371,22 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
     def test_validate_existing_cluster_opt_in_flags_refuses_web_console_without_network_policy(self):
         for cmd, env in (
             ("parse_args --accept-no-network-policy --enable-web-console; validate_existing_cluster_opt_in_flags", {}),
-            ("validate_existing_cluster_opt_in_flags", {"ACCEPT_NO_NETWORK_POLICY": "true", "WEB_CONSOLE_ENABLED": "True"}),
+            ("parse_args --accept-no-network-policy; validate_existing_cluster_opt_in_flags", {"WEB_CONSOLE_ENABLED": "True"}),
         ):
             with self.subTest(cmd=cmd, env=env):
                 proc = self._run_install_func(cmd, env=env)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("cannot be combined with --accept-no-network-policy", proc.stderr + proc.stdout)
+        # When ACCEPT_NO_NETWORK_POLICY=true was only recorded in install.env
+        # (not passed as a flag), validate_existing_cluster_opt_in_flags lets
+        # the run proceed to check_existing_cluster_network_policy_preflight so
+        # a cluster that has since enabled Dataplane V2 or Calico ("confine it
+        # later") can enable the console and emit note_stale_network_policy_acceptance.
+        proc = self._run_install_func(
+            "parse_args --enable-web-console; validate_existing_cluster_opt_in_flags",
+            env={"ACCEPT_NO_NETWORK_POLICY": "true"},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
 
     def test_validate_existing_cluster_opt_in_flags_rejects_typos(self):
         cmd = 'parse_args --enable-network-policy=ture; validate_existing_cluster_opt_in_flags'
@@ -3899,7 +3909,11 @@ class CheckExistingClusterNetworkPolicyPreflightTest(unittest.TestCase):
             if install_env is not None:
                 existing = pathlib.Path(tmp) / "existing.env"
                 existing.write_text(install_env)
+                existing.chmod(0o600)
+                env_path = existing
                 opt_in_line += f'INSTALL_ENV_FILE="{existing}"\n'
+            else:
+                env_path = empty_env
             body = (
                 f'source "{_INSTALLER_COMMON}"\n'
                 f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
@@ -3912,7 +3926,7 @@ class CheckExistingClusterNetworkPolicyPreflightTest(unittest.TestCase):
                 ["bash", "-c", body],
                 capture_output=True,
                 text=True,
-                env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(empty_env)}, bin_dir=str(bin_dir)),
+                env=get_isolated_test_env(overrides={"KUBE_AGENTS_INSTALL_ENV": str(env_path)}, bin_dir=str(bin_dir)),
                 cwd=str(_REPO_ROOT),
             )
 
@@ -3987,6 +4001,69 @@ class CheckExistingClusterNetworkPolicyPreflightTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
         self.assertIn("Could not query NetworkPolicy configuration", proc.stderr + proc.stdout)
         self.assertNotIn("enforces no NetworkPolicy", proc.stderr + proc.stdout)
+
+    def test_refuses_web_console_when_absence_is_accepted_on_unenforced_cluster(self):
+        proc = self._run(
+            dp="",
+            legacy_np="False",
+            accept="true",
+            install_env="PROJECT_ID=p\nACCEPT_NO_NETWORK_POLICY=true\nWEB_CONSOLE_ENABLED=true\n",
+        )
+        self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
+        out = proc.stderr + proc.stdout
+        self.assertIn("requires NetworkPolicy enforcement", out)
+        self.assertIn("remove ACCEPT_NO_NETWORK_POLICY=true from install.env", out)
+
+    def test_web_console_over_stale_acceptance_on_enforcing_cluster_proceeds_and_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = pathlib.Path(tmp) / "bin"
+            bin_dir.mkdir()
+            gcloud = bin_dir / "gcloud"
+            gcloud.write_text(
+                "#!/usr/bin/env bash\n"
+                'printf "RUNNING,ADVANCED_DATAPATH,False\\n"\n'
+            )
+            gcloud.chmod(gcloud.stat().st_mode | stat.S_IEXEC)
+            env_file = pathlib.Path(tmp) / "install.env"
+            env_file.write_text("PROJECT_ID=p\nACCEPT_NO_NETWORK_POLICY=true\n")
+            body = (
+                f'source "{_INSTALLER_COMMON}"\n'
+                f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                f'INSTALL_ENV_FILE="{env_file}"\n'
+                'TFVARS_CREATE_CLUSTER="false"\n'
+                'parse_args --enable-web-console\n'
+                'validate_existing_cluster_opt_in_flags\n'
+                'check_existing_cluster_network_policy_preflight p c r\n'
+                'note_stale_network_policy_acceptance "$INSTALL_ENV_FILE"\n'
+                'echo "RECORDED=$NETWORK_POLICY_ENFORCEMENT"\n'
+            )
+            proc = subprocess.run(
+                ["bash", "-c", body],
+                capture_output=True,
+                text=True,
+                env=get_isolated_test_env(
+                    overrides={"KUBE_AGENTS_INSTALL_ENV": str(env_file)},
+                    bin_dir=str(bin_dir),
+                ),
+                cwd=str(_REPO_ROOT),
+            )
+        self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+        out = proc.stderr + proc.stdout
+        self.assertIn("RECORDED=enforced", proc.stdout)
+        self.assertIn("records ACCEPT_NO_NETWORK_POLICY=true", out)
+        self.assertIn("Remove that line", out)
+
+    def test_refuses_web_console_when_lacking_both_and_no_opt_in(self):
+        proc = self._run(
+            dp="",
+            legacy_np="False",
+            opt_in="false",
+            install_env="PROJECT_ID=p\nWEB_CONSOLE_ENABLED=true\n",
+        )
+        self.assertEqual(proc.returncode, 1, proc.stderr + proc.stdout)
+        out = proc.stderr + proc.stdout
+        self.assertIn("--accept-no-network-policy cannot be used", out)
+        self.assertIn("--enable-web-console=false", out)
 
 
 class GenerateOnlyCrossesTheExistingClusterConsentGatesTest(unittest.TestCase):
@@ -4109,6 +4186,23 @@ class InteractiveNetworkPolicyPromptTest(unittest.TestCase):
             self.assertNotIn("PROMPTED", proc.stdout, (dp, legacy_np, proc.stderr))
             self.assertIn("E=unset A=unset", proc.stdout)
 
+    def test_web_console_removes_accept_choice_and_decline_writes_report(self):
+        enable = self._run("e", preset='PARAM_ENABLE_WEB_CONSOLE="true"\n')
+        self.assertEqual(enable.returncode, 0, enable.stderr + enable.stdout)
+        self.assertIn("not available on this run", enable.stdout + enable.stderr)
+        self.assertIn("PROMPTED: Choose (e/N)", enable.stdout)
+        self.assertNotIn("Choose (e/a/N)", enable.stdout)
+        self.assertIn("E=true A=false", enable.stdout)
+
+        decline = self._run(
+            "n",
+            preset='PARAM_ENABLE_WEB_CONSOLE="true"\nwrite_json_report() { echo "REPORT=$1"; }\n',
+        )
+        self.assertEqual(decline.returncode, 1, decline.stderr + decline.stdout)
+        self.assertIn("PROMPTED: Choose (e/N)", decline.stdout)
+        self.assertIn("REPORT=REFUSED_MISSING_NETWORK_POLICY", decline.stdout)
+        self.assertNotIn("rc=", decline.stdout)
+
 
 class SettleNetworkPolicyAcceptanceTest(unittest.TestCase):
     """settle_network_policy_acceptance: the answer reaches the tfvars and the decision.
@@ -4185,6 +4279,78 @@ class SettleNetworkPolicyAcceptanceTest(unittest.TestCase):
         # for a cluster nobody read would be a waiver with no decision behind it.
         proc = self._run(param="true", status="")
         self.assertIn("DECISION=none", proc.stdout, proc.stderr)
+
+    def test_web_console_refuses_before_bootstrap_writes_install_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = pathlib.Path(tmp) / "bin"
+            bin_dir.mkdir()
+            gcloud = bin_dir / "gcloud"
+            gcloud.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *autopilot.enabled*) printf "True\\n" ;;\n'
+                '  *datapathProvider,networkPolicy.enabled*) printf "RUNNING,,False\\n" ;;\n'
+                "esac\n"
+                "exit 0\n"
+            )
+            gcloud.chmod(gcloud.stat().st_mode | stat.S_IEXEC)
+            empty_env = pathlib.Path(tmp) / "empty.env"
+            empty_env.write_text("")
+            empty_env.chmod(0o600)
+            install_env = pathlib.Path(tmp) / "install.env"
+            body = (
+                f'source "{_INSTALLER_COMMON}"\n'
+                f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                f'INSTALL_ENV_FILE="{install_env}"\n'
+                'TFVARS_CREATE_CLUSTER="false"\n'
+                'PARAM_NON_INTERACTIVE="true"\n'
+                'PARAM_DRY_RUN="false"\n'
+                'write_json_report() { echo "REPORT=$1"; }\n'
+                'parse_args -y --enable-web-console\n'
+                'prompt_existing_cluster_opt_ins proj cluster region\n'
+                'settle_network_policy_acceptance proj cluster region /tmp/t.tfvars 0.5.0\n'
+                'bootstrap_install_env_file "$INSTALL_ENV_FILE" 0.5.0\n'
+            )
+            first = subprocess.run(
+                ["bash", "-c", body],
+                capture_output=True,
+                text=True,
+                env=get_isolated_test_env(
+                    overrides={"KUBE_AGENTS_INSTALL_ENV": str(empty_env)},
+                    bin_dir=str(bin_dir),
+                ),
+                cwd=str(_REPO_ROOT),
+            )
+            self.assertEqual(first.returncode, 1, first.stderr + first.stdout)
+            self.assertIn("REPORT=REFUSED_MISSING_NETWORK_POLICY", first.stdout)
+            self.assertFalse(
+                install_env.exists(),
+                "a refused first install with --enable-web-console must not leave install.env behind",
+            )
+            # Because no stale install.env was written, a follow-up run with
+            # --accept-no-network-policy (omitting --enable-web-console) succeeds.
+            second_body = (
+                f'source "{_INSTALLER_COMMON}"\n'
+                f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                f'INSTALL_ENV_FILE="{install_env}"\n'
+                'TFVARS_CREATE_CLUSTER="false"\n'
+                'parse_args -y --accept-no-network-policy\n'
+                'validate_existing_cluster_opt_in_flags\n'
+                'check_existing_cluster_network_policy_preflight proj cluster region\n'
+                'echo "SECOND_OK=$NETWORK_POLICY_ENFORCEMENT"\n'
+            )
+            second = subprocess.run(
+                ["bash", "-c", second_body],
+                capture_output=True,
+                text=True,
+                env=get_isolated_test_env(
+                    overrides={"KUBE_AGENTS_INSTALL_ENV": str(empty_env)},
+                    bin_dir=str(bin_dir),
+                ),
+                cwd=str(_REPO_ROOT),
+            )
+            self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+            self.assertIn("SECOND_OK=absent-accepted", second.stdout)
 
 
 class AcceptedAbsenceOutlivesTheRunTest(unittest.TestCase):
@@ -11030,7 +11196,8 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                         f"{key}={value} was rejected: {proc.stdout + proc.stderr}",
                     )
         # And main() itself must not re-judge any of these seeded PARAM_*
-        # variables with `=~ ^(true|false)$` after resolve_shared_defaults.
+        # variables with `=~ ^(true|false)$` or a literal "true"/"false" check
+        # after resolve_shared_defaults.
         main_body = _INSTALL_SH.read_text().split("\nmain() {\n", 1)[1]
         judged_in_main = set(
             re.findall(r'\[\[\s*!\s*"\$([A-Za-z0-9_]+)"\s*=~\s*\^\(true\|false\)\$\s*\]\]', main_body)
@@ -11040,6 +11207,74 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
             {"enable_gvisor", "PARAM_ENABLE_WEBUI", "vertex_manage_serving_project"},
             f"main() must not regex-judge seeded toggle PARAMs: {judged_in_main}",
         )
+        seeded_params = [
+            "PARAM_ENABLE_GOOGLE_CHAT",
+            "PARAM_ENABLE_SLACK",
+            "PARAM_ENABLE_GKE_BACKUP_PLAN",
+            "PARAM_ENABLE_PUBSUB_PLATFORM",
+            "PARAM_ENABLE_STOCKOUT_INVESTIGATOR",
+            "PARAM_ENABLE_DRIFT_DETECTOR",
+            "PARAM_ENABLE_WEB_CONSOLE",
+            "PARAM_LITELLM_REDACTION_ENABLED",
+            "PARAM_SCOPED_SA_POOL_ENABLED",
+        ]
+        for line in main_body.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for param in seeded_params:
+                if param in stripped:
+                    self.assertNotRegex(
+                        stripped,
+                        r'true\|false|(!=|==|=)\s*"?(true|false)"?|^case\s',
+                        f"main() must not compare seeded {param} against literal true/false: {stripped}",
+                    )
+        # Drive main() itself on a non-interactive dry-run with all seeded
+        # toggle keys set to "True" in install.env to prove main() reaches the
+        # end of the run without rejecting any of them.
+        with tempfile.TemporaryDirectory() as tmp:
+            seeded_env = pathlib.Path(tmp) / "install.env"
+            seeded_env.write_text(
+                "\n".join(f"{k}=True" for k in self.SEEDED_TOGGLE_ENV_KEYS.values())
+                + "\nSLACK_BOT_TOKEN=xoxb-test\nSLACK_APP_TOKEN=xapp-test\n",
+                encoding="utf-8",
+            )
+            seeded_env.chmod(0o600)
+            driver = (
+                f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
+                "command() { return 0; }\n"
+                "require_min_gcloud_version() { return 0; }\n"
+                "require_min_terraform_version() { return 0; }\n"
+                f'acquire_source_repo() {{ printf -v "$1" "%s" "{_REPO_ROOT}"; }}\n'
+                "gcloud() {\n"
+                '  case "$*" in\n'
+                '    *"config get-value account"*) echo "user@example.com" ;;\n'
+                '    *"projects describe"*) echo "123456" ;;\n'
+                '    *"application-default print-access-token"*) return 1 ;;\n'
+                '    *"clusters describe"*) echo "NOT_FOUND" >&2; return 1 ;;\n'
+                "  esac\n"
+                "  return 0\n"
+                "}\n"
+                'write_tfvars_from_state() { : > "$1"; }\n'
+                "check_service_account_ownership() { return 0; }\n"
+                "bootstrap_install_env_file() { return 0; }\n"
+                "drop_stale_import_overrides() { :; }\n"
+                "run_with_spinner() { return 0; }\n"
+                'write_json_report() { echo "REPORT=$1"; }\n'
+                "main --dry-run -y --gcp-project-id=test-proj --gke-cluster-name=test-cluster --gcp-region=us-central1\n"
+            )
+            proc = subprocess.run(
+                ["bash", "-c", driver],
+                capture_output=True,
+                text=True,
+                env=get_isolated_test_env(
+                    overrides={"KUBE_AGENTS_INSTALL_ENV": str(seeded_env)},
+                    absent=_SEEDED_INSTALLER_ENV_KEYS,
+                ),
+                cwd=str(_REPO_ROOT),
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("REPORT=DRY_RUN_SUCCESS", proc.stdout)
 
     def test_every_toggle_refuses_an_empty_value_against_a_seed(self):
         """`--enable-slack=` with SLACK_ENABLED=true recorded is the bad case.

@@ -972,12 +972,91 @@ function makeContext(fetchImpl, initialStorage = {}) {
     ctx3.appended.some(m => m.role === "agent" && m.text === "pre-turn wake result" && m.tag === "update"),
     "stale pre-turn poll must not drop pre-turn wake result: " + JSON.stringify(ctx3.appended)
   );
+
+  // Also verify seq !== turnSeq on its own: when a turn's settleAfterReply
+  // fails and submitMessage finishes (clearing turnInFlight while leaving the
+  // turn in unsettledTurns), a pre-turn poll resolving afterwards must still
+  // be discarded rather than settling the turn against pre-turn rows.
+  let resolveLateStalePoll = null;
+  let lateMsgCalls = 0;
+  const ctx3b = makeContext(async (url) => {
+    if (String(url) === "/api/chat") {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          session_id: "web-console-" + "a".repeat(32),
+          reply: "turn reply",
+          before_id: 6,
+          reply_id: 8,
+        }),
+      };
+    }
+    if (!String(url).includes("/messages")) {
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    }
+    lateMsgCalls++;
+    if (lateMsgCalls === 1) {
+      return new Promise(r => { resolveLateStalePoll = r; });
+    }
+    if (lateMsgCalls === 2) {
+      return { ok: false, status: 502, text: async () => "bad gateway" };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 8,
+        messages: [
+          { id: 5, role: "user", content: "[kanban] card done" },
+          { id: 6, role: "assistant", content: "pre-turn wake result" },
+          { id: 7, role: "user", content: "typed turn" },
+          { id: 8, role: "assistant", content: "turn reply" },
+        ],
+      }),
+    };
+  }, {
+    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
+    "kube-agents-web-console-mark": "4",
+  });
+  ctx3b.appended.length = 0;
+  await vm.runInContext("submitMessage('typed turn')", ctx3b);
+  assert.equal(ctx3b.store.get("kube-agents-web-console-mark"), "4");
+  resolveLateStalePoll({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      latest_id: 6,
+      messages: [
+        { id: 5, role: "user", content: "[kanban] card done" },
+        { id: 6, role: "assistant", content: "pre-turn wake result" },
+      ],
+    }),
+  });
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
+  assert.equal(
+    ctx3b.store.get("kube-agents-web-console-mark"),
+    "4",
+    "stale pre-turn poll resolving after turn finishes must be dropped by seq !== turnSeq"
+  );
+  assert.ok(
+    !ctx3b.appended.some(m => m.tag === "update"),
+    "stale pre-turn poll must not settle pending turn early: " + JSON.stringify(ctx3b.appended)
+  );
+  await vm.runInContext("pollMessages()", ctx3b);
+  assert.equal(ctx3b.store.get("kube-agents-web-console-mark"), "8");
+  assert.equal(
+    ctx3b.appended.filter(m => m.role === "agent" && m.text === "pre-turn wake result" && m.tag === "update").length,
+    1,
+    "clean poll after discarded stale poll must show pre-turn wake once: " + JSON.stringify(ctx3b.appended)
+  );
 }
 
-// Case 2: pre-turn result, two mid-turn wakes (with intermediate assistant rows
-// on the typed turn), and a post-reply result, even when replyId points at the
-// post-reply wake row (id 16) rather than the turn's own reply row (id 14),
-// plus an empty-reply turn with a mid-turn wake.
+// Case 2: pre-turn result, two mid-turn wakes (including a multi-row wake and
+// an intermediate assistant row before the first wake), and a post-reply result,
+// even when replyId points at the post-reply wake row (id 16) rather than the
+// turn's own reply row (id 14), plus an empty-reply turn with a mid-turn wake.
 {
   let settleReady = false;
   const messages = [
@@ -987,7 +1066,7 @@ function makeContext(fetchImpl, initialStorage = {}) {
     { id: 8, role: "assistant", content: "intermediate note before wake" },
     { id: 9, role: "user", content: "[kanban] card 2 done mid-turn" },
     { id: 10, role: "assistant", content: "first mid-turn wake result" },
-    { id: 11, role: "assistant", content: "intermediate note between wakes" },
+    { id: 11, role: "assistant", content: "first mid-turn wake second row" },
     { id: 12, role: "user", content: "[kanban] card 3 done mid-turn" },
     { id: 13, role: "assistant", content: "second mid-turn wake result" },
     { id: 14, role: "assistant", content: "final turn reply" },
@@ -1014,10 +1093,11 @@ function makeContext(fetchImpl, initialStorage = {}) {
     JSON.stringify([
       { role: "agent", text: "pre-turn delegated result", tag: "update" },
       { role: "agent", text: "first mid-turn wake result", tag: "update" },
+      { role: "agent", text: "first mid-turn wake second row", tag: "update" },
       { role: "agent", text: "second mid-turn wake result", tag: "update" },
       { role: "agent", text: "post-reply delegated result", tag: "update" },
     ]),
-    "all delegated results (pre-turn, both mid-turn wakes, post-reply) must be shown once"
+    "all delegated results (pre-turn, both mid-turn wakes including multi-row wake, post-reply) must be shown once"
   );
   assert.equal(ctx.store.get("kube-agents-web-console-mark"), "16");
 
@@ -1093,6 +1173,22 @@ function makeContext(fetchImpl, initialStorage = {}) {
     ctx
   );
   assert.equal(doubleBacktickSpan, "<p>Use <code>a \x60 b</code> inline.</p>");
+  const fenceAfterRejectedOpen = vm.runInContext(
+    "renderMarkdown('\\x60\\x60\\x60a\\x60b\\n\\x60\\x60\\x60\\ncode\\n\\x60\\x60\\x60\\nAfter')",
+    ctx
+  );
+  assert.equal(
+    fenceAfterRejectedOpen,
+    "<p>\x60\x60\x60a\x60b</p><pre><code>code</code></pre><p>After</p>"
+  );
+  const crossLineCodeSpan = vm.runInContext(
+    "renderMarkdown('Use \\x60kubectl\\nget pods\\x60 now.')",
+    ctx
+  );
+  assert.equal(
+    crossLineCodeSpan,
+    "<p>Use <code>kubectl get pods</code> now.</p>"
+  );
   const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
   assert.ok(inline.includes("Use <code>yaml on its own line, not </code>inline"), "mid-line backticks must not drop surrounding prose: " + inline);
   assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);

@@ -17,7 +17,7 @@ The side panel lists the agent's recent sessions by title, including the triage 
 
 ## How it is reached
 
-The console is reachable through `kubectl port-forward` and no other way. The chart renders its Service as `ClusterIP`, and a NetworkPolicy refuses every connection to the console pod from the pod network. The policy takes effect only on a cluster that enforces NetworkPolicy, which clusters the installer creates do. A port-forward enters from the node, which NetworkPolicy does not govern. In practice, whoever holds `pods/portforward` on the install namespace can use the console.
+The console is reachable through `kubectl port-forward` and no other way. The chart renders its Service as `ClusterIP`, and a NetworkPolicy refuses every connection to the console pod from the pod network. The policy takes effect only on a cluster that enforces NetworkPolicy, which clusters the installer creates do; when you adopt an existing cluster, the installer and the Terraform composition require NetworkPolicy enforcement before they will enable the console and refuse `--accept-no-network-policy` (`accept_no_network_policy = true`). A port-forward enters from the node, which NetworkPolicy does not govern. In practice, whoever holds `pods/portforward` on the install namespace can use the console.
 
 The console holds the agent's API key, from the same Secret the agent reads, and attaches it to the requests it sends the agent. The key does not reach the browser. There is no login page and no per-user identity: every turn reaches the agent as the console.
 
@@ -41,7 +41,7 @@ When the install finishes, the installer prints the command to reach the console
 kubectl port-forward -n kubeagents-system svc/kube-agents-web-console 8080:8080
 ```
 
-Then open `http://localhost:8080`. Both commands assume the chart's default `webConsole.service.port`, 8080. The console pod does not run under gVisor, so this works on a sandboxed install as well.
+Then open `http://localhost:8080`. The console pod does not run under gVisor, so this works on a sandboxed install as well.
 
 ## What to expect when something is wrong
 

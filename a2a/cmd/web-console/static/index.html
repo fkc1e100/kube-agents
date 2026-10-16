@@ -731,8 +731,9 @@
         if (turnAt >= 0) showUpdates(messages.slice(0, turnAt));
         // Hermes does not serialize turns on one session, so a card's wake can
         // run during this turn and land inside its range. A user row other than
-        // the typed message starts such a wake; its agent reply is shown and
-        // ends the wake so later assistant rows of the typed turn are not shown.
+        // the typed message starts such a wake; assistant rows from there to
+        // replyAt belong to the wake and are shown, while assistant rows before
+        // the first wake user row belong to the typed turn and are not shown.
         const inTurn =
           turnAt < 0
             ? []
@@ -747,7 +748,6 @@
             inWake = true;
           } else if (inWake && m.role === "assistant" && m.id > lastSeenId) {
             appendMessage("agent", m.content, "update");
-            inWake = false;
           }
         });
         if (replyAt >= 0) {
@@ -872,7 +872,7 @@
           if (closeIdx < 0) continue;
           const close = runs[closeIdx];
           out += line.slice(cursor, open.start);
-          const inner = line.slice(open.end, close.start);
+          const inner = line.slice(open.end, close.start).replace(/\n/g, " ");
           const code =
             inner.length >= 2 &&
             inner.startsWith(" ") &&
@@ -893,9 +893,9 @@
       function renderInline(text) {
         const codes = [];
         let html = escapeHtml(String(text).replace(/\x00/g, ""))
-          .split("\n")
-          .map((line) => replaceCodeSpans(line, codes))
-          .join("\n");
+          .split(/\n{2,}/)
+          .map((para) => replaceCodeSpans(para, codes))
+          .join("\n\n");
         html = html.replace(
           /(?<!\*)\*\*(?![\s*])((?:[^\n*]|\*(?!\*))+?)(?<![\s*])\*\*(?!\*)/g,
           "<strong>$1</strong>",
@@ -925,7 +925,10 @@
         while ((openMatch = openRe.exec(text)) !== null) {
           if (openMatch.index < pos) continue;
           const fenceChar = openMatch[2][0];
-          if (fenceChar === "`" && openMatch[3].includes("`")) continue;
+          if (fenceChar === "`" && openMatch[3].includes("`")) {
+            openRe.lastIndex -= 1;
+            continue;
+          }
           const before = text.slice(pos, openMatch.index);
           if (before.trim()) html += renderInline(before.trim());
           const indent = openMatch[1].length;
