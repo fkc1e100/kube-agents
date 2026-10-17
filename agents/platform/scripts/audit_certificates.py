@@ -3,7 +3,7 @@
 
 Discovers whether cert-manager.io CRDs exist (full, partial, or absent), audits
 Certificates, Issuers, ClusterIssuers, CertificateRequests, GKE ManagedCertificates,
-and native kubernetes.io/tls Secrets (count & namespaces) in parallel in <2 seconds.
+and native kubernetes.io/tls Secrets (count & namespaces) in parallel.
 Emits CLEAN_AUDIT_STOP: YES only when every queried kind was read and no Certificate is
 unready, expired, renewal-overdue or failing issuance, no Issuer is unready, and no
 ManagedCertificate is outside Active. Native TLS Secrets are counted, not checked for expiry; a
@@ -34,6 +34,10 @@ MANAGED_CERT_ACTIVE = "Active"
 ISSUING_FAILED_REASON = "Failed"
 # How much of a failed query's error text the unread list shows per kind.
 UNREAD_REASON_MAX_CHARS = 200
+# Per-call kubectl deadline; a listing that exceeds it is reported as unread.
+KUBECTL_TIMEOUT_SECONDS = 15
+# The sandbox's kubectl wrapper that forwards calls through the credential proxy.
+CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # kubectl's RBAC denial text; a Forbidden Secret listing is reported as uncounted, not as unread.
 FORBIDDEN_MARKER = "forbidden"
 # Metadata-only Secret listing, so no tls.key or tls.crt payload leaves the credential proxy.
@@ -48,7 +52,7 @@ def run_cmd(args: list[str], env: dict[str, str]) -> tuple[int, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=15,
+            timeout=KUBECTL_TIMEOUT_SECONDS,
             check=False,
         )
         return res.returncode, res.stdout.strip() if res.returncode == 0 else res.stderr.strip()
@@ -65,7 +69,7 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=15,
+            timeout=KUBECTL_TIMEOUT_SECONDS,
             check=False,
         )
         if res.returncode == 0 and res.stdout.strip():
@@ -117,8 +121,8 @@ def discover_installed_crds(env: dict[str, str]) -> tuple[set[str] | None, str]:
 
 def audit_certificates(kubeconfig: str | None = None) -> int:
     env = os.environ.copy()
-    if "/opt/credential-proxy/bin" not in env.get("PATH", ""):
-        env["PATH"] = "/opt/credential-proxy/bin:" + env.get("PATH", "")
+    if CREDENTIAL_PROXY_BIN not in env.get("PATH", ""):
+        env["PATH"] = f"{CREDENTIAL_PROXY_BIN}:" + env.get("PATH", "")
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig
 
@@ -146,6 +150,7 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         tasks["managedcerts"] = ["get", MANAGED_CERT_CRD, "-A"]
 
     results: dict[str, tuple[int, dict]] = {}
+    # One worker per CRD listing plus one for the TLS Secret listing.
     with ThreadPoolExecutor(max_workers=len(tasks) + 1) as executor:
         sec_future = executor.submit(
             run_cmd,

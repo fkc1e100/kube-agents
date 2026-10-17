@@ -3,7 +3,7 @@
 
 Single-pass concurrent collector for PersistentVolumeClaims (PVCs),
 PersistentVolumes (PVs), StorageClasses, and VolumeAttachments.
-Discovers and audits cluster storage state in <5 seconds.
+Discovers and audits cluster storage state in one pass.
 Part of kube-agents #3285.
 """
 
@@ -18,6 +18,10 @@ import sys
 
 # How much of a failed query's error text the unread list shows per kind.
 UNREAD_REASON_MAX_CHARS = 200
+# Per-call kubectl deadline; a listing that exceeds it is reported as unread.
+KUBECTL_TIMEOUT_SECONDS = 15
+# The sandbox's kubectl wrapper that forwards calls through the credential proxy.
+CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
@@ -29,7 +33,7 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=15,
+            timeout=KUBECTL_TIMEOUT_SECONDS,
             check=False,
         )
         if res.returncode == 0 and res.stdout.strip():
@@ -41,8 +45,8 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
 
 def audit_storage(kubeconfig: str | None = None) -> int:
     env = os.environ.copy()
-    if "/opt/credential-proxy/bin" not in env.get("PATH", ""):
-        env["PATH"] = "/opt/credential-proxy/bin:" + env.get("PATH", "")
+    if CREDENTIAL_PROXY_BIN not in env.get("PATH", ""):
+        env["PATH"] = f"{CREDENTIAL_PROXY_BIN}:" + env.get("PATH", "")
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig
 
@@ -56,7 +60,7 @@ def audit_storage(kubeconfig: str | None = None) -> int:
     results = {}
     # Kinds whose listing failed (timeout, Forbidden, cut or unparseable reply): never read as empty.
     unread: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         future_to_key = {
             executor.submit(run_kubectl_json, args, env): key
             for key, args in tasks.items()
