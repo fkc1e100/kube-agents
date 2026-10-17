@@ -914,7 +914,14 @@ class ChartGiteaForgeTest(unittest.TestCase):
         self.assertIn(f"{_P}forges[0].credentialsRef.name is required", result.stderr)
 
     def test_a_gitea_forge_with_reserved_saas_host_fails_naming_it(self):
-        for host in ("github.com", "api.github.com", "raw.githubusercontent.com", "gitlab.com", "sub.gitlab.com"):
+        for host in (
+            "github.com",
+            "api.github.com",
+            "raw.githubusercontent.com",
+            "gitlab.com",
+            "sub.gitlab.com",
+            "acme.ghe.com",
+        ):
             with self.subTest(host=host):
                 result = _render_values(_CR_TEMPLATE, _gitea_values(host=host))
                 self.assertNotEqual(result.returncode, 0, result.stdout)
