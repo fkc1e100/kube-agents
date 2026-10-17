@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime, timedelta, timezone
 import io
 from pathlib import Path
 import sys
@@ -84,6 +85,8 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertIn("Partial CRD installation", out)
         self.assertIn("not counted (RBAC forbids cluster-wide Secret listing)", out)
         self.assertNotIn("0 TLS errors", out)
+        self.assertNotIn("count only", out)
+        self.assertIn("native TLS Secrets were not counted", out)
         self.assertIn("CLEAN_AUDIT_STOP: YES — No failed, expired, or renewal-overdue certificates", out)
 
     def test_healthy_active_certs_and_issuers_emits_clean_stop(self):
@@ -271,7 +274,7 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
         self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
 
-    def test_certificate_past_renewal_time_while_issuing_is_not_overdue(self):
+    def _renewing_certificate(self, issuing_since):
         def kubectl_json(args, env):
             if "certificates.cert-manager.io" in args:
                 return 0, {
@@ -284,7 +287,12 @@ class TestAuditCertificates(unittest.TestCase):
                                 "renewalTime": "2000-01-01T00:00:00Z",
                                 "conditions": [
                                     {"type": "Ready", "status": "True", "reason": "Ready"},
-                                    {"type": "Issuing", "status": "True", "reason": "Renewing"},
+                                    {
+                                        "type": "Issuing",
+                                        "status": "True",
+                                        "reason": "Renewing",
+                                        "lastTransitionTime": issuing_since.isoformat(),
+                                    },
                                 ],
                             },
                         }
@@ -292,9 +300,18 @@ class TestAuditCertificates(unittest.TestCase):
                 }
             return 0, {"items": []}
 
-        out = self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
+        return self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
+
+    def test_certificate_past_renewal_time_while_issuing_is_not_overdue(self):
+        out = self._renewing_certificate(datetime.now(timezone.utc))
         self.assertNotIn("RenewalOverdue", out)
         self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+
+    def test_certificate_stuck_issuing_past_grace_is_overdue(self):
+        stale = datetime.now(timezone.utc) - audit_certificates.RENEWAL_IN_PROGRESS_GRACE - timedelta(minutes=1)
+        out = self._renewing_certificate(stale)
+        self.assertIn("RenewalOverdue", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
 
 class TestAuditStorage(unittest.TestCase):
@@ -557,6 +574,28 @@ class TestAuditNetworking(unittest.TestCase):
         self.assertIn("1 failing HTTPRoutes", out)
         orphan_line = next(line for line in out.splitlines() if "orphan" in line)
         self.assertIn("NotAttached", orphan_line)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_route_attached_to_only_one_of_two_parents_is_degraded(self):
+        def fake_run_kubectl_json(args, env):
+            if "httproutes.gateway.networking.k8s.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "split"},
+                            "spec": {"parentRefs": [{"name": "gw-a"}, {"name": "gw-b"}]},
+                            "status": {
+                                "parents": [
+                                    {"parentRef": {"name": "gw-a"}, "conditions": [{"type": "Accepted", "status": "True"}]}
+                                ]
+                            },
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("1 failing HTTPRoutes", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
 

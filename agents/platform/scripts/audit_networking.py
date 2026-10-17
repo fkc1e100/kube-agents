@@ -167,8 +167,8 @@ def audit_networking(kubeconfig: str | None = None) -> int:
                 if c.get("type") in ("Accepted", "ResolvedRefs"):
                     conditions.append(f"{c.get('type')}={c.get('status')}")
                     route_failed = route_failed or c.get("status") == "False"
-        # parentRefs that no Gateway controller has reported on: the route is not attached anywhere.
-        not_attached = bool(parents) and not status_parents
+        # A parentRef that no Gateway controller has reported on leaves the route unattached there.
+        not_attached = len(status_parents) < len(parents)
         route_failed = route_failed or not_attached
 
         route_info = {
@@ -176,7 +176,7 @@ def audit_networking(kubeconfig: str | None = None) -> int:
             "name": name,
             "hostnames": ", ".join(hostnames),
             "parents": ", ".join(parent_names) or "None",
-            "status": ", ".join(conditions) or ("NotAttached" if not_attached else "Attached"),
+            "status": ", ".join(conditions) or ("NotAttached" if not_attached else "Attached" if parents else "NoParentRefs"),
         }
         route_list.append(route_info)
         if route_failed:
