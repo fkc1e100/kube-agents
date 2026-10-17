@@ -87,6 +87,7 @@
   "agentIdentity":
     "gcpServiceAccount": "mock-service-account@tftest-project.iam.gserviceaccount.com"
     "roles":
+    - "roles/cloudtrace.user"
     - "roles/compute.viewer"
     - "roles/container.clusterViewer"
     - "roles/container.viewer"
