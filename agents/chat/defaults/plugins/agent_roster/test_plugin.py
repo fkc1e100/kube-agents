@@ -34,8 +34,19 @@ class InjectionTest(unittest.TestCase):
         shutil.copy(ROSTER_SOURCE, self.data_dir / "scripts" / "agent_roster.py")
         self.profiles = self.data_dir / "profiles"
         self.profiles.mkdir()
-        self._env = mock.patch.dict("os.environ", {"HERMES_HOME": str(self.data_dir)})
+        # The roster reads the host cluster env and the scope render; point the
+        # render at a missing file and drop the host names so a developer shell
+        # (or a real /etc/kube-agents/scope.json) cannot leak into the block.
+        self._env = mock.patch.dict(
+            "os.environ",
+            {
+                "HERMES_HOME": str(self.data_dir),
+                "KUBEAGENTS_SCOPE_FILE": str(self.data_dir / "absent-scope.json"),
+            },
+        )
         self._env.start()
+        for name in ("GKE_CLUSTER_NAME", "GKE_PROJECT_ID", "GCP_PROJECT_ID", "GKE_LOCATION"):
+            os.environ.pop(name, None)
         # The module handle is cached for the process; a stale one from another
         # test would silently read the wrong tree.
         plugin._roster_module = None
@@ -136,7 +147,8 @@ class InjectionTest(unittest.TestCase):
         self._profile("platform", "Fleet work.")
         context = plugin.handle_pre_llm_call()["context"]
         self.assertIn("verbatim as the `assignee`", context)
-        self.assertIn("Host Cluster `assignee`", context)
+        # No host env, no host section, so no sentence pointing at one.
+        self.assertNotIn("Host Cluster `assignee`", context)
 
     def test_injects_host_and_fleet_scope_identity(self):
         self._profile("default")
@@ -172,6 +184,7 @@ class InjectionTest(unittest.TestCase):
             context,
         )
         self.assertIn("- GCP projects in scope (2): gca-gke-2025, kube-agents-demo", context)
+        self.assertIn("Host Cluster `assignee`", context)
 
     def test_reloads_roster_module_when_script_mtime_changes(self):
         self._profile("default")

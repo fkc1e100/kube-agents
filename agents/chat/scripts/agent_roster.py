@@ -22,6 +22,7 @@
 # Everything here degrades rather than raises. The profiles live on a shared
 # PVC, so an I/O or permission fault must not turn routing into a traceback.
 
+import fnmatch
 import hashlib
 import json
 import os
@@ -37,6 +38,21 @@ _DEFAULT_PROFILES_BASE = PROFILES_BASE
 SCOPE_FILE = Path(os.environ.get("KUBEAGENTS_SCOPE_FILE", "/etc/kube-agents/scope.json"))
 _DEFAULT_SCOPE_FILE = SCOPE_FILE
 _MAX_NAME_LEN = 63
+
+# The reconcile's snapshot ($HERMES_HOME/fleet_scope.json) and the vocabulary its
+# writer, agents/platform/scripts/cluster_agent_reconcile.py, uses for each project
+# row. Read the way fleet_scope_targets.declared_scope_targets reads it: a row is in
+# scope only while its state is in-scope (not retiring), and listed only when the
+# reconcile could read it or it is the install's own project.
+SNAPSHOT_FILE = "fleet_scope.json"
+SNAPSHOT_STATE_IN_SCOPE = "in-scope"
+SNAPSHOT_READABLE_OUTCOMES = ("ok", "api-disabled")
+SNAPSHOT_VIA_MANAGEMENT = "management"
+
+# The host section's heading. The plugin keys its "route this cluster to the
+# host" footer sentence on it, so the sentence never points at a section that
+# was not rendered.
+HOST_IDENTITY_HEADING = 'Host Cluster Identity ("this cluster" / "this host cluster"):'
 
 # The front door itself; never a valid delegation target.
 SELF_PROFILE = "default"
@@ -211,79 +227,88 @@ def discover(base: Path | None = None) -> list[dict[str, Any]] | None:
 
 
 def _read_host_identity(agents: list[dict[str, Any]] | None = None) -> dict[str, str] | None:
-    """Read host cluster identity from environment variables and match its assignee."""
+    """Read host cluster identity from environment variables and match its assignee.
+
+    No cluster name, no host: a project or location alone cannot say which
+    cluster "this cluster" is. The assignee is set only from a discovered
+    profile whose identity matches all three values, or whose directory carries
+    the name the reconcile derives from them; a name that is not a profile is
+    never advertised, because a card filed to it is never dispatched.
+    """
     cluster = os.environ.get("GKE_CLUSTER_NAME", "").strip()
     project = (
         os.environ.get("GKE_PROJECT_ID", "").strip()
         or os.environ.get("GCP_PROJECT_ID", "").strip()
     )
     location = os.environ.get("GKE_LOCATION", "").strip()
-    if not (cluster or project or location):
+    if not cluster:
         return None
 
     assignee = ""
-    for a in agents or []:
-        cid = a.get("cluster_identity")
-        if not isinstance(cid, dict):
-            continue
-        if cluster and cid.get("cluster") != cluster:
-            continue
-        if project and cid.get("project") != project:
-            continue
-        if location and cid.get("location") != location:
-            continue
-        assignee = str(a.get("name") or "")
-        project = project or str(cid.get("project") or "")
-        cluster = cluster or str(cid.get("cluster") or "")
-        location = location or str(cid.get("location") or "")
-        break
+    if project and location:
+        names = {str(a.get("name") or "") for a in agents or []}
+        for a in agents or []:
+            cid = a.get("cluster_identity")
+            if isinstance(cid, dict) and (
+                cid.get("cluster"), cid.get("project"), cid.get("location")
+            ) == (cluster, project, location):
+                assignee = str(a.get("name") or "")
+                break
+        derived = _cluster_profile_name(project, cluster, location)
+        if not assignee and derived in names:
+            assignee = derived
 
-    if not assignee and project and cluster and location:
-        assignee = _cluster_profile_name(project, cluster, location)
-
-    result: dict[str, str] = {}
-    if cluster:
-        result["cluster"] = cluster
+    result: dict[str, str] = {"cluster": cluster}
     if project:
         result["project"] = project
     if location:
         result["location"] = location
     if assignee:
         result["assignee"] = assignee
-    return result or None
+    return result
 
 
-def _extract_projects_from_json(path: Path) -> list[str]:
-    """Read project IDs from either ``scope.json`` or ``fleet_scope.json``."""
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    """Parse ``path`` as a JSON object, or ``None`` when it is absent or unreadable."""
     try:
         if not path.is_file():
-            return []
+            return None
         payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError, TypeError):
-        return []
-    if not isinstance(payload, dict):
-        return []
+        return None
+    return payload if isinstance(payload, dict) else None
 
+
+def _snapshot_projects(path: Path) -> list[str] | None:
+    """In-scope, readable projects from the reconcile's snapshot; ``None`` with no snapshot."""
+    payload = _read_json_object(path)
+    if payload is None or not isinstance(payload.get("projects"), list):
+        return None
     found: list[str] = []
-    raw_projects = payload.get("projects")
-    if isinstance(raw_projects, list):
-        for item in raw_projects:
-            if isinstance(item, str) and item.strip():
-                found.append(item.strip())
-            elif isinstance(item, dict):
-                state = str(item.get("state") or "in-scope").strip().lower()
-                if state == "excluded":
-                    continue
-                pid = str(item.get("id") or item.get("project") or "").strip()
-                if pid:
-                    found.append(pid)
-
-    declared = payload.get("declared")
-    if isinstance(declared, dict) and isinstance(declared.get("projects"), list):
-        for item in declared["projects"]:
-            if isinstance(item, str) and item.strip():
-                found.append(item.strip())
+    for row in payload["projects"]:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        if row.get("state", SNAPSHOT_STATE_IN_SCOPE) != SNAPSHOT_STATE_IN_SCOPE:
+            continue
+        via = row.get("via") if isinstance(row.get("via"), list) else []
+        if row.get("outcome") in SNAPSHOT_READABLE_OUTCOMES or SNAPSHOT_VIA_MANAGEMENT in via:
+            found.append(str(row["id"]))
     return found
+
+
+def _render_projects(path: Path) -> list[str]:
+    """Explicit projects the operator's ``spec.scope`` render declares, minus its exclude globs."""
+    payload = _read_json_object(path)
+    if payload is None:
+        return []
+    exclude = payload.get("exclude") if isinstance(payload.get("exclude"), dict) else {}
+    patterns = [p for p in exclude.get("projects") or [] if isinstance(p, str)]
+    return [
+        p.strip()
+        for p in payload.get("projects") or []
+        if isinstance(p, str) and p.strip()
+        and not any(fnmatch.fnmatchcase(p.strip(), pat) for pat in patterns)
+    ]
 
 
 def _read_scope_projects(
@@ -291,43 +316,42 @@ def _read_scope_projects(
     agents: list[dict[str, Any]] | None = None,
     host_identity: dict[str, str] | None = None,
 ) -> list[str]:
-    """Collect all in-scope GCP project IDs from scope files, host env, and cluster profiles."""
+    """Collect the in-scope GCP project IDs.
+
+    The reconcile's snapshot answers when there is one; only without it do the
+    operator's render and the discovered cluster profiles stand in, because a
+    retiring project keeps its profiles until the prune finishes.
+    """
     root = PROFILES_BASE if base is None else base
     projects: set[str] = set()
 
-    # 1. Operator-mounted scope file (/etc/kube-agents/scope.json or KUBEAGENTS_SCOPE_FILE).
-    # In unit tests that point `base` at a temp directory without setting
-    # KUBEAGENTS_SCOPE_FILE or rebinding SCOPE_FILE, skip the host's /etc path
-    # so tests remain hermetic.
-    scope_path: Path | None = None
-    if SCOPE_FILE != _DEFAULT_SCOPE_FILE:
-        scope_path = SCOPE_FILE
-    elif "KUBEAGENTS_SCOPE_FILE" in os.environ:
-        env_scope = os.environ.get("KUBEAGENTS_SCOPE_FILE", "").strip()
-        if env_scope:
-            scope_path = Path(env_scope)
-    elif root == _DEFAULT_PROFILES_BASE:
-        scope_path = _DEFAULT_SCOPE_FILE
+    snapshot = _snapshot_projects(root.parent / SNAPSHOT_FILE)
+    if snapshot is not None:
+        projects.update(snapshot)
+    else:
+        # The operator-mounted render (/etc/kube-agents/scope.json or
+        # KUBEAGENTS_SCOPE_FILE). In unit tests that point `base` at a temp
+        # directory without setting KUBEAGENTS_SCOPE_FILE or rebinding
+        # SCOPE_FILE, skip the host's /etc path so tests remain hermetic.
+        scope_path: Path | None = None
+        if SCOPE_FILE != _DEFAULT_SCOPE_FILE:
+            scope_path = SCOPE_FILE
+        elif "KUBEAGENTS_SCOPE_FILE" in os.environ:
+            env_scope = os.environ.get("KUBEAGENTS_SCOPE_FILE", "").strip()
+            if env_scope:
+                scope_path = Path(env_scope)
+        elif root == _DEFAULT_PROFILES_BASE:
+            scope_path = _DEFAULT_SCOPE_FILE
+        if scope_path is not None:
+            projects.update(_render_projects(scope_path))
+        for a in agents or []:
+            cid = a.get("cluster_identity")
+            if isinstance(cid, dict) and cid.get("project"):
+                projects.add(str(cid["project"]))
 
-    if scope_path is not None:
-        projects.update(_extract_projects_from_json(scope_path))
-
-    # 2. Reconciled fleet_scope.json in the Hermes data root ($HERMES_HOME/fleet_scope.json).
-    try:
-        fleet_scope_path = root.parent / "fleet_scope.json"
-        projects.update(_extract_projects_from_json(fleet_scope_path))
-    except OSError:
-        pass
-
-    # 3. Host cluster project from environment.
+    # The host cluster's own project is always in scope.
     if host_identity and host_identity.get("project"):
         projects.add(host_identity["project"])
-
-    # 4. Projects from discovered cluster agent profiles.
-    for a in agents or []:
-        cid = a.get("cluster_identity")
-        if isinstance(cid, dict) and cid.get("project"):
-            projects.add(str(cid["project"]))
 
     return sorted(projects)
 
@@ -358,16 +382,7 @@ def _format_fleet_and_host_section(
         assignee = str(a.get("name") or "").strip()
         if not (c_name and c_proj and c_loc and assignee):
             continue
-        is_host = bool(
-            host
-            and (
-                (host.get("assignee") and host["assignee"] == assignee)
-                or (
-                    host.get("cluster") == c_name
-                    and (not host.get("project") or host.get("project") == c_proj)
-                )
-            )
-        )
+        is_host = bool(host and host.get("assignee") == assignee)
         cluster_entries.append(
             {
                 "cluster": c_name,
@@ -412,10 +427,7 @@ def _format_fleet_and_host_section(
         if host.get("assignee"):
             parts.append(f"assignee={host['assignee']}")
         if parts:
-            sections.append(
-                'Host Cluster Identity ("this cluster" / "this host cluster"):\n'
-                f"- {', '.join(parts)}"
-            )
+            sections.append(f"{HOST_IDENTITY_HEADING}\n- {', '.join(parts)}")
 
     fleet_lines: list[str] = []
     if projects:
@@ -423,7 +435,13 @@ def _format_fleet_and_host_section(
             f"- GCP projects in scope ({len(projects)}): {', '.join(projects)}"
         )
     if cluster_entries:
-        fleet_lines.append(f"- Managed GKE clusters ({len(cluster_entries)}):")
+        # Worded as the agents that exist, not as the clusters that are running:
+        # a profile outlives its cluster until the reconcile prunes it, so
+        # "which clusters are we running?" still goes to a specialist.
+        fleet_lines.append(
+            f"- Cluster agents and the GKE cluster each targets ({len(cluster_entries)}; "
+            "not a live read of GKE):"
+        )
         for c in cluster_entries:
             suffix = ", host cluster" if c["is_host"] else ""
             fleet_lines.append(

@@ -21,12 +21,19 @@ _HEADER = "[SPECIALIST AGENTS AVAILABLE NOW]"
 _FOOTER = (
     "Use one of the names above verbatim as the `assignee` of `kanban_create`. "
     "This list is current as of this turn; call `list_agents` only if an agent "
-    "you expect is missing. Static questions already answered above (GCP projects "
-    "in scope, fleet GKE clusters, or the host cluster's project/location) must "
-    "be answered directly in this turn without calling `kanban_create`. For live "
-    "Kubernetes state on \"this cluster\" or \"this host cluster\", route "
-    "`kanban_create` directly to the Host Cluster `assignee` above without asking "
-    "which cluster the user means."
+    "you expect is missing. The GCP projects in scope, if listed above, are "
+    "answered directly in this turn without calling `kanban_create`; which "
+    "clusters are running, how many, or what versions is live state and goes to "
+    "a specialist."
+)
+# Appended only when the roster rendered the host section, so it never points
+# at a section that is not there (agent_roster.HOST_IDENTITY_HEADING).
+_HOST_FOOTER = (
+    "The host cluster's name, project and location above are answered directly "
+    "too. For live Kubernetes state on \"this cluster\" or \"this host cluster\", "
+    "route `kanban_create` to the Host Cluster `assignee` above without asking "
+    "which cluster the user means; if that line carries no `assignee`, route to "
+    "`platform`."
 )
 
 # Cached across turns in one process, keyed by (path, st_mtime_ns) so an in-place
@@ -114,7 +121,11 @@ def handle_pre_llm_call(**kwargs: Any) -> Optional[Dict[str, str]]:
     # module access in this hook is already defensive.
     if roster == getattr(module, "EMPTY_ROSTER", None):
         return {"context": f"\n\n{_HEADER}\n{roster}\n"}
-    return {"context": f"\n\n{_HEADER}\n{roster}\n\n{_FOOTER}\n"}
+    footer = _FOOTER
+    heading = getattr(module, "HOST_IDENTITY_HEADING", None)
+    if heading and heading in roster:
+        footer = f"{_FOOTER} {_HOST_FOOTER}"
+    return {"context": f"\n\n{_HEADER}\n{roster}\n\n{footer}\n"}
 
 
 def register(ctx: Any) -> None:

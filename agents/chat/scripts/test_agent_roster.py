@@ -236,23 +236,33 @@ class TestHostAndFleetScopeRendering(unittest.TestCase):
         agent_roster.PROFILES_BASE = base
         return base
 
-    def test_renders_host_identity_and_fleet_scope_from_env_and_scope_files(self):
+    def _render(self, base: Path, env: dict[str, str]) -> str:
+        # clear=True: a developer shell that exported GCP_PROJECT_ID or
+        # KUBEAGENTS_SCOPE_FILE (as the eval setup instructions say to) must not
+        # leak into the rendered block.
         from unittest import mock
 
+        env = {"KUBEAGENTS_SCOPE_FILE": str(base.parent / "absent.json"), **env}
+        with mock.patch.dict(os.environ, env, clear=True):
+            out = agent_roster.render(base)
+        self.assertIsNotNone(out)
+        return out
+
+    def test_renders_host_identity_and_fleet_scope_from_env_and_scope_files(self):
         with TemporaryDirectory() as tmp:
             base = self._setup_three_cluster_fleet(tmp)
             scope_file = Path(tmp) / "scope.json"
             scope_file.write_text('{"present": true, "projects": ["gca-gke-2025"]}\n')
-            env = {
-                "GKE_CLUSTER_NAME": "platform-agent-host",
-                "GKE_PROJECT_ID": "kube-agents-demo",
-                "GKE_LOCATION": "us-central1",
-                "KUBEAGENTS_SCOPE_FILE": str(scope_file),
-            }
-            with mock.patch.dict(os.environ, env, clear=False):
-                out = agent_roster.render(base)
+            out = self._render(
+                base,
+                {
+                    "GKE_CLUSTER_NAME": "platform-agent-host",
+                    "GKE_PROJECT_ID": "kube-agents-demo",
+                    "GKE_LOCATION": "us-central1",
+                    "KUBEAGENTS_SCOPE_FILE": str(scope_file),
+                },
+            )
 
-        self.assertIsNotNone(out)
         self.assertIn(
             'Host Cluster Identity ("this cluster" / "this host cluster"):\n'
             "- cluster=platform-agent-host, project=kube-agents-demo, "
@@ -264,7 +274,10 @@ class TestHostAndFleetScopeRendering(unittest.TestCase):
             "- GCP projects in scope (2): gca-gke-2025, kube-agents-demo",
             out,
         )
-        self.assertIn("- Managed GKE clusters (3):", out)
+        self.assertIn(
+            "- Cluster agents and the GKE cluster each targets (3; not a live read of GKE):",
+            out,
+        )
         self.assertIn(
             "  - kcc-gitops-hub (project=gca-gke-2025, location=us-east1-c, "
             "assignee=cluster-gca-gke-2025-kcc-gitops-hub-us-east1-c)",
@@ -282,24 +295,92 @@ class TestHostAndFleetScopeRendering(unittest.TestCase):
         )
         self.assertNotIn("default", out)
 
-    def test_reads_fleet_scope_json_and_excludes_excluded_projects(self):
-        from unittest import mock
-
+    def test_snapshot_lists_only_in_scope_readable_projects(self):
+        # The vocabulary cluster_agent_reconcile.py writes: a retiring row, a
+        # denied row, an exclusion recorded under excludedProjects and in the
+        # pre-exclude `declared` render, and the management project carried
+        # with an unreachable outcome. A profile left behind in the retiring
+        # project and a render naming another project must not re-add either.
         with TemporaryDirectory() as tmp:
             base = self._setup_three_cluster_fleet(tmp)
-            fleet_scope = Path(tmp) / "fleet_scope.json"
-            fleet_scope.write_text(
-                '{"projects": ['
-                '{"id": "gca-gke-2025", "state": "in-scope"}, '
-                '{"id": "kube-agents-demo", "state": "in-scope"}, '
-                '{"id": "sandbox-Scratch", "state": "excluded"}'
+            leftover = base / "cluster-retired-proj-old-us-east1-b"
+            leftover.mkdir()
+            (leftover / "config.yaml").write_text(
+                "cluster_identity:\n  cluster: old\n  location: us-east1-b\n  project: retired-proj\n"
+            )
+            (Path(tmp) / "fleet_scope.json").write_text(
+                '{"declared": {"projects": ["gca-gke-2025", "sandbox-scratch"]}, '
+                '"excludedProjects": ["sandbox-scratch"], "projects": ['
+                '{"id": "gca-gke-2025", "state": "in-scope", "outcome": "ok", "via": ["explicit"]}, '
+                '{"id": "kube-agents-demo", "state": "in-scope", "outcome": "unreachable", "via": ["management"]}, '
+                '{"id": "retired-proj", "state": "retiring", "outcome": "ok", "via": []}, '
+                '{"id": "denied-proj", "state": "in-scope", "outcome": "denied", "via": ["explicit"]}'
                 "]}\n"
             )
-            with mock.patch.dict(os.environ, {}, clear=False):
-                out = agent_roster.render(base)
+            scope_file = Path(tmp) / "scope.json"
+            scope_file.write_text('{"present": true, "projects": ["render-only"]}\n')
+            out = self._render(base, {"KUBEAGENTS_SCOPE_FILE": str(scope_file)})
 
         self.assertIn("- GCP projects in scope (2): gca-gke-2025, kube-agents-demo", out)
-        self.assertNotIn("sandbox-Scratch", out)
+        for absent in ("sandbox-scratch", "retired-proj,", "denied-proj", "render-only"):
+            self.assertNotIn(absent, out.split("- Cluster agents")[0])
+
+    def test_render_drops_projects_matching_exclude_globs(self):
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            scope_file = Path(tmp) / "scope.json"
+            scope_file.write_text(
+                '{"present": true, "projects": ["gca-gke-2025", "sandbox-scratch"], '
+                '"exclude": {"projects": ["sandbox-*"], "clusters": []}}\n'
+            )
+            out = self._render(base, {"KUBEAGENTS_SCOPE_FILE": str(scope_file)})
+
+        self.assertIn("- GCP projects in scope (2): gca-gke-2025, kube-agents-demo", out)
+        self.assertNotIn("sandbox-scratch", out)
+
+    def test_a_partial_host_identity_elects_no_host_cluster(self):
+        # Two cluster agents share gca-gke-2025; a project alone must not pick one.
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            out = self._render(base, {"GKE_PROJECT_ID": "gca-gke-2025"})
+
+        self.assertNotIn("Host Cluster Identity", out)
+        self.assertNotIn(", host cluster)", out)
+
+    def test_a_host_with_no_matching_profile_advertises_no_assignee(self):
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            out = self._render(
+                base,
+                {
+                    "GKE_CLUSTER_NAME": "fresh-host",
+                    "GKE_PROJECT_ID": "kube-agents-demo",
+                    "GKE_LOCATION": "us-central1",
+                },
+            )
+
+        self.assertIn(
+            'Host Cluster Identity ("this cluster" / "this host cluster"):\n'
+            "- cluster=fresh-host, project=kube-agents-demo, location=us-central1\n",
+            out,
+        )
+        self.assertNotIn("fresh-host-us-central1", out)
+        self.assertNotIn(", host cluster)", out)
+
+    def test_a_host_profile_without_cluster_identity_matches_by_its_derived_name(self):
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            (base / "cluster-kube-agents-demo-fresh-host-us-central1").mkdir()
+            out = self._render(
+                base,
+                {
+                    "GKE_CLUSTER_NAME": "fresh-host",
+                    "GKE_PROJECT_ID": "kube-agents-demo",
+                    "GKE_LOCATION": "us-central1",
+                },
+            )
+
+        self.assertIn("assignee=cluster-kube-agents-demo-fresh-host-us-central1", out)
 
     def test_stdlib_cluster_identity_parser_fallback_and_malformed_config(self):
         from unittest import mock
@@ -341,6 +422,8 @@ class TestChatSoulHostAndFleetRules(unittest.TestCase):
         self.assertIn("Fleet Clusters & GCP Projects in Scope", text)
         self.assertIn("without calling `kanban_create`", text)
         self.assertIn("never ask which cluster they mean", text)
+        # Cluster inventory stays a kanban lookup (bench/tasks/agent-kanban-smoke).
+        self.assertIn("Which GKE clusters are running, how many there are, and what versions they run are **not** static", text)
 
 
 if __name__ == "__main__":
