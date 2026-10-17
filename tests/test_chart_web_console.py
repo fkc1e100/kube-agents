@@ -282,8 +282,11 @@ class WebConsoleChartTest(unittest.TestCase):
     def test_chat_platform_env_is_wired_from_integration(self) -> None:
         deployment = self.docs["Deployment"]
         self.assertIn("name: CHAT_PLATFORM", deployment)
-        for platform in ("$integ.slack", "$integ.googleChat", "$integ.teams"):
+        for platform in ("$integ.slack", "$integ.googleChat"):
             self.assertIn(platform, self.template)
+        # The relay delivers to Slack and Google Chat only, so Teams alone
+        # must not make the agent-session threads read-only.
+        self.assertNotIn("$integ.teams", self.template)
 
 
 @unittest.skipUnless(shutil.which("helm"), "helm is not installed")
@@ -328,6 +331,14 @@ class WebConsoleRenderTest(unittest.TestCase):
         without = self._console_env(self._render("--set", "webConsole.enabled=true", "--set", "litellm.enabled=false"))
         for name in ("MODEL_NAME", "MODEL_PROVIDER", "LITELLM_PEERS_HOST"):
             self.assertNotIn(name, without)
+
+    def test_chat_platform_names_only_platforms_the_relay_delivers_to(self) -> None:
+        on = "--set", "webConsole.enabled=true"
+        self.assertNotIn("CHAT_PLATFORM", self._console_env(self._render(*on)))
+        slack = self._console_env(self._render(*on, "--set", "platformAgent.integration.slack.enabled=true"))
+        self.assertEqual(slack["CHAT_PLATFORM"], "Slack")
+        teams = self._console_env(self._render(*on, "--set", "platformAgent.integration.teams.enabled=true"))
+        self.assertNotIn("CHAT_PLATFORM", teams)
 
     def test_long_release_name_keeps_the_peers_service_a_dns_label(self) -> None:
         # 50- through 53-character release names exercise both the 37-char
