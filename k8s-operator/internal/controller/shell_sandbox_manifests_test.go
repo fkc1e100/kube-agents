@@ -1976,6 +1976,21 @@ func TestSameManagedRepoMatchesSelfManagedGiteaEntries(t *testing.T) {
 			t.Errorf("sameManagedRepo(%q, %q) = true, want false", different, gitlabSeeded.URL)
 		}
 	}
+
+	// GitHub is self-managed too (GitHub Enterprise Server). The agent skips a
+	// bare owner/name there, so it must not count as the seeded repository.
+	ghesSeeded := agentv1alpha1.ManagedRepoEntry{
+		Type: agentv1alpha1.GitProviderGitHub,
+		URL:  "https://ghe.corp/acme/infra",
+	}
+	bare := agentv1alpha1.ManagedRepoEntry{Type: agentv1alpha1.GitProviderGitHub, URL: "acme/infra"}
+	if sameManagedRepo(bare, ghesSeeded) {
+		t.Errorf("sameManagedRepo(%q, %q) = true, want false", bare.URL, ghesSeeded.URL)
+	}
+	ghesGit := agentv1alpha1.ManagedRepoEntry{Type: agentv1alpha1.GitProviderGitHub, URL: "https://ghe.corp/acme/infra.git"}
+	if !sameManagedRepo(ghesGit, ghesSeeded) {
+		t.Errorf("sameManagedRepo(%q, %q) = false, want true", ghesGit.URL, ghesSeeded.URL)
+	}
 }
 
 func TestExtraVolumeMountsAllowsAnOrdinaryVolume(t *testing.T) {

@@ -1073,7 +1073,7 @@ gitlabNamespaceRegex and giteaNamespaceRegex, all in k8s-operator/api/v1alpha1.
 {{- if not $host -}}
 {{- fail (printf "platformAgent.integration.forges[%d].host is required: provider %s is self-managed and has no default host" $i $provider) -}}
 {{- end -}}
-{{- if or (has (lower $host) $reservedHosted) (regexMatch "(^|\\.)(github\\.com|githubusercontent\\.com|gitlab\\.com)$" (lower $host)) -}}
+{{- if or (has (lower $host) $reservedHosted) (regexMatch $githubReserved (lower $host)) (regexMatch "(^|\\.)gitlab\\.com$" (lower $host)) -}}
 {{- fail (printf "platformAgent.integration.forges[%d].host is %q, which is a hosted SaaS domain and cannot be targeted by self-managed provider %s" $i $f.host $provider) -}}
 {{- end -}}
 {{- if or (not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$" $host)) (gt (len $host) 253) -}}

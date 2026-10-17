@@ -1566,7 +1566,9 @@ func sameManagedRepo(existing, seeded agentv1alpha1.ManagedRepoEntry) bool {
 	if err != nil {
 		return false
 	}
-	if provider.Name != agentv1alpha1.GitProviderGitHub && parsed.Host == "" {
+	// A bare owner/name names no host. The agent reads it for GitHub only on
+	// github.com; on a GitHub Enterprise Server install it skips it.
+	if parsed.Host == "" && (provider.Name != agentv1alpha1.GitProviderGitHub || host != provider.DefaultHost) {
 		return false
 	}
 	if parsed.Host != "" && parsed.Host != host {
