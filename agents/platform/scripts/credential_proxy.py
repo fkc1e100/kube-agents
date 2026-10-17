@@ -3390,8 +3390,13 @@ TEAMS_EVENT_QUEUE_MAXSIZE = 500
 TEAMS_MAX_DELIVERY_ATTEMPTS = 3
 TEAMS_TRUSTED_SERVICE_HOSTS = ("smba.trafficmanager.net", "api.botframework.com")
 TEAMS_OAUTH_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+# Case-insensitive, and percent-escapes and backslashes are refused in a
+# segment, because the Bot Connector routes case-insensitively on the decoded
+# path: `/activities/History` or `/activities/%68istory` would otherwise reach
+# Send Conversation History.
 TEAMS_ALLOWED_ACTIVITY_PATH_RE = re.compile(
-    r"^v3/conversations/[^/?#]+/activities(?:/(?!history$)[^/?#]+)?$"
+    r"^v3/conversations/[^/?#%\\]+/activities(?:/(?!history$)[^/?#%\\]+)?$",
+    re.IGNORECASE,
 )
 
 
