@@ -36,7 +36,6 @@ no credentials to read IAM.
 {{- $chatPlatforms := list }}
 {{- if ($integ.slack | default dict).enabled }}{{- $chatPlatforms = append $chatPlatforms "Slack" }}{{- end }}
 {{- if ($integ.googleChat | default dict).enabled }}{{- $chatPlatforms = append $chatPlatforms "Google Chat" }}{{- end }}
-{{- if ($integ.teams | default dict).enabled }}{{- $chatPlatforms = append $chatPlatforms "Microsoft Teams" }}{{- end }}
 {{- /* A Service name is a DNS label: 63 characters at most, and distinct from <release>-web-console. LITELLM_PEERS_HOST uses the same value. */ -}}
 {{- $name := printf "%s-web-console" (.Release.Name | trunc 51 | trimSuffix "-") }}
 {{- $peersName := printf "%s-web-console-litellm-peers" (.Release.Name | trunc 37 | trimSuffix "-") }}
