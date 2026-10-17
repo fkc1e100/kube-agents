@@ -16,7 +16,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import subprocess
@@ -40,6 +40,9 @@ KUBECTL_TIMEOUT_SECONDS = 15
 CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # kubectl's RBAC denial text; a Forbidden Secret listing is reported as uncounted, not as unread.
 FORBIDDEN_MARKER = "forbidden"
+# How long Issuing=True may hold before a passed renewalTime counts as overdue again; a renewal
+# stuck on a pending ACME challenge or an unapproved CertificateRequest stays Issuing=True forever.
+RENEWAL_IN_PROGRESS_GRACE = timedelta(hours=1)
 # Metadata-only Secret listing, so no tls.key or tls.crt payload leaves the credential proxy.
 TLS_SECRET_COLUMNS = "custom-columns=NS:.metadata.namespace,NAME:.metadata.name,CREATED:.metadata.creationTimestamp"
 
@@ -55,7 +58,9 @@ def run_cmd(args: list[str], env: dict[str, str]) -> tuple[int, str]:
             timeout=KUBECTL_TIMEOUT_SECONDS,
             check=False,
         )
-        return res.returncode, res.stdout.strip() if res.returncode == 0 else res.stderr.strip()
+        if res.returncode == 0:
+            return 0, res.stdout.strip()
+        return res.returncode, res.stderr.strip() or f"kubectl exit {res.returncode} with no output"
     except Exception as e:
         return 1, str(e)
 
@@ -170,14 +175,21 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         sec_code, sec_out = sec_future.result()
 
     tls_secrets, tls_summary_str = summarize_tls_secrets(sec_code, sec_out)
-    tls_summary_str += " (count only; expiry not inspected)"
+    secrets_forbidden = sec_code != 0 and FORBIDDEN_MARKER in sec_out.lower()
+    if sec_code == 0:
+        tls_summary_str += " (count only; expiry not inspected)"
+    tls_note = (
+        "native TLS Secrets were not counted (RBAC forbids Secret listing)"
+        if secrets_forbidden
+        else "native TLS Secrets were counted, not checked for expiry"
+    )
     # A queried kind that failed (timeout, Forbidden, cut or unparseable reply) is unread, never empty.
     unread = {
         key: str(data.get("stderr") or data.get("error") or "")[:UNREAD_REASON_MAX_CHARS]
         for key, (code, data) in results.items()
         if code != 0
     }
-    if sec_code != 0 and FORBIDDEN_MARKER not in sec_out.lower():
+    if sec_code != 0 and not secrets_forbidden:
         unread["tls_secrets"] = sec_out[:UNREAD_REASON_MAX_CHARS]
     mc_items = results.get("managedcerts", (1, {}))[1].get("items", [])
     unhealthy_mcs = [
@@ -205,7 +217,7 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         print(f"- **Native TLS Secrets (`kubernetes.io/tls`):** {tls_summary_str}\n")
         if not print_incomplete_or_mc_failures():
             print("**Certificate Audit Verdict: Clean / Not Installed** (cert-manager is not active on this cluster; 0 failing ManagedCertificates).")
-            print("CLEAN_AUDIT_STOP: YES — No failed certificates found; native TLS Secrets were not checked for expiry; call kanban_complete immediately.\n")
+            print(f"CLEAN_AUDIT_STOP: YES — No failed certificates found; {tls_note}; call kanban_complete immediately.\n")
 
         if tls_secrets:
             print("### Active TLS Secrets")
@@ -243,9 +255,15 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         if issuing_cond.get("status") == "False" and issuing_cond.get("reason") == ISSUING_FAILED_REASON:
             is_ready, reason, message = False, "IssuingFailed", issuing_cond.get("message", message)
         renewal_str = status.get("renewalTime", "")
-        # Issuing=True means cert-manager is renewing right now, so a passed renewalTime is not yet overdue.
+        # A renewal that went Issuing=True within the grace window is in progress, not yet overdue.
         try:
-            if is_ready and issuing_cond.get("status") != "True" and renewal_str and datetime.fromisoformat(renewal_str.replace("Z", "+00:00")) < now:
+            issuing_since = issuing_cond.get("lastTransitionTime", "")
+            renewing = (
+                issuing_cond.get("status") == "True"
+                and bool(issuing_since)
+                and now - datetime.fromisoformat(issuing_since.replace("Z", "+00:00")) < RENEWAL_IN_PROGRESS_GRACE
+            )
+            if is_ready and not renewing and renewal_str and datetime.fromisoformat(renewal_str.replace("Z", "+00:00")) < now:
                 is_ready, reason = False, "RenewalOverdue"
                 message = message or f"renewalTime {renewal_str} has passed without a renewal"
         except ValueError:
@@ -351,7 +369,7 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
     blocked = print_incomplete_or_mc_failures()
     if is_clean and not blocked:
         print("**Certificate Audit Verdict: Clean & Fully Valid** (All Certificates & Issuers are Ready, 0 renewal errors).")
-        print("CLEAN_AUDIT_STOP: YES — No failed, expired, or renewal-overdue certificates/issuers found; native TLS Secrets were not checked for expiry; call kanban_complete immediately.\n")
+        print(f"CLEAN_AUDIT_STOP: YES — No failed, expired, or renewal-overdue certificates/issuers found; {tls_note}; call kanban_complete immediately.\n")
     elif not is_clean:
         print(f"**Certificate Audit Verdict: Degraded Certificates Detected** ({len(unready_certs)} unready certs, {len(unready_issuers)} unready issuers).")
         if not blocked:
