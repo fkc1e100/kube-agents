@@ -35,6 +35,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -76,6 +77,11 @@ const (
 	// usageCacheTTL is how long one usage read is reused. The page refreshes
 	// every 30 seconds; this keeps two tabs from doubling the fetches.
 	usageCacheTTL = 15 * time.Second
+	// modelCacheTTL is how long one model read is reused. Short enough that
+	// screen reloads and drawer opens query LiteLLM live without doubling fetches.
+	modelCacheTTL = 10 * time.Second
+	// modelFetchTimeout bounds one /model/info fetch.
+	modelFetchTimeout = 2 * time.Second
 
 	errUsageDisabled  = "LiteLLM is not enabled on this install, so the console has no usage to read."
 	errNoReplicaReady = "No LiteLLM replica is ready."
@@ -90,8 +96,9 @@ type hostResolver interface {
 type metricsFetcher func(ctx context.Context, addr string) ([]byte, error)
 
 type modelInfo struct {
-	Name     string `json:"name"`
-	Provider string `json:"provider"`
+	Name           string `json:"name"`
+	Provider       string `json:"provider"`
+	ReasoningLevel string `json:"reasoning_level,omitempty"`
 }
 
 // usageInfo is token usage and estimated spend summed across the LiteLLM
@@ -118,11 +125,26 @@ type clusterInfo struct {
 	Location string `json:"location"`
 }
 
+// repositoryInfo is one repository the agent may open pull requests on or
+// read, as declared at install (spec.integration.repositories).
+type repositoryInfo struct {
+	Forge      string `json:"forge"`
+	Provider   string `json:"provider"`
+	Host       string `json:"host,omitempty"`
+	Repository string `json:"repository"`
+	Role       string `json:"role"`
+	URL        string `json:"url,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Category   string `json:"category,omitempty"`
+}
+
 type insightsResponse struct {
-	Model    modelInfo    `json:"model"`
-	Usage    usageInfo    `json:"usage"`
-	Identity identityInfo `json:"identity"`
-	Cluster  clusterInfo  `json:"cluster"`
+	Model        modelInfo        `json:"model"`
+	Usage        usageInfo        `json:"usage"`
+	Identity     identityInfo     `json:"identity"`
+	Cluster      clusterInfo      `json:"cluster"`
+	Repositories []repositoryInfo `json:"repositories"`
+	Topology     string           `json:"topology,omitempty"`
 }
 
 // usageCache holds the last usage read. refresh serializes reads, so
@@ -134,6 +156,14 @@ type usageCache struct {
 	readAt  time.Time
 }
 
+// modelCache holds the last model read from the inference gateway.
+type modelCache struct {
+	refresh sync.Mutex
+	mu      sync.Mutex
+	value   modelInfo
+	readAt  time.Time
+}
+
 func (s *server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), insightsTimeout)
 	defer cancel()
@@ -141,9 +171,18 @@ func (s *server) handleInsights(w http.ResponseWriter, r *http.Request) {
 	if roles == nil {
 		roles = []string{}
 	}
+	repos := s.currentRepositories(ctx)
+	if repos == nil {
+		repos = []repositoryInfo{}
+	}
+	s.reposMu.RLock()
+	topology := s.cachedTopology
+	s.reposMu.RUnlock()
 	writeJSON(w, http.StatusOK, insightsResponse{
-		Model: modelInfo{Name: s.cfg.ModelName, Provider: s.cfg.ModelProvider},
-		Usage: s.currentUsage(ctx),
+		Model:        s.currentModel(ctx),
+		Usage:        s.currentUsage(ctx),
+		Repositories: repos,
+		Topology:     topology,
 		Identity: identityInfo{
 			KubernetesServiceAccount: s.cfg.AgentKSA,
 			GCPServiceAccount:        s.cfg.AgentGSA,
@@ -151,6 +190,171 @@ func (s *server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		},
 		Cluster: clusterInfo{Name: s.cfg.ClusterName, Project: s.cfg.ProjectID, Location: s.cfg.Location},
 	})
+}
+
+// currentModel returns the live model from LiteLLM, cached briefly so screen
+// loads and tab polls see live updates without doubling queries.
+func (s *server) currentModel(ctx context.Context) modelInfo {
+	fallback := modelInfo{Name: s.cfg.ModelName, Provider: s.cfg.ModelProvider}
+	if s.cfg.LiteLLMURL == "" && s.fetchModel == nil {
+		return fallback
+	}
+	s.model.refresh.Lock()
+	defer s.model.refresh.Unlock()
+	s.model.mu.Lock()
+	if !s.model.readAt.IsZero() && time.Since(s.model.readAt) < modelCacheTTL {
+		v := s.model.value
+		s.model.mu.Unlock()
+		return v
+	}
+	s.model.mu.Unlock()
+
+	activeModel, _, clusterReasoning := s.getActiveModelFromCluster(ctx)
+	v, err := s.readModel(ctx)
+	if err != nil {
+		s.model.mu.Lock()
+		v = s.model.value
+		s.model.mu.Unlock()
+		if v.Name != "" {
+			return v
+		}
+		if activeModel != "" {
+			fallback.Name = activeModel
+		}
+		if clusterReasoning != "" {
+			fallback.ReasoningLevel = clusterReasoning
+		}
+		return fallback
+	}
+	if activeModel != "" {
+		v.Name = activeModel
+	}
+	if clusterReasoning != "" {
+		v.ReasoningLevel = clusterReasoning
+	}
+	s.model.mu.Lock()
+	s.model.value, s.model.readAt = v, time.Now()
+	s.model.mu.Unlock()
+	return v
+}
+
+func (s *server) readModel(ctx context.Context) (modelInfo, error) {
+	fetch := s.fetchModel
+	if fetch == nil {
+		fetch = s.fetchLiveModel
+	}
+	ctx, cancel := context.WithTimeout(ctx, modelFetchTimeout)
+	defer cancel()
+	return fetch(ctx, s.cfg.LiteLLMURL)
+}
+
+func (s *server) fetchLiveModel(ctx context.Context, baseURL string) (modelInfo, error) {
+	if baseURL == "" {
+		return modelInfo{}, errors.New("no LiteLLM URL configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/model/info", nil)
+	if err != nil {
+		return modelInfo{}, err
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return modelInfo{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return modelInfo{}, fmt.Errorf("LiteLLM /model/info answered HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMetricsBodyBytes))
+	if err != nil {
+		return modelInfo{}, err
+	}
+	return parseLiteLLMModelInfo(body, s.cfg.AssistModel, s.cfg.ModelName, s.cfg.ModelProvider)
+}
+
+func parseLiteLLMModelInfo(body []byte, preferredModel, defaultName, defaultProvider string) (modelInfo, error) {
+	var payload struct {
+		Data []struct {
+			ModelName     string `json:"model_name"`
+			LitellmParams struct {
+				Model string `json:"model"`
+			} `json:"litellm_params"`
+			ModelInfo struct {
+				Key                    string  `json:"key"`
+				LitellmProvider        string  `json:"litellm_provider"`
+				SupportsReasoning      bool    `json:"supports_reasoning"`
+				DefaultReasoningEffort *string `json:"default_reasoning_effort"`
+			} `json:"model_info"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return modelInfo{}, err
+	}
+	if len(payload.Data) == 0 {
+		return modelInfo{}, errors.New("LiteLLM reported no models")
+	}
+
+	idx := -1
+	targets := []string{preferredModel, defaultAssistModel, "hermes-agent"}
+	for _, target := range targets {
+		if target == "" {
+			continue
+		}
+		for i, item := range payload.Data {
+			if item.ModelName == target {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			break
+		}
+	}
+	if idx < 0 {
+		for i, item := range payload.Data {
+			if item.LitellmParams.Model != "" || item.ModelInfo.Key != "" {
+				idx = i
+				break
+			}
+		}
+	}
+	if idx < 0 {
+		idx = 0
+	}
+
+	item := payload.Data[idx]
+	raw := strings.TrimSpace(item.LitellmParams.Model)
+	if raw == "" {
+		raw = strings.TrimSpace(item.ModelInfo.Key)
+	}
+	if raw == "" {
+		raw = strings.TrimSpace(item.ModelName)
+	}
+
+	provider := strings.TrimSpace(item.ModelInfo.LitellmProvider)
+	if strings.Contains(raw, "/") {
+		p, m, _ := strings.Cut(raw, "/")
+		if provider == "" {
+			provider = p
+		}
+		raw = m
+	}
+	if lastSlash := strings.LastIndex(raw, "/"); lastSlash != -1 {
+		raw = raw[lastSlash+1:]
+	}
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		name = defaultName
+	}
+	if provider == "" {
+		provider = defaultProvider
+	}
+	reasoning := ""
+	if item.ModelInfo.DefaultReasoningEffort != nil && *item.ModelInfo.DefaultReasoningEffort != "" {
+		reasoning = *item.ModelInfo.DefaultReasoningEffort
+	} else if item.ModelInfo.SupportsReasoning || strings.Contains(strings.ToLower(name), "gemini") {
+		reasoning = "dynamic"
+	}
+	return modelInfo{Name: name, Provider: provider, ReasoningLevel: reasoning}, nil
 }
 
 // currentUsage returns the cached usage while it is fresh, and reads the

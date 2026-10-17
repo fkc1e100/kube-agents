@@ -344,7 +344,7 @@ func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
 
 	slackSrv := newServer(config{ChatPlatform: "slack"})
 	unmarkedSubDaily := "Third run of the policy sweep\nDetails"
-	if msg := slackSrv.buildSessionMessage(kindScheduled, false, hermesMessage{ID: 4, Role: roleUser, Content: &unmarkedSubDaily}); msg.Author != authorScheduler || msg.Card == nil || msg.Card.Subject != "Third run of the policy sweep" {
+	if msg := slackSrv.buildSessionMessage(kindScheduled, "cron-policy-sweep-20261006", false, hermesMessage{ID: 4, Role: roleUser, Content: &unmarkedSubDaily}); msg.Author != authorScheduler || msg.Card == nil || msg.Card.Subject != "Third run of the policy sweep" {
 		t.Errorf("slack sub-daily scheduled message = %+v, card = %+v", msg, msg.Card)
 	}
 
@@ -358,7 +358,7 @@ func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
 	srv := newServer(config{})
 	for _, status := range []string{"blocked; needs attention", "crashed", "timed out", "gave up"} {
 		wake := "[kanban] Task t_ab12 " + status + ".\nTitle: Check PVC\nResult: Stopped on " + status + "\n"
-		msg := srv.buildSessionMessage(kindEventTriage, false, hermesMessage{ID: 2, Role: roleUser, Content: &wake})
+		msg := srv.buildSessionMessage(kindEventTriage, "k8s-evt-0000000a", false, hermesMessage{ID: 2, Role: roleUser, Content: &wake})
 		if msg.Author != authorKanban {
 			t.Errorf("status %q: buildSessionMessage.Author = %q, want %q", status, msg.Author, authorKanban)
 		}
@@ -366,6 +366,12 @@ func TestTranscriptTagsAuthorsAndExtractsCards(t *testing.T) {
 		if !ok || card == nil || card.TaskID != "t_ab12" || card.Status != status {
 			t.Errorf("status %q: parseKanbanCard = %+v, ok=%v", status, card, ok)
 		}
+	}
+	if len(m0.Card.Skills) == 0 || m0.Card.Skills[0] != "gke-workload-troubleshooting" {
+		t.Errorf("m0 card skills = %v, want gke-workload-troubleshooting", m0.Card.Skills)
+	}
+	if len(m3.Card.Skills) < 2 {
+		t.Errorf("m3 card skills = %v, want troubleshooting + storage skills", m3.Card.Skills)
 	}
 }
 
@@ -436,5 +442,55 @@ func TestTranscriptTagsFirstRowWhenSessionIsExactlyTranscriptMaxRows(t *testing.
 	}
 	if got.Messages[0].Author != authorEventWatcher || got.Messages[0].Card == nil {
 		t.Errorf("first row of exact 200-row session = %+v, want authorEventWatcher with card", got.Messages[0])
+	}
+}
+
+func TestExtractSkillsFromScheduledSlugAndToolCalls(t *testing.T) {
+	skills := extractTextSkills(kindScheduled, "cron-platform-gce-compute-fleet-audit-20261009", "call:default_api:terminal{command:/opt/data/profiles/platform/skills/fleet-audit/scripts/audit_report.py}", nil)
+	if len(skills) < 2 {
+		t.Fatalf("scheduled skills = %v, want gce-compute-fleet-audit and fleet-audit", skills)
+	}
+	m := hermesMessage{
+		ID:        10,
+		Role:      roleAssistant,
+		ToolCalls: []byte(`[{"function":{"name":"skill_view","arguments":"{\"name\":\"gke-stall-detection\"}"}},{"function":{"name":"kanban_create","arguments":"{\"title\":\"Triage stall\",\"assignee\":\"platform\"}"}}]`),
+	}
+	steps, tcSkills := extractMessageToolActivity(m)
+	if len(steps) != 2 || steps[0].Tool != "skill_view" || steps[0].Skill != "gke-stall-detection" {
+		t.Errorf("steps = %+v", steps)
+	}
+	if len(tcSkills) != 1 || tcSkills[0] != "gke-stall-detection" {
+		t.Errorf("tool call skills = %v, want [gke-stall-detection]", tcSkills)
+	}
+}
+
+func TestDelegationStepsCarryTheCardID(t *testing.T) {
+	call := hermesMessage{ID: 1, Role: roleAssistant,
+		ToolCalls: []byte(`[{"function":{"name":"kanban_create","arguments":"{\"title\":\"Identify visible GCP projects\",\"assignee\":\"platform\",\"body\":\"...\"}"}}]`)}
+	result := `{"ok": true, "task_id": "t_0978edd2", "status": "ready"}`
+	name := "kanban_create"
+	res := hermesMessage{ID: 2, Role: roleTool, ToolName: &name, Content: &result}
+	a, _ := extractMessageToolActivity(call)
+	b, _ := extractMessageToolActivity(res)
+	steps := foldDelegations(append(a, b...))
+	if len(steps) != 1 || !steps[0].Delegation || steps[0].TaskID != "t_0978edd2" ||
+		steps[0].TaskTitle != "Identify visible GCP projects" || steps[0].Assignee != "platform" {
+		t.Errorf("folded steps = %+v, want one delegation with the card ID, title and assignee", steps)
+	}
+	if kanbanCreateTaskID(`{"ok": false, "task_id": "t_x"}`) != "" || kanbanCreateTaskID(`{"ok": true, "task_id": "../x"}`) != "" {
+		t.Errorf("a failed create or a malformed ID yielded a task ID")
+	}
+}
+
+func TestParseRepositories(t *testing.T) {
+	got := parseRepositories(`[{"forge":"github","repository":"acme/infra","role":"gitops"},` +
+		`{"forge":"in-cluster-gitea","provider":"gitea","host":"gitea-http.gitea.svc.cluster.local:3000","repository":"ops/gitops-repo","role":"managed"},` +
+		`{"repository":""}]`)
+	if len(got) != 2 || got[0].URL != "https://github.com/acme/infra" ||
+		got[1].URL != "http://gitea-http.gitea.svc.cluster.local:3000/ops/gitops-repo" || got[1].Role != "managed" {
+		t.Errorf("parseRepositories = %+v", got)
+	}
+	if n := len(parseRepositories("not json")); n != 0 {
+		t.Errorf("malformed env yielded %d repositories, want 0", n)
 	}
 }

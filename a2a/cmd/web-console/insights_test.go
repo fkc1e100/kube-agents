@@ -275,3 +275,135 @@ func TestInsightsDoesNotCacheFailedOrCancelledUsageRead(t *testing.T) {
 		t.Errorf("second usage after DNS recovery = %+v, want fresh healthy read", second)
 	}
 }
+
+func TestInsightsLiveModelFromLiteLLM(t *testing.T) {
+	mockLiteLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/model/info" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{
+					"model_name": "model-default",
+					"litellm_params": {
+						"model": "vertex_ai/publishers/google/models/gemini-2.5-pro"
+					},
+					"model_info": {
+						"key": "vertex_ai/gemini-2.5-pro",
+						"litellm_provider": "vertex_ai"
+					}
+				}
+			]
+		}`))
+	}))
+	defer mockLiteLLM.Close()
+
+	cfg := config{
+		LiteLLMURL:    mockLiteLLM.URL,
+		ModelName:     "fallback-model",
+		ModelProvider: "fallback-provider",
+	}
+	s := newServer(cfg)
+	res := decode[insightsResponse](t, serve(s.routes(), insightsReq()))
+	if res.Model.Name != "gemini-2.5-pro" || res.Model.Provider != "vertex_ai" {
+		t.Errorf("got model %+v, want gemini-2.5-pro via vertex_ai", res.Model)
+	}
+}
+
+func TestInsightsLiveModelPreferredTarget(t *testing.T) {
+	mockLiteLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/model/info" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{
+					"model_name": "model-default",
+					"litellm_params": {"model": "vertex_ai/gemini-3.5-flash"},
+					"model_info": {"litellm_provider": "vertex_ai"}
+				},
+				{
+					"model_name": "specialist-agent",
+					"litellm_params": {"model": "anthropic/claude-opus-5"},
+					"model_info": {"litellm_provider": "anthropic"}
+				}
+			]
+		}`))
+	}))
+	defer mockLiteLLM.Close()
+
+	cfg := config{
+		LiteLLMURL:    mockLiteLLM.URL,
+		AssistModel:   "specialist-agent",
+		ModelName:     "fallback-model",
+		ModelProvider: "fallback-provider",
+	}
+	s := newServer(cfg)
+	res := decode[insightsResponse](t, serve(s.routes(), insightsReq()))
+	if res.Model.Name != "claude-opus-5" || res.Model.Provider != "anthropic" {
+		t.Errorf("got model %+v, want claude-opus-5 via anthropic", res.Model)
+	}
+}
+
+func TestInsightsLiveModelFallbackOnError(t *testing.T) {
+	mockLiteLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+	}))
+	defer mockLiteLLM.Close()
+
+	cfg := config{
+		LiteLLMURL:    mockLiteLLM.URL,
+		ModelName:     "gemini-3.5-flash",
+		ModelProvider: "vertex_ai",
+	}
+	s := newServer(cfg)
+	res := decode[insightsResponse](t, serve(s.routes(), insightsReq()))
+	if res.Model.Name != "gemini-3.5-flash" || res.Model.Provider != "vertex_ai" {
+		t.Errorf("got model %+v, want fallback model", res.Model)
+	}
+}
+
+func TestParseLiteLLMModelInfo(t *testing.T) {
+	tests := []struct {
+		name            string
+		json            string
+		preferred       string
+		defaultName     string
+		defaultProvider string
+		wantName        string
+		wantProvider    string
+		wantErr         bool
+	}{
+		{
+			name:     "vertex model garden prefix stripped",
+			json:     `{"data":[{"model_name":"model-default","litellm_params":{"model":"vertex_ai/publishers/google/models/gemini-2.5-pro"},"model_info":{"litellm_provider":"vertex_ai"}}]}`,
+			wantName: "gemini-2.5-pro", wantProvider: "vertex_ai",
+		},
+		{
+			name:     "openai provider without slash",
+			json:     `{"data":[{"model_name":"model-default","litellm_params":{"model":"gpt-5.4"},"model_info":{"litellm_provider":"openai"}}]}`,
+			wantName: "gpt-5.4", wantProvider: "openai",
+		},
+		{
+			name:    "empty list errors",
+			json:    `{"data":[]}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseLiteLLMModelInfo([]byte(tc.json), tc.preferred, tc.defaultName, tc.defaultProvider)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseLiteLLMModelInfo() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && (got.Name != tc.wantName || got.Provider != tc.wantProvider) {
+				t.Errorf("got %+v, want name %q provider %q", got, tc.wantName, tc.wantProvider)
+			}
+		})
+	}
+}
