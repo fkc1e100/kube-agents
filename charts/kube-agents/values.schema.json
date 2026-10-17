@@ -1423,6 +1423,12 @@
             },
             "autoUpgrade": {
               "type": "boolean"
+            },
+            "autoUpgradeWindow": {
+              "type": "string"
+            },
+            "autoUpgradeMinReleaseAge": {
+              "type": "string"
             }
           }
         },

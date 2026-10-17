@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestUpgradeStartAndStatusLifecycle(t *testing.T) {
@@ -224,6 +225,11 @@ func TestAutoUpgradeToggleAndAutomaticTrigger(t *testing.T) {
 	s.cfg.GitHubAPIBase = gh.URL
 	s.githubClient = gh.Client()
 	s.kube = &kubeClient{base: api.URL, token: "sa-token", client: api.Client()}
+	// The release is 72h old and no kanban card is running, so every
+	// automatic upgrade gate passes.
+	s.cfg.AutoUpgradeMinReleaseAge = defaultAutoUpgradeMinReleaseAge
+	s.now = func() time.Time { return time.Date(2026, 10, 19, 1, 0, 0, 0, time.UTC) }
+	s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
 	h := s.routes()
 
 	// 1. Initially auto_upgrade is false.
@@ -266,5 +272,362 @@ func TestAutoUpgradeToggleAndAutomaticTrigger(t *testing.T) {
 	st2 := decode[upgradeStatusResponse](t, rec2)
 	if st2.AutoUpgrade {
 		t.Fatalf("expected auto_upgrade false after disabling, got %+v", st2)
+	}
+}
+
+// newKanbanBoard fakes the Hermes kanban board read: running cards in the
+// running column, or a bare status code when status is not 200.
+func newKanbanBoard(t *testing.T, running, status int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != kanbanBoardPath || r.Header.Get("Authorization") != bearerPrefix+testKey {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+			return
+		}
+		tasks := make([]map[string]any, running)
+		for i := range tasks {
+			tasks[i] = map[string]any{"id": fmt.Sprintf("t_%d", i), "status": "running"}
+		}
+		w.Header().Set("Content-Type", contentTypeJSON)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"columns": []map[string]any{
+				{"name": "todo", "tasks": []map[string]any{{"id": "t_todo"}}},
+				{"name": "running", "tasks": tasks},
+				{"name": "done", "tasks": []map[string]any{{"id": "t_done"}}},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// autoUpgradeFixture is a console on 0.8.0 with release 0.12.0 published
+// on GitHub, auto-upgrade switched on through the PlatformAgent annotation,
+// and a fake Kubernetes API that counts runner pod creations.
+type autoUpgradeFixture struct {
+	s     *server
+	mu    sync.Mutex
+	posts int
+}
+
+func (f *autoUpgradeFixture) podPosts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.posts
+}
+
+func newAutoUpgradeFixture(t *testing.T, publishedAt string, autoOn bool) *autoUpgradeFixture {
+	t.Helper()
+	f := &autoUpgradeFixture{}
+	var podJSON map[string]any
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rel := map[string]any{"tag_name": "v0.12.0", "html_url": "https://github.com/gke-labs/kube-agents/releases/tag/v0.12.0"}
+		if publishedAt != "" {
+			rel["published_at"] = publishedAt
+		}
+		w.Header().Set("Content-Type", contentTypeJSON)
+		_ = json.NewEncoder(w).Encode([]map[string]any{rel})
+	}))
+	t.Cleanup(gh.Close)
+
+	ann := map[string]string{}
+	if autoOn {
+		ann[autoUpgradeAnnotation] = "true"
+	}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/apis/kubeagents.x-k8s.io/v1alpha1/namespaces/kubeagents-system/platformagents/platform-agent":
+			w.Header().Set("Content-Type", contentTypeJSON)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "platform-agent", "annotations": ann},
+				"spec":     map[string]any{"deployment": map[string]any{"tag": "0.8.0"}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/namespaces/kubeagents-system/pods/kube-agents-upgrade-runner":
+			if podJSON == nil {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"message":"not found"}`)
+				return
+			}
+			meta, _ := podJSON["metadata"].(map[string]any)
+			w.Header().Set("Content-Type", contentTypeJSON)
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": meta, "status": map[string]any{"phase": "Running"}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/kubeagents-system/pods":
+			f.posts++
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &podJSON)
+			w.Header().Set("Content-Type", contentTypeJSON)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write(raw)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+
+	_, s := setupServer(t)
+	s.cfg.PodNamespace = "kubeagents-system"
+	s.cfg.PlatformAgentName = "platform-agent"
+	s.cfg.ImageTag = "0.8.0"
+	s.cfg.ChartVersion = "0.8.0"
+	s.cfg.ReleaseCheck = true
+	s.cfg.GitHubAPIBase = gh.URL
+	s.cfg.AutoUpgradeMinReleaseAge = defaultAutoUpgradeMinReleaseAge
+	s.githubClient = gh.Client()
+	s.kube = &kubeClient{base: api.URL, token: "sa-token", client: api.Client()}
+	f.s = s
+	return f
+}
+
+func mustWindow(t *testing.T, raw string) *upgradeWindow {
+	t.Helper()
+	w, err := parseUpgradeWindow(raw)
+	if err != nil {
+		t.Fatalf("parseUpgradeWindow(%q): %v", raw, err)
+	}
+	return w
+}
+
+// Saturday 24 Oct 2026 07:00 UTC is 03:00 in Toronto (EDT), inside
+// "Sat,Sun 02:00-06:00 America/Toronto"; Wednesday 21 Oct 12:00 UTC is not.
+var (
+	insideTorontoWindow  = time.Date(2026, 10, 24, 7, 0, 0, 0, time.UTC)
+	outsideTorontoWindow = time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+)
+
+const (
+	torontoWindow  = "Sat,Sun 02:00-06:00 America/Toronto"
+	oldReleaseTime = "2026-10-16T01:00:00Z" // more than 72h before both instants above
+)
+
+func TestAutoUpgradeOutsideWindowDoesNotLaunch(t *testing.T) {
+	f := newAutoUpgradeFixture(t, oldReleaseTime, true)
+	f.s.cfg.AutoUpgradeWindow = mustWindow(t, torontoWindow)
+	f.s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
+	f.s.now = func() time.Time { return outsideTorontoWindow }
+
+	triggered, st := f.s.maybeTriggerAutoUpgrade(t.Context())
+	if triggered || f.podPosts() != 0 {
+		t.Fatalf("outside the window: triggered=%v, runner pod POSTs=%d; want no launch", triggered, f.podPosts())
+	}
+	if !strings.Contains(st.Detail, "maintenance window") || !strings.Contains(st.Detail, torontoWindow) {
+		t.Fatalf("Detail %q does not name the window", st.Detail)
+	}
+	// GET /api/upgrade/status reports the same hold.
+	rec := serve(f.s.routes(), httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/upgrade/status", nil))
+	if got := decode[upgradeStatusResponse](t, rec); got.State != "idle" || got.Detail != st.Detail {
+		t.Fatalf("status = %+v, want idle with Detail %q", got, st.Detail)
+	}
+}
+
+func TestAutoUpgradeInsideWindowWaitsForRunningCard(t *testing.T) {
+	f := newAutoUpgradeFixture(t, oldReleaseTime, true)
+	f.s.cfg.AutoUpgradeWindow = mustWindow(t, torontoWindow)
+	f.s.cfg.HermesURL = newKanbanBoard(t, 2, http.StatusOK).URL
+	f.s.now = func() time.Time { return insideTorontoWindow }
+
+	triggered, st := f.s.maybeTriggerAutoUpgrade(t.Context())
+	if triggered || f.podPosts() != 0 {
+		t.Fatalf("running cards: triggered=%v, runner pod POSTs=%d; want no launch", triggered, f.podPosts())
+	}
+	if !strings.Contains(st.Detail, "2 running kanban cards") {
+		t.Fatalf("Detail %q does not report the running cards", st.Detail)
+	}
+}
+
+func TestAutoUpgradeInsideWindowIdleLaunches(t *testing.T) {
+	f := newAutoUpgradeFixture(t, oldReleaseTime, true)
+	f.s.cfg.AutoUpgradeWindow = mustWindow(t, torontoWindow)
+	f.s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
+	f.s.now = func() time.Time { return insideTorontoWindow }
+
+	triggered, st := f.s.maybeTriggerAutoUpgrade(t.Context())
+	if !triggered || f.podPosts() != 1 {
+		t.Fatalf("inside window, idle: triggered=%v, runner pod POSTs=%d; want one launch", triggered, f.podPosts())
+	}
+	if st.State != "running" || st.Target != "0.12.0" || st.TriggeredBy != "auto" {
+		t.Fatalf("unexpected status after launch: %+v", st)
+	}
+}
+
+func TestAutoUpgradeWithoutWindowRunsAnyTime(t *testing.T) {
+	f := newAutoUpgradeFixture(t, oldReleaseTime, true)
+	f.s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
+	f.s.now = func() time.Time { return outsideTorontoWindow }
+
+	if triggered, _ := f.s.maybeTriggerAutoUpgrade(t.Context()); !triggered || f.podPosts() != 1 {
+		t.Fatalf("no window set: triggered=%v, runner pod POSTs=%d; want one launch", triggered, f.podPosts())
+	}
+}
+
+func TestAutoUpgradeFailsClosedWhenBoardUnreadable(t *testing.T) {
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
+	for name, hermesURL := range map[string]string{
+		"404":                newKanbanBoard(t, 0, http.StatusNotFound).URL,
+		"500":                newKanbanBoard(t, 0, http.StatusInternalServerError).URL,
+		"connection refused": closed.URL,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newAutoUpgradeFixture(t, oldReleaseTime, true)
+			f.s.cfg.HermesURL = hermesURL
+			f.s.now = func() time.Time { return insideTorontoWindow }
+
+			triggered, st := f.s.maybeTriggerAutoUpgrade(t.Context())
+			if triggered || f.podPosts() != 0 {
+				t.Fatalf("unreadable board: triggered=%v, runner pod POSTs=%d; want no launch", triggered, f.podPosts())
+			}
+			if !strings.Contains(st.Detail, "could not confirm the agents are idle") {
+				t.Fatalf("Detail %q does not explain the idle check failure", st.Detail)
+			}
+		})
+	}
+}
+
+func TestAutoUpgradeWaitsForMinimumReleaseAge(t *testing.T) {
+	cases := map[string]struct {
+		publishedAt string
+		want        string
+	}{
+		"published 24h ago": {"2026-10-23T07:00:00Z", "waiting until 2026-10-26T07:00:00Z"},
+		"no published time": {"", "did not report when the release was published"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newAutoUpgradeFixture(t, tc.publishedAt, true)
+			f.s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
+			f.s.now = func() time.Time { return insideTorontoWindow }
+
+			triggered, st := f.s.maybeTriggerAutoUpgrade(t.Context())
+			if triggered || f.podPosts() != 0 {
+				t.Fatalf("young release: triggered=%v, runner pod POSTs=%d; want no launch", triggered, f.podPosts())
+			}
+			if !strings.Contains(st.Detail, tc.want) {
+				t.Fatalf("Detail %q does not contain %q", st.Detail, tc.want)
+			}
+		})
+	}
+
+	// AUTO_UPGRADE_MIN_RELEASE_AGE=0 turns the check off.
+	f := newAutoUpgradeFixture(t, "2026-10-24T06:59:00Z", true)
+	f.s.cfg.AutoUpgradeMinReleaseAge = 0
+	f.s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
+	f.s.now = func() time.Time { return insideTorontoWindow }
+	if triggered, _ := f.s.maybeTriggerAutoUpgrade(t.Context()); !triggered || f.podPosts() != 1 {
+		t.Fatalf("min age 0: triggered=%v, runner pod POSTs=%d; want one launch", triggered, f.podPosts())
+	}
+}
+
+func TestManualUpgradeIgnoresAutoUpgradeGates(t *testing.T) {
+	f := newAutoUpgradeFixture(t, "2026-10-21T11:00:00Z", true)
+	f.s.cfg.AutoUpgradeWindow = mustWindow(t, torontoWindow)
+	f.s.cfg.HermesURL = newKanbanBoard(t, 3, http.StatusOK).URL
+	f.s.now = func() time.Time { return outsideTorontoWindow }
+
+	req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/upgrade", strings.NewReader(`{"target":"0.12.0"}`))
+	req.Header.Set("Content-Type", contentTypeJSON)
+	req.Header.Set(consoleHeader, consoleHeaderValue)
+	rec := serve(f.s.routes(), req)
+	if rec.Code != http.StatusAccepted || f.podPosts() != 1 {
+		t.Fatalf("manual upgrade: status %d, runner pod POSTs=%d; want 202 and one launch: %s", rec.Code, f.podPosts(), rec.Body.String())
+	}
+	if st := decode[upgradeStatusResponse](t, rec); st.TriggeredBy != "manual" {
+		t.Fatalf("TriggeredBy = %q, want manual", st.TriggeredBy)
+	}
+}
+
+func TestAutoUpgradeDefaultsOff(t *testing.T) {
+	t.Setenv(envAutoUpgrade, "")
+	if loadConfig().AutoUpgrade {
+		t.Fatalf("%s unset: AutoUpgrade = true, want false", envAutoUpgrade)
+	}
+	// No annotation on the PlatformAgent and no env: nothing launches even
+	// though every gate would pass.
+	f := newAutoUpgradeFixture(t, oldReleaseTime, false)
+	f.s.cfg.HermesURL = newKanbanBoard(t, 0, http.StatusOK).URL
+	f.s.now = func() time.Time { return insideTorontoWindow }
+	if triggered, st := f.s.maybeTriggerAutoUpgrade(t.Context()); triggered || f.podPosts() != 0 || st.AutoUpgrade {
+		t.Fatalf("default: triggered=%v, runner pod POSTs=%d, auto_upgrade=%v; want off", triggered, f.podPosts(), st.AutoUpgrade)
+	}
+}
+
+func TestUpgradeWindowContains(t *testing.T) {
+	utc := func(day, hour, minute int) time.Time { return time.Date(2026, 10, day, hour, minute, 0, 0, time.UTC) }
+	// 24 Oct 2026 is a Saturday.
+	cases := []struct {
+		window string
+		at     time.Time
+		want   bool
+	}{
+		{"Sat 23:00-02:00", utc(24, 23, 30), true},  // Saturday night
+		{"Sat 23:00-02:00", utc(25, 1, 30), true},   // early Sunday belongs to Saturday's window
+		{"Sat 23:00-02:00", utc(25, 2, 0), false},   // end is exclusive
+		{"Sat 23:00-02:00", utc(25, 23, 30), false}, // Sunday night is not listed
+		{"Sat 23:00-02:00", utc(24, 1, 30), false},  // early Saturday belongs to Friday
+		{"22:00-04:00", utc(21, 3, 0), true},        // no days: every day
+		{"22:00-04:00", utc(21, 12, 0), false},
+		{"Mon-Fri 09:00-17:00", utc(23, 9, 0), true}, // Friday, start is inclusive
+		{"Mon-Fri 09:00-17:00", utc(24, 10, 0), false},
+		{"fri-mon 00:00-24:00", utc(25, 12, 0), true}, // range wraps through the weekend
+		{"fri-mon 00:00-24:00", utc(21, 12, 0), false},
+		{torontoWindow, insideTorontoWindow, true},
+		{torontoWindow, time.Date(2026, 10, 24, 5, 30, 0, 0, time.UTC), false}, // 01:30 in Toronto
+		{torontoWindow, outsideTorontoWindow, false},
+	}
+	for _, tc := range cases {
+		if got := mustWindow(t, tc.window).contains(tc.at); got != tc.want {
+			t.Errorf("%q contains %s = %v, want %v", tc.window, tc.at.Format(time.RFC3339), got, tc.want)
+		}
+	}
+}
+
+func TestParseUpgradeWindowErrors(t *testing.T) {
+	for _, raw := range []string{
+		"",
+		"Sat",
+		"Sat 02:00",
+		"Sat 02:00-25:00",
+		"Funday 02:00-03:00",
+		"Sat,,Sun 02:00-03:00",
+		"02:00-02:00",
+		"02:60-03:00",
+		"24:00-03:00",
+		"2:0-03:00",
+		"02:00-03:00 Mars/Olympus_Mons",
+		"Sat 02:00-03:00 UTC extra",
+	} {
+		if w, err := parseUpgradeWindow(raw); err == nil {
+			t.Errorf("parseUpgradeWindow(%q) = %+v, want an error", raw, w)
+		}
+	}
+}
+
+func TestLoadAutoUpgradePolicy(t *testing.T) {
+	cases := []struct {
+		window, age string
+		wantWindow  bool
+		wantAge     time.Duration
+	}{
+		{"", "", false, 72 * time.Hour},
+		{torontoWindow, "", true, 72 * time.Hour},
+		{"weekends at night", "", false, 72 * time.Hour}, // parse error: treated as unset
+		{"", "0", false, 0},
+		{"", "24h", false, 24 * time.Hour},
+		{"", "three days", false, 72 * time.Hour},
+		{"", "-1h", false, 72 * time.Hour},
+	}
+	for _, tc := range cases {
+		t.Setenv(envAutoUpgradeWindow, tc.window)
+		t.Setenv(envAutoUpgradeMinReleaseAge, tc.age)
+		w, age := loadAutoUpgradePolicy()
+		if (w != nil) != tc.wantWindow || age != tc.wantAge {
+			t.Errorf("window=%q age=%q: got window %v, age %s; want window %v, age %s", tc.window, tc.age, w != nil, age, tc.wantWindow, tc.wantAge)
+		}
 	}
 }

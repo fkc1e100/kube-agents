@@ -37,21 +37,32 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// Embedded zone data so AUTO_UPGRADE_WINDOW can name an IANA zone in a
+	// distroless image that ships no /usr/share/zoneinfo.
+	_ "time/tzdata"
 )
 
 const (
-	envUpgradeRunnerImage = "UPGRADE_RUNNER_IMAGE"
-	envUpgradeRunnerSA    = "UPGRADE_RUNNER_SA"
-	envAutoUpgrade        = "AUTO_UPGRADE"
+	envUpgradeRunnerImage       = "UPGRADE_RUNNER_IMAGE"
+	envUpgradeRunnerSA          = "UPGRADE_RUNNER_SA"
+	envAutoUpgrade              = "AUTO_UPGRADE"
+	envAutoUpgradeWindow        = "AUTO_UPGRADE_WINDOW"
+	envAutoUpgradeMinReleaseAge = "AUTO_UPGRADE_MIN_RELEASE_AGE"
 
-	defaultUpgradeRunnerImage = "gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine"
-	defaultUpgradeRunnerSA    = "kube-agents-upgrader"
-	upgradeRunnerPodName      = "kube-agents-upgrade-runner"
-	autoUpgradeAnnotation     = "kubeagents.x-k8s.io/auto-upgrade"
-	triggeredByAnnotation     = "kubeagents.x-k8s.io/triggered-by"
-	upgradeTimeout            = 15 * time.Second
-	autoUpgradeCheckInterval  = 15 * time.Minute
-	maxUpgradeLogBytes        = 64 << 10
+	defaultUpgradeRunnerImage       = "gcr.io/google.com/cloudsdktool/google-cloud-cli:alpine"
+	defaultUpgradeRunnerSA          = "kube-agents-upgrader"
+	defaultAutoUpgradeMinReleaseAge = 72 * time.Hour
+	upgradeRunnerPodName            = "kube-agents-upgrade-runner"
+	autoUpgradeAnnotation           = "kubeagents.x-k8s.io/auto-upgrade"
+	triggeredByAnnotation           = "kubeagents.x-k8s.io/triggered-by"
+	upgradeTimeout                  = 15 * time.Second
+	autoUpgradeCheckInterval        = 15 * time.Minute
+	maxUpgradeLogBytes              = 64 << 10
+
+	// kanbanBoardPath is the Hermes kanban board read (columns of cards by
+	// status) the automatic upgrade checks for running cards before it
+	// restarts the gateway.
+	kanbanBoardPath = "/api/plugins/kanban/board"
 )
 
 type upgradeStartRequest struct {
@@ -443,6 +454,17 @@ func (s *server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) readUpgradeStatus(ctx context.Context) upgradeStatusResponse {
+	st := s.readRunnerStatus(ctx)
+	if st.AutoUpgrade && st.State != "running" && st.Detail == "" {
+		s.mu.Lock()
+		st.Detail = s.autoUpgradeHold
+		s.mu.Unlock()
+	}
+	return st
+}
+
+// readRunnerStatus reports the runner pod's state, phase, and log tail.
+func (s *server) readRunnerStatus(ctx context.Context) upgradeStatusResponse {
 	auto := s.isAutoUpgradeEnabled(ctx)
 	if s.kube == nil || s.cfg.PodNamespace == "" {
 		return upgradeStatusResponse{State: "idle", Detail: "Kubernetes API client is not configured.", AutoUpgrade: auto}
@@ -612,6 +634,8 @@ func (s *server) setAutoUpgrade(ctx context.Context, enabled bool) error {
 	s.cfg.AutoUpgrade = enabled
 	if enabled {
 		s.lastAutoUpgradeTarget = ""
+	} else {
+		s.autoUpgradeHold = ""
 	}
 	s.mu.Unlock()
 
@@ -662,13 +686,35 @@ func (s *server) handleUpgradeAutoSet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+// maybeTriggerAutoUpgrade is the automatic upgrade path (triggered-by=auto):
+// the 15-minute loop, GET /api/release, and switching the toggle on all go
+// through it. The manual Upgrade button (POST /api/upgrade) does not.
+//
+// An upgrade restarts the single-replica gateway, which takes every chat
+// surface offline until the new pod is ready, and upgrade.sh rewrites the
+// agent's runtime files. So before it starts the runner, the automatic path
+// requires all three of:
+//
+//   - now is inside AUTO_UPGRADE_WINDOW, when that is set (unset: any time);
+//   - the newest release was published at least AUTO_UPGRADE_MIN_RELEASE_AGE
+//     ago (default 72h; 0 turns the check off);
+//   - no kanban card is in the running column. When the board cannot be
+//     read the check fails closed and the upgrade waits.
+//
+// A held upgrade is retried on the next tick; the reason is reported as the
+// status Detail.
+//
+// TODO(#3407): this policy belongs in the operator, which owns the gateway
+// rollout; the console should only request an upgrade.
 func (s *server) maybeTriggerAutoUpgrade(ctx context.Context) (bool, upgradeStatusResponse) {
 	if !s.isAutoUpgradeEnabled(ctx) {
+		s.noteAutoUpgradeHold("")
 		return false, s.readUpgradeStatus(ctx)
 	}
 	rel := s.currentRelease(ctx)
 	target := strings.TrimPrefix(strings.TrimSpace(rel.Latest), "v")
 	if rel.Status != "behind" || target == "" || !releaseTagPattern.MatchString(target) {
+		s.noteAutoUpgradeHold("")
 		return false, s.readUpgradeStatus(ctx)
 	}
 	cur := s.readUpgradeStatus(ctx)
@@ -681,6 +727,12 @@ func (s *server) maybeTriggerAutoUpgrade(ctx context.Context) (bool, upgradeStat
 	if alreadyTried && (cur.State == "failed" || cur.State == "succeeded") {
 		return false, cur
 	}
+	if hold := s.autoUpgradeHoldReason(ctx, target, rel.LatestAt); hold != "" {
+		s.noteAutoUpgradeHold(hold)
+		cur.Detail = hold
+		return false, cur
+	}
+	s.noteAutoUpgradeHold("")
 	s.mu.Lock()
 	s.lastAutoUpgradeTarget = target
 	s.mu.Unlock()
@@ -725,6 +777,246 @@ func (s *server) runAutoUpgradeLoop(ctx context.Context) {
 			checkOnce()
 		}
 	}
+}
+
+func (s *server) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// autoUpgradeHoldReason returns why an automatic upgrade to target must
+// wait, or "" when it may start. The checks run cheapest first, so the
+// gateway is only asked about running cards inside the window.
+func (s *server) autoUpgradeHoldReason(ctx context.Context, target, publishedAt string) string {
+	now := s.clock()
+	if w := s.cfg.AutoUpgradeWindow; w != nil && !w.contains(now) {
+		return fmt.Sprintf("Automatic upgrade to %s is waiting for the maintenance window (%s=%q).", target, envAutoUpgradeWindow, w.raw)
+	}
+	if minAge := s.cfg.AutoUpgradeMinReleaseAge; minAge > 0 {
+		published, err := time.Parse(time.RFC3339, strings.TrimSpace(publishedAt))
+		if err != nil {
+			return fmt.Sprintf("Automatic upgrade to %s is waiting: GitHub did not report when the release was published, so %s=%s cannot be checked.", target, envAutoUpgradeMinReleaseAge, minAge)
+		}
+		if eligible := published.Add(minAge); now.Before(eligible) {
+			return fmt.Sprintf("Automatic upgrade to %s is waiting until %s, %s after the release was published (%s).", target, eligible.UTC().Format(time.RFC3339), minAge, envAutoUpgradeMinReleaseAge)
+		}
+	}
+	running, err := s.runningKanbanCards(ctx)
+	if err != nil {
+		return fmt.Sprintf("Automatic upgrade to %s is waiting: could not confirm the agents are idle (GET %s: %v).", target, kanbanBoardPath, err)
+	}
+	if running > 0 {
+		return fmt.Sprintf("Automatic upgrade to %s is waiting for %d running kanban card%s to finish.", target, running, plural(running))
+	}
+	return ""
+}
+
+// noteAutoUpgradeHold records the current hold reason and logs it when it
+// changes, so a hold that lasts many ticks is logged once.
+func (s *server) noteAutoUpgradeHold(reason string) {
+	s.mu.Lock()
+	changed := s.autoUpgradeHold != reason
+	s.autoUpgradeHold = reason
+	s.mu.Unlock()
+	if changed && reason != "" {
+		log.Print(logPrefix + reason)
+	}
+}
+
+// runningKanbanCards counts the cards in the running column of the Hermes
+// kanban board. Any answer it cannot read is an error, so the caller fails
+// closed.
+func (s *server) runningKanbanCards(ctx context.Context) (int, error) {
+	resp, err := s.hermes(ctx, http.MethodGet, kanbanBoardPath, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer drainAndClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var board struct {
+		Columns []struct {
+			Name  string            `json:"name"`
+			Tasks []json.RawMessage `json:"tasks"`
+		} `json:"columns"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(&board); err != nil {
+		return 0, fmt.Errorf("unreadable board: %v", err)
+	}
+	if len(board.Columns) == 0 {
+		return 0, fmt.Errorf("board answer has no columns")
+	}
+	running := 0
+	for _, c := range board.Columns {
+		if c.Name == "running" {
+			running += len(c.Tasks)
+		}
+	}
+	return running, nil
+}
+
+// loadAutoUpgradePolicy reads AUTO_UPGRADE_WINDOW and
+// AUTO_UPGRADE_MIN_RELEASE_AGE once at startup. A window that does not
+// parse is logged and treated as unset (no time restriction); a release age
+// that does not parse is logged and replaced with the 72h default.
+func loadAutoUpgradePolicy() (*upgradeWindow, time.Duration) {
+	var window *upgradeWindow
+	if raw := strings.TrimSpace(os.Getenv(envAutoUpgradeWindow)); raw != "" {
+		w, err := parseUpgradeWindow(raw)
+		if err != nil {
+			log.Printf(logPrefix+"%s=%q is not a window (want e.g. \"Sat,Sun 02:00-06:00 America/Toronto\"): %v; automatic upgrades are not limited to a window", envAutoUpgradeWindow, raw, err)
+		} else {
+			window = w
+		}
+	}
+	minAge := defaultAutoUpgradeMinReleaseAge
+	if raw := strings.TrimSpace(os.Getenv(envAutoUpgradeMinReleaseAge)); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d < 0 {
+			log.Printf(logPrefix+"%s=%q is not a non-negative Go duration; using %s", envAutoUpgradeMinReleaseAge, raw, defaultAutoUpgradeMinReleaseAge)
+		} else {
+			minAge = d
+		}
+	}
+	return window, minAge
+}
+
+// upgradeWindow is a weekly maintenance window: "[DAYS ]HH:MM-HH:MM[ ZONE]".
+// DAYS is a comma list of day names or ranges (Mon, Sat,Sun, Mon-Fri); none
+// means every day. ZONE is an IANA zone name; none means UTC. When the end
+// is earlier than the start the window crosses midnight, and DAYS names the
+// day it opens: "Sat 23:00-02:00" includes Sunday 01:30.
+type upgradeWindow struct {
+	raw        string
+	days       [7]bool // indexed by time.Weekday
+	start, end int     // minutes after midnight; end may be 24*60
+	loc        *time.Location
+}
+
+var weekdayNames = map[string]time.Weekday{
+	"sun": time.Sunday, "sunday": time.Sunday,
+	"mon": time.Monday, "monday": time.Monday,
+	"tue": time.Tuesday, "tues": time.Tuesday, "tuesday": time.Tuesday,
+	"wed": time.Wednesday, "wednesday": time.Wednesday,
+	"thu": time.Thursday, "thur": time.Thursday, "thurs": time.Thursday, "thursday": time.Thursday,
+	"fri": time.Friday, "friday": time.Friday,
+	"sat": time.Saturday, "saturday": time.Saturday,
+}
+
+func parseUpgradeWindow(raw string) (*upgradeWindow, error) {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 || len(fields) > 3 {
+		return nil, fmt.Errorf("want \"[DAYS ]HH:MM-HH:MM[ ZONE]\"")
+	}
+	w := &upgradeWindow{raw: strings.Join(fields, " "), loc: time.UTC}
+	i := 0
+	if !strings.Contains(fields[0], ":") {
+		if err := w.parseDays(fields[0]); err != nil {
+			return nil, err
+		}
+		i++
+	} else {
+		for d := range w.days {
+			w.days[d] = true
+		}
+	}
+	if i >= len(fields) {
+		return nil, fmt.Errorf("missing HH:MM-HH:MM time range")
+	}
+	from, to, ok := strings.Cut(fields[i], "-")
+	if !ok {
+		return nil, fmt.Errorf("time range %q is not HH:MM-HH:MM", fields[i])
+	}
+	var err error
+	if w.start, err = parseClock(from, false); err != nil {
+		return nil, err
+	}
+	if w.end, err = parseClock(to, true); err != nil {
+		return nil, err
+	}
+	if w.start == w.end {
+		return nil, fmt.Errorf("time range %q is empty", fields[i])
+	}
+	i++
+	if i < len(fields) {
+		loc, err := time.LoadLocation(fields[i])
+		if err != nil {
+			return nil, fmt.Errorf("unknown time zone %q", fields[i])
+		}
+		w.loc = loc
+		i++
+	}
+	if i != len(fields) {
+		return nil, fmt.Errorf("unexpected %q", fields[i])
+	}
+	return w, nil
+}
+
+func (w *upgradeWindow) parseDays(spec string) error {
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" {
+			return fmt.Errorf("empty day in %q", spec)
+		}
+		from, to, isRange := strings.Cut(part, "-")
+		first, ok := weekdayNames[from]
+		if !ok {
+			return fmt.Errorf("unknown day %q", from)
+		}
+		last := first
+		if isRange {
+			if last, ok = weekdayNames[to]; !ok {
+				return fmt.Errorf("unknown day %q", to)
+			}
+		}
+		for d := first; ; d = (d + 1) % 7 {
+			w.days[d] = true
+			if d == last {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+// parseClock reads HH:MM as minutes after midnight; 24:00 is accepted only
+// as an end.
+func parseClock(v string, isEnd bool) (int, error) {
+	hh, mm, ok := strings.Cut(strings.TrimSpace(v), ":")
+	h, herr := strconv.Atoi(hh)
+	m, merr := strconv.Atoi(mm)
+	if !ok || herr != nil || merr != nil || len(mm) != 2 || h < 0 || m < 0 || m > 59 {
+		return 0, fmt.Errorf("time %q is not HH:MM", v)
+	}
+	if h == 24 && m == 0 && isEnd {
+		return 24 * 60, nil
+	}
+	if h > 23 {
+		return 0, fmt.Errorf("time %q is not HH:MM", v)
+	}
+	return h*60 + m, nil
+}
+
+// contains reports whether t falls inside the window.
+func (w *upgradeWindow) contains(t time.Time) bool {
+	lt := t.In(w.loc)
+	m := lt.Hour()*60 + lt.Minute()
+	day := lt.Weekday()
+	if w.start < w.end {
+		return w.days[day] && m >= w.start && m < w.end
+	}
+	// Crosses midnight: the late part belongs to the day the window opens,
+	// the early part to the day before.
+	if m >= w.start {
+		return w.days[day]
+	}
+	if m < w.end {
+		return w.days[(day+6)%7]
+	}
+	return false
 }
 
 func init() {

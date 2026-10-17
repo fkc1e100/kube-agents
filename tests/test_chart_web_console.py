@@ -423,9 +423,24 @@ class WebConsoleRenderTest(unittest.TestCase):
         self.assertIn(("pods", "pods/log"), resources)
         env = self._console_env(docs)
         self.assertEqual(env["AUTO_UPGRADE"], "false")
+        self.assertNotIn("AUTO_UPGRADE_WINDOW", env)
+        self.assertEqual(env["AUTO_UPGRADE_MIN_RELEASE_AGE"], "72h")
 
         env_auto = self._console_env(self._render("--set", "webConsole.enabled=true", "--set", "webConsole.upgradeRunner.autoUpgrade=true"))
         self.assertEqual(env_auto["AUTO_UPGRADE"], "true")
+
+        env_window = self._console_env(
+            self._render(
+                "--set",
+                "webConsole.enabled=true",
+                "--set-string",
+                "webConsole.upgradeRunner.autoUpgradeWindow=Sat\\,Sun 02:00-06:00 America/Toronto",
+                "--set-string",
+                "webConsole.upgradeRunner.autoUpgradeMinReleaseAge=0",
+            )
+        )
+        self.assertEqual(env_window["AUTO_UPGRADE_WINDOW"], "Sat,Sun 02:00-06:00 America/Toronto")
+        self.assertEqual(env_window["AUTO_UPGRADE_MIN_RELEASE_AGE"], "0")
 
         docs_off = self._render("--set", "webConsole.enabled=true", "--set", "webConsole.upgradeRunner.enabled=false")
         sa_names_off = [d["metadata"]["name"] for d in docs_off if d["kind"] == "ServiceAccount"]
