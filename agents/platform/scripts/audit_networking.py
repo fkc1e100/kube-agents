@@ -157,18 +157,22 @@ def audit_networking(kubeconfig: str | None = None) -> int:
 
         conditions = []
         route_failed = False
-        for p in item.get("status", {}).get("parents", []) or []:
+        status_parents = item.get("status", {}).get("parents", []) or []
+        for p in status_parents:
             for c in p.get("conditions", []) or []:
                 if c.get("type") in ("Accepted", "ResolvedRefs"):
                     conditions.append(f"{c.get('type')}={c.get('status')}")
                     route_failed = route_failed or c.get("status") == "False"
+        # parentRefs that no Gateway controller has reported on: the route is not attached anywhere.
+        not_attached = bool(parents) and not status_parents
+        route_failed = route_failed or not_attached
 
         route_info = {
             "namespace": ns,
             "name": name,
             "hostnames": ", ".join(hostnames),
             "parents": ", ".join(parent_names) or "None",
-            "status": ", ".join(conditions) or "Attached",
+            "status": ", ".join(conditions) or ("NotAttached" if not_attached else "Attached"),
         }
         route_list.append(route_info)
         if route_failed:
@@ -235,7 +239,7 @@ def audit_networking(kubeconfig: str | None = None) -> int:
     print("## Kubernetes Ingress & Gateway Fleet Audit\n")
     print(f"- **Ingress Resources:** {total_ingresses} total ({total_ingresses - len(unassigned_ingresses)} Assigned IP, {len(unassigned_ingresses)} Pending/Unallocated)")
     print(f"- **Gateway API (Gateways):** {total_gateways} total ({total_gateways - len(unaccepted_gateways)} Programmed with an address, {len(unaccepted_gateways)} Not Programmed or no address)")
-    print(f"- **Gateway API (HTTPRoutes):** {total_routes} total ({len(degraded_routes)} with Accepted=False or ResolvedRefs=False)")
+    print(f"- **Gateway API (HTTPRoutes):** {total_routes} total ({len(degraded_routes)} with Accepted=False, ResolvedRefs=False, or not attached)")
     print(f"- **LoadBalancer Services:** {total_lbs} total ({total_lbs - len(pending_lb)} Active VIP, {len(pending_lb)} Pending VIP)")
     print(f"- **NodePort Services:** {total_nps} total | **Internal ClusterIP Services:** {cluster_ip_count}")
     print(f"- **GKE Extensions:** {len(bc_list)} BackendConfigs, {len(hcp_list)} HealthCheckPolicies\n")

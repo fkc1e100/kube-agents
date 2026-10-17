@@ -16,6 +16,9 @@ import os
 import subprocess
 import sys
 
+# How much of a failed query's error text the unread list shows per kind.
+UNREAD_REASON_MAX_CHARS = 200
+
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
     cmd = ["kubectl"] + args + ["-o", "json"]
@@ -31,7 +34,7 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
         )
         if res.returncode == 0 and res.stdout.strip():
             return 0, json.loads(res.stdout)
-        return res.returncode, {}
+        return res.returncode or 1, {"error": res.stderr.strip() or f"kubectl exit {res.returncode} with no output"}
     except Exception as e:
         return 1, {"error": str(e)}
 
@@ -61,15 +64,22 @@ def audit_network_policies(kubeconfig: str | None = None) -> int:
             except Exception as e:
                 results[key] = (1, {"error": str(e)})
 
-    ns_code, ns_data = results.get("namespaces", (1, {}))
-    if ns_code != 0:
-        print("Failed to query namespaces.", file=sys.stderr)
-        return 1
+    # A kind whose listing failed (timeout, Forbidden, empty or unparseable reply) is unread, never empty.
+    unread = {
+        key: str(data.get("error", ""))[:UNREAD_REASON_MAX_CHARS]
+        for key, (code, data) in results.items()
+        if code != 0
+    }
+    if unread:
+        print("## NetworkPolicy Audit Summary\n")
+        print(f"**NetworkPolicy Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}).")
+        print("CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy.\n")
+        for key, reason in sorted(unread.items()):
+            print(f"- `{key}`: {reason}")
+        return 0
 
-    np_code, np_data = results.get("networkpolicies", (1, {}))
-    if np_code != 0:
-        print("Failed to query network policies.", file=sys.stderr)
-        return 1
+    ns_data = results["namespaces"][1]
+    np_data = results["networkpolicies"][1]
 
     all_ns = sorted(
         item.get("metadata", {}).get("name", "")
