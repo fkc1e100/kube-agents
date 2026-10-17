@@ -27,29 +27,18 @@ import audit_storage  # noqa: E402
 
 class TestAuditCertificates(unittest.TestCase):
     def test_absent_crds_with_tls_secrets_emits_clean_stop(self):
+        secret_args = []
+
         def fake_run_cmd(args, env):
+            if "secrets" in args:
+                secret_args.extend(args)
+                return 0, (
+                    "kubeagents-system   webhook-tls   2026-10-14T10:00:00Z\n"
+                    "default             app-tls       2026-10-15T10:00:00Z"
+                )
             return 0, "agentprofiles.kubeagents.x-k8s.io\n"
 
         def fake_run_kubectl_json(args, env):
-            if "secrets" in args:
-                return 0, {
-                    "items": [
-                        {
-                            "metadata": {
-                                "namespace": "kubeagents-system",
-                                "name": "webhook-tls",
-                                "creationTimestamp": "2026-10-14T10:00:00Z",
-                            }
-                        },
-                        {
-                            "metadata": {
-                                "namespace": "default",
-                                "name": "app-tls",
-                                "creationTimestamp": "2026-10-15T10:00:00Z",
-                            }
-                        },
-                    ]
-                }
             return 0, {"items": []}
 
         buf = io.StringIO()
@@ -64,20 +53,21 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("- **cert_manager_installed:** `false`", out)
         self.assertIn("2 secret(s) across 2 namespace(s) [default (1), kubeagents-system (1)]", out)
-        self.assertIn(
-            "CLEAN_AUDIT_STOP: YES — No expiring or failed certificates/issuers found; call kanban_complete immediately.",
-            out,
-        )
+        self.assertIn("counted, not checked for expiry", out)
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+        # Secrets are listed metadata-only: no -o json, so no tls.key payload is fetched.
+        self.assertNotIn("json", secret_args)
+        self.assertIn(audit_certificates.TLS_SECRET_COLUMNS, secret_args)
 
     def test_partial_crds_zero_objects_and_rbac_forbidden_secrets_emits_clean_stop(self):
         """Regression test for R6 P09 on hub clusters where only certificates & clusterissuers CRDs exist."""
 
         def fake_run_cmd(args, env):
+            if "secrets" in args:
+                return 1, "Error from server (Forbidden): secrets is forbidden"
             return 0, "certificates.cert-manager.io\nclusterissuers.cert-manager.io\n"
 
         def fake_run_kubectl_json(args, env):
-            if "secrets" in args:
-                return 1, {"stderr": 'Error from server (Forbidden): secrets is forbidden'}
             return 0, {"items": []}
 
         buf = io.StringIO()
@@ -93,10 +83,7 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertIn("- **cert_manager_installed:** `true`", out)
         self.assertIn("Partial CRD installation", out)
         self.assertIn("RBAC restricts cluster-wide Secret listing", out)
-        self.assertIn(
-            "CLEAN_AUDIT_STOP: YES — No expiring or failed certificates/issuers found; call kanban_complete immediately.",
-            out,
-        )
+        self.assertIn("CLEAN_AUDIT_STOP: YES — No failed, expired, or renewal-overdue certificates", out)
 
     def test_healthy_active_certs_and_issuers_emits_clean_stop(self):
         def fake_run_cmd(args, env):
@@ -188,6 +175,92 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertIn("Waiting for ACME challenge", out)
 
 
+    def _run_certs(self, crd_listing, kubectl_json, secrets=(0, "")):
+        def fake_run_cmd(args, env):
+            return secrets if "secrets" in args else crd_listing
+
+        buf = io.StringIO()
+        with (
+            mock.patch.object(audit_certificates, "run_cmd", side_effect=fake_run_cmd),
+            mock.patch.object(audit_certificates, "run_kubectl_json", side_effect=kubectl_json),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = audit_certificates.audit_certificates()
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_failed_crd_listing_is_unread_not_absent(self):
+        out = self._run_certs((1, "Unable to connect to the server: i/o timeout"), lambda a, e: (0, {"items": []}))
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        self.assertIn("i/o timeout", out)
+        self.assertNotIn("NOT INSTALLED", out)
+
+    def test_forbidden_certificate_listing_is_unread(self):
+        def kubectl_json(args, env):
+            if "certificates.cert-manager.io" in args:
+                return 1, {"stderr": "Error from server (Forbidden): certificates.cert-manager.io is forbidden"}
+            return 0, {"items": []}
+
+        out = self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        self.assertIn("Could not read `certificates`", out)
+
+    def test_failing_managed_certificate_without_cert_manager_is_degraded(self):
+        def kubectl_json(args, env):
+            return 0, {
+                "items": [
+                    {
+                        "metadata": {"namespace": "prod", "name": "web-cert"},
+                        "status": {"certificateStatus": "FailedNotVisible"},
+                    }
+                ]
+            }
+
+        out = self._run_certs((0, audit_certificates.MANAGED_CERT_CRD), kubectl_json)
+        self.assertIn("- **cert_manager_installed:** `false`", out)
+        self.assertIn("ManagedCertificate `prod/web-cert`: FailedNotVisible", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_ready_certificate_past_renewal_or_failing_issuance_is_degraded(self):
+        def kubectl_json(args, env):
+            if "certificates.cert-manager.io" in args:
+                base = {
+                    "spec": {"secretName": "s", "issuerRef": {"kind": "ClusterIssuer", "name": "acme"}},
+                }
+                ready = {"type": "Ready", "status": "True", "reason": "Ready"}
+                return 0, {
+                    "items": [
+                        dict(
+                            base,
+                            metadata={"namespace": "prod", "name": "overdue"},
+                            status={
+                                "notAfter": "2099-01-01T00:00:00Z",
+                                "renewalTime": "2000-01-01T00:00:00Z",
+                                "conditions": [ready],
+                            },
+                        ),
+                        dict(
+                            base,
+                            metadata={"namespace": "prod", "name": "failing"},
+                            status={
+                                "notAfter": "2099-01-01T00:00:00Z",
+                                "conditions": [
+                                    ready,
+                                    {"type": "Issuing", "status": "False", "reason": "Failed", "message": "ACME order failed"},
+                                ],
+                            },
+                        ),
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
+        self.assertIn("2 total (0 Ready, 2 Unready/Degraded)", out)
+        self.assertIn("RenewalOverdue", out)
+        self.assertIn("ACME order failed", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+
 class TestAuditStorage(unittest.TestCase):
     def test_healthy_storage_emits_clean_stop(self):
         def fake_run_kubectl_json(args, env):
@@ -273,6 +346,26 @@ class TestAuditStorage(unittest.TestCase):
         self.assertIn("Storage Audit Verdict: Degradation Detected", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
+    def test_failed_listing_is_unread_not_empty(self):
+        def fake_run_kubectl_json(args, env):
+            if "pvc" in args:
+                return 1, {"error": "Command timed out after 15 seconds"}
+            return 0, {"items": []}
+
+        buf = io.StringIO()
+        with (
+            mock.patch.object(audit_storage, "run_kubectl_json", side_effect=fake_run_kubectl_json),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = audit_storage.audit_storage()
+
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("Storage Audit Verdict: Incomplete** (could not read: pvcs)", out)
+        self.assertIn("timed out", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
+
 
 class TestAuditNetworking(unittest.TestCase):
     def test_healthy_networking_emits_clean_stop(self):
@@ -344,6 +437,72 @@ class TestAuditNetworking(unittest.TestCase):
         self.assertIn("Networking Audit Verdict: Routing / VIP Degradation Detected", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
+    def _run_networking(self, fake_run_kubectl_json):
+        buf = io.StringIO()
+        with (
+            mock.patch.object(audit_networking, "run_kubectl_json", side_effect=fake_run_kubectl_json),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = audit_networking.audit_networking()
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_absent_optional_crd_is_empty_but_failed_core_kind_is_unread(self):
+        def absent_crds(args, env):
+            if any(".gateway.networking.k8s.io" in a or ".cloud.google.com" in a or ".networking.gke.io" in a for a in args):
+                return 1, {"error": 'error: the server doesn\'t have a resource type "gateways"'}
+            return 0, {"items": []}
+
+        self.assertIn("CLEAN_AUDIT_STOP: YES", self._run_networking(absent_crds))
+
+        def forbidden_ingress(args, env):
+            if "ingress" in args:
+                return 1, {"error": "Error from server (Forbidden): ingresses.networking.k8s.io is forbidden"}
+            return 0, {"items": []}
+
+        out = self._run_networking(forbidden_ingress)
+        self.assertIn("could not read: ingresses", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_gateway_programmed_false_and_failing_route_are_degraded(self):
+        def fake_run_kubectl_json(args, env):
+            if "gateways.gateway.networking.k8s.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "ext-gw"},
+                            "spec": {"gatewayClassName": "gke-l7-global-external-managed"},
+                            "status": {
+                                "addresses": [{"value": "34.100.1.3"}],
+                                "conditions": [
+                                    {"type": "Accepted", "status": "True", "reason": "Accepted"},
+                                    {"type": "Programmed", "status": "False", "reason": "Invalid"},
+                                ],
+                            },
+                        }
+                    ]
+                }
+            if "httproutes.gateway.networking.k8s.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "web"},
+                            "spec": {"parentRefs": [{"name": "ext-gw"}]},
+                            "status": {
+                                "parents": [
+                                    {"conditions": [{"type": "ResolvedRefs", "status": "False", "reason": "BackendNotFound"}]}
+                                ]
+                            },
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("1 unaccepted Gateways, 1 failing HTTPRoutes", out)
+        self.assertIn("NOT PROGRAMMED (Invalid)", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
 
 class TestAuditNetworkPolicies(unittest.TestCase):
     def test_network_policies_summary_and_clean_stop(self):
@@ -362,7 +521,14 @@ class TestAuditNetworkPolicies(unittest.TestCase):
                         {
                             "metadata": {"namespace": "prod", "name": "deny-all"},
                             "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
-                        }
+                        },
+                        {
+                            "metadata": {"namespace": "prod", "name": "db-only"},
+                            "spec": {
+                                "podSelector": {"matchExpressions": [{"key": "tier", "operator": "In", "values": ["db"]}]},
+                                "policyTypes": ["Ingress"],
+                            },
+                        },
                     ]
                 }
             return 0, {"items": []}
@@ -381,6 +547,10 @@ class TestAuditNetworkPolicies(unittest.TestCase):
         self.assertIn("- **Namespaces Without NetworkPolicies:** 2", out)
         self.assertIn("CLEAN_AUDIT_STOP: YES", out)
         self.assertIn("default, kube-system", out)
+        self.assertIn("deny-all", out)
+        db_line = next(line for line in out.splitlines() if "db-only" in line)
+        self.assertIn("matchExpressions", db_line)
+        self.assertNotIn("All Pods", db_line)
 
 
 if __name__ == "__main__":
