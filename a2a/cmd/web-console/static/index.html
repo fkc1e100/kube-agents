@@ -5317,6 +5317,9 @@
     }
 
     let upgradePollTimer = null;
+    // Set once this tab has seen a run in progress. A succeeded runner pod
+    // left from an earlier run is reported as history, not as this run's end.
+    let upgradeSeenRunning = false;
 
     async function pollUpgradeStatus() {
       const panel = $("upgrade-live-panel");
@@ -5336,8 +5339,12 @@
           logsEl.scrollTop = logsEl.scrollHeight;
         }
         if (data.state === "running") {
+          upgradeSeenRunning = true;
           if (badge) { badge.innerText = "Running in cluster…"; badge.style.color = "#1a73e8"; }
           if (btn) { btn.disabled = true; btn.innerText = "Upgrading in cluster…"; }
+        } else if (data.state === "succeeded" && !upgradeSeenRunning) {
+          if (badge) { badge.innerText = "Last in-cluster upgrade succeeded"; badge.style.color = "#137333"; }
+          if (upgradePollTimer) { clearInterval(upgradePollTimer); upgradePollTimer = null; }
         } else if (data.state === "succeeded") {
           if (badge) { badge.innerText = "Succeeded ✓ — Refreshing browser…"; badge.style.color = "#137333"; }
           if (btn) { btn.disabled = true; btn.innerText = "Upgrade complete ✓"; }
@@ -5370,6 +5377,7 @@
           if (btn) { btn.disabled = false; btn.innerText = "Run upgrade in cluster →"; }
           return;
         }
+        upgradeSeenRunning = true;
         await pollUpgradeStatus();
         if (!upgradePollTimer) upgradePollTimer = setInterval(pollUpgradeStatus, 2000);
       } catch (e) {

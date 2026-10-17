@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -137,7 +139,34 @@ func TestInstallManagedBy(t *testing.T) {
 	if m, _, _, app := installManagedBy(map[string]string{argoCDInstanceLabel: "kube-agents-prod", managedByLabel: "Helm"}, helm); m != "argocd" || app != "kube-agents-prod" {
 		t.Fatalf("argocd should win over helm: %s %s", m, app)
 	}
+	tracked := map[string]string{helmReleaseNameAnnotation: "kube-agents", argoCDTrackingAnnotation: "kube-agents-prod:kubeagents.x-k8s.io/PlatformAgent:kubeagents-system/platform-agent"}
+	if m, _, _, app := installManagedBy(map[string]string{managedByLabel: "Helm"}, tracked); m != "argocd" || app != "kube-agents-prod" {
+		t.Fatalf("annotation-tracked argocd should win over helm: %s %s", m, app)
+	}
 	if m, rel, _, _ := installManagedBy(nil, nil); m != "unknown" || rel != "" {
 		t.Fatalf("unknown: %s %s", m, rel)
+	}
+}
+
+func TestKubeClientRereadsTheRotatedToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	k := &kubeClient{token: "startup", tokenPath: path}
+	if got := k.bearer(); got != "first" {
+		t.Fatalf("bearer = %q, want first", got)
+	}
+	if err := os.WriteFile(path, []byte("rotated"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := k.bearer(); got != "rotated" {
+		t.Errorf("bearer after rotation = %q, want rotated", got)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := k.bearer(); got != "startup" {
+		t.Errorf("bearer with the file gone = %q, want the startup token", got)
 	}
 }
