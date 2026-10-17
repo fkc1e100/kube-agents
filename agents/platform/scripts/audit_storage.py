@@ -16,6 +16,9 @@ import os
 import subprocess
 import sys
 
+# How much of a failed query's error text the unread list shows per kind.
+UNREAD_REASON_MAX_CHARS = 200
+
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
     cmd = ["kubectl"] + args + ["-o", "json"]
@@ -31,7 +34,7 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
         )
         if res.returncode == 0 and res.stdout.strip():
             return 0, json.loads(res.stdout)
-        return res.returncode, {}
+        return res.returncode or 1, {"error": res.stderr.strip() or f"kubectl exit {res.returncode} with no output"}
     except Exception as e:
         return 1, {"error": str(e)}
 
@@ -51,6 +54,8 @@ def audit_storage(kubeconfig: str | None = None) -> int:
     }
 
     results = {}
+    # Kinds whose listing failed (timeout, Forbidden, cut or unparseable reply): never read as empty.
+    unread: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
         future_to_key = {
             executor.submit(run_kubectl_json, args, env): key
@@ -60,9 +65,11 @@ def audit_storage(kubeconfig: str | None = None) -> int:
             key = future_to_key[future]
             try:
                 code, data = future.result()
-                results[key] = data if code == 0 else {}
-            except Exception:
-                results[key] = {}
+            except Exception as e:
+                code, data = 1, {"error": str(e)}
+            results[key] = data if code == 0 else {}
+            if code != 0:
+                unread[key] = str(data.get("error", ""))[:UNREAD_REASON_MAX_CHARS]
 
     pvc_items = results.get("pvcs", {}).get("items", [])
     pv_items = results.get("pvs", {}).get("items", [])
@@ -180,7 +187,13 @@ def audit_storage(kubeconfig: str | None = None) -> int:
 
     # Stop-on-Clean Rule Status
     is_clean = len(pending_pvcs) == 0 and len(unhealthy_pvs) == 0 and len(attachment_errors) == 0
-    if is_clean:
+    if unread:
+        print(f"**Storage Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}).")
+        print("CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy.\n")
+        for key, reason in sorted(unread.items()):
+            print(f"- `{key}`: {reason}")
+        print("")
+    elif is_clean:
         print("**Storage Audit Verdict: Clean & Fully Healthy** (All PVCs Bound, 0 Failed PVs, 0 VolumeAttachment Errors).")
         print("CLEAN_AUDIT_STOP: YES — All storage resources are healthy; call kanban_complete immediately.\n")
     else:

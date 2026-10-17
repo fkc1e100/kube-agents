@@ -16,6 +16,12 @@ import os
 import subprocess
 import sys
 
+# How much of a failed query's error text the unread list shows per kind.
+UNREAD_REASON_MAX_CHARS = 200
+# Optional CRD kinds: kubectl's "no such resource type" error for these means the kind is not installed.
+OPTIONAL_CRD_KEYS = frozenset({"gateways", "httproutes", "backendconfigs", "healthcheckpolicies"})
+MISSING_RESOURCE_TYPE_MARKER = "doesn't have a resource type"
+
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
     cmd = ["kubectl"] + args + ["-o", "json"]
@@ -31,7 +37,7 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
         )
         if res.returncode == 0 and res.stdout.strip():
             return 0, json.loads(res.stdout)
-        return res.returncode, {}
+        return res.returncode or 1, {"error": res.stderr.strip() or f"kubectl exit {res.returncode} with no output"}
     except Exception as e:
         return 1, {"error": str(e)}
 
@@ -53,6 +59,8 @@ def audit_networking(kubeconfig: str | None = None) -> int:
     }
 
     results = {}
+    # Kinds whose listing failed (timeout, Forbidden, cut or unparseable reply): never read as empty.
+    unread: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=6) as executor:
         future_to_key = {
             executor.submit(run_kubectl_json, args, env): key
@@ -62,9 +70,12 @@ def audit_networking(kubeconfig: str | None = None) -> int:
             key = future_to_key[future]
             try:
                 code, data = future.result()
-                results[key] = data if code == 0 else {}
-            except Exception:
-                results[key] = {}
+            except Exception as e:
+                code, data = 1, {"error": str(e)}
+            results[key] = data if code == 0 else {}
+            error = str(data.get("error", ""))
+            if code != 0 and not (key in OPTIONAL_CRD_KEYS and MISSING_RESOURCE_TYPE_MARKER in error):
+                unread[key] = error[:UNREAD_REASON_MAX_CHARS]
 
     svc_items = results.get("services", {}).get("items", [])
     ing_items = results.get("ingresses", {}).get("items", [])
@@ -118,7 +129,8 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         conditions = item.get("status", {}).get("conditions", []) or []
         prog_cond = next((c for c in conditions if c.get("type") in ("Programmed", "Ready")), {})
         acc_cond = next((c for c in conditions if c.get("type") == "Accepted"), {})
-        is_programmed = prog_cond.get("status") == "True" or acc_cond.get("status") == "True"
+        # Programmed/Ready decides when present; Accepted alone only speaks for a Gateway that reports neither.
+        is_programmed = (prog_cond or acc_cond).get("status") == "True"
         reason = prog_cond.get("reason") or acc_cond.get("reason") or "Accepted"
 
         gw_info = {
@@ -135,6 +147,7 @@ def audit_networking(kubeconfig: str | None = None) -> int:
 
     # 3. Parse HTTPRoutes
     route_list = []
+    degraded_routes = []
     for item in route_items:
         ns = item.get("metadata", {}).get("namespace", "default")
         name = item.get("metadata", {}).get("name", "")
@@ -143,18 +156,23 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         parent_names = [p.get("name", "") for p in parents if p.get("name")]
 
         conditions = []
+        route_failed = False
         for p in item.get("status", {}).get("parents", []) or []:
             for c in p.get("conditions", []) or []:
                 if c.get("type") in ("Accepted", "ResolvedRefs"):
                     conditions.append(f"{c.get('type')}={c.get('status')}")
+                    route_failed = route_failed or c.get("status") == "False"
 
-        route_list.append({
+        route_info = {
             "namespace": ns,
             "name": name,
             "hostnames": ", ".join(hostnames),
             "parents": ", ".join(parent_names) or "None",
             "status": ", ".join(conditions) or "Attached",
-        })
+        }
+        route_list.append(route_info)
+        if route_failed:
+            degraded_routes.append(route_info)
 
     # 4. Parse Services (Focus on LoadBalancer & NodePort)
     lb_services = []
@@ -216,19 +234,25 @@ def audit_networking(kubeconfig: str | None = None) -> int:
 
     print("## Kubernetes Ingress & Gateway Fleet Audit\n")
     print(f"- **Ingress Resources:** {total_ingresses} total ({total_ingresses - len(unassigned_ingresses)} Assigned IP, {len(unassigned_ingresses)} Pending/Unallocated)")
-    print(f"- **Gateway API (Gateways):** {total_gateways} total ({total_gateways - len(unaccepted_gateways)} Programmed/Accepted, {len(unaccepted_gateways)} Unaccepted/Pending)")
-    print(f"- **Gateway API (HTTPRoutes):** {total_routes} routes active")
+    print(f"- **Gateway API (Gateways):** {total_gateways} total ({total_gateways - len(unaccepted_gateways)} Programmed with an address, {len(unaccepted_gateways)} Not Programmed or no address)")
+    print(f"- **Gateway API (HTTPRoutes):** {total_routes} total ({len(degraded_routes)} with Accepted=False or ResolvedRefs=False)")
     print(f"- **LoadBalancer Services:** {total_lbs} total ({total_lbs - len(pending_lb)} Active VIP, {len(pending_lb)} Pending VIP)")
     print(f"- **NodePort Services:** {total_nps} total | **Internal ClusterIP Services:** {cluster_ip_count}")
     print(f"- **GKE Extensions:** {len(bc_list)} BackendConfigs, {len(hcp_list)} HealthCheckPolicies\n")
 
     # Stop-on-Clean Rule Status
-    is_clean = len(unassigned_ingresses) == 0 and len(unaccepted_gateways) == 0 and len(pending_lb) == 0
-    if is_clean:
+    is_clean = not (unassigned_ingresses or unaccepted_gateways or pending_lb or degraded_routes)
+    if unread:
+        print(f"**Networking Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}).")
+        print("CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy.\n")
+        for key, reason in sorted(unread.items()):
+            print(f"- `{key}`: {reason}")
+        print("")
+    elif is_clean:
         print("**Networking Audit Verdict: Clean & Fully Programmed** (All Ingresses, Gateways, and LoadBalancers have healthy allocated IPs and valid routing).")
         print("CLEAN_AUDIT_STOP: YES — All Ingress, Gateway, and LoadBalancer resources are healthy; call kanban_complete immediately.\n")
     else:
-        print(f"**Networking Audit Verdict: Routing / VIP Degradation Detected** ({len(unassigned_ingresses)} unassigned Ingresses, {len(unaccepted_gateways)} unaccepted Gateways, {len(pending_lb)} pending LoadBalancers).")
+        print(f"**Networking Audit Verdict: Routing / VIP Degradation Detected** ({len(unassigned_ingresses)} unassigned Ingresses, {len(unaccepted_gateways)} unaccepted Gateways, {len(degraded_routes)} failing HTTPRoutes, {len(pending_lb)} pending LoadBalancers).")
         print("CLEAN_AUDIT_STOP: NO — Inspect degraded networking resources below.\n")
 
     if gateway_list:
@@ -236,7 +260,7 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         print(f"{'NAMESPACE':<22} {'NAME':<30} {'CLASS':<25} {'ADDRESS':<20} {'STATUS'}")
         print("-" * 115)
         for g in gateway_list:
-            status_str = "Programmed / Accepted" if g["programmed"] else f"UNACCEPTED ({g['reason']})"
+            status_str = "Programmed" if g["programmed"] else f"NOT PROGRAMMED ({g['reason']})"
             print(f"{g['namespace']:<22} {g['name']:<30} {g['class']:<25} {g['addresses']:<20} {status_str}")
         print("")
 

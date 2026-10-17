@@ -84,7 +84,8 @@ def audit_network_policies(kubeconfig: str | None = None) -> int:
         ns = meta.get("namespace", "default")
         name = meta.get("name", "")
         spec = item.get("spec", {}) or {}
-        pod_sel = spec.get("podSelector", {}).get("matchLabels", {})
+        # The whole selector (matchLabels and matchExpressions); only a literal {} selects every pod.
+        pod_sel = spec.get("podSelector", {}) or {}
         policy_types = spec.get("policyTypes", [])
         has_ingress = "Ingress" in policy_types or "ingress" in spec
         has_egress = "Egress" in policy_types or "egress" in spec

@@ -4,7 +4,9 @@
 Discovers whether cert-manager.io CRDs exist (full, partial, or absent), audits
 Certificates, Issuers, ClusterIssuers, CertificateRequests, GKE ManagedCertificates,
 and native kubernetes.io/tls Secrets (count & namespaces) in parallel in <2 seconds.
-Always emits CLEAN_AUDIT_STOP: YES when 0 unhealthy or expiring certificates exist.
+Emits CLEAN_AUDIT_STOP: YES only when every queried kind was read and no Certificate is
+unready, expired, renewal-overdue or failing issuance, no Issuer is unready, and no
+ManagedCertificate is outside Active. Native TLS Secrets are counted, not checked for expiry.
 Part of kube-agents #3285.
 """
 
@@ -25,6 +27,14 @@ CERT_MANAGER_CRDS = (
     "clusterissuers.cert-manager.io",
     "certificaterequests.cert-manager.io",
 )
+MANAGED_CERT_CRD = "managedcertificates.networking.gke.io"
+MANAGED_CERT_ACTIVE = "Active"
+# cert-manager sets Issuing=False with this reason when an issuance or renewal attempt fails.
+ISSUING_FAILED_REASON = "Failed"
+# How much of a failed query's error text the unread list shows per kind.
+UNREAD_REASON_MAX_CHARS = 200
+# Metadata-only Secret listing, so no tls.key or tls.crt payload leaves the credential proxy.
+TLS_SECRET_COLUMNS = "custom-columns=NS:.metadata.namespace,NAME:.metadata.name,CREATED:.metadata.creationTimestamp"
 
 
 def run_cmd(args: list[str], env: dict[str, str]) -> tuple[int, str]:
@@ -38,7 +48,7 @@ def run_cmd(args: list[str], env: dict[str, str]) -> tuple[int, str]:
             timeout=15,
             check=False,
         )
-        return res.returncode, res.stdout.strip()
+        return res.returncode, res.stdout.strip() if res.returncode == 0 else res.stderr.strip()
     except Exception as e:
         return 1, str(e)
 
@@ -57,26 +67,26 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
         )
         if res.returncode == 0 and res.stdout.strip():
             return 0, json.loads(res.stdout)
-        return res.returncode, {"stderr": res.stderr.strip()}
+        return res.returncode or 1, {"stderr": res.stderr.strip() or f"kubectl exit {res.returncode} with no output"}
     except Exception as e:
         return 1, {"error": str(e)}
 
 
-def summarize_tls_secrets(sec_code: int, sec_data: dict) -> tuple[list[dict], str]:
-    """Summarize kubernetes.io/tls secrets (count & namespaces) without reading secret payloads."""
+def summarize_tls_secrets(sec_code: int, sec_out: str) -> tuple[list[dict], str]:
+    """Summarize kubernetes.io/tls secrets (count & namespaces) from a metadata-only listing."""
     if sec_code != 0:
-        stderr = str(sec_data.get("stderr", "") or sec_data.get("error", ""))
-        if "Forbidden" in stderr or "forbidden" in stderr:
+        if "forbidden" in sec_out.lower():
             return [], "0 inspectable (RBAC restricts cluster-wide Secret listing; 0 TLS errors reported)"
-        return [], "0 secret(s) found"
+        return [], f"could not be listed ({sec_out[:UNREAD_REASON_MAX_CHARS]})"
 
     tls_secrets: list[dict] = []
     ns_counts: Counter[str] = Counter()
-    for item in sec_data.get("items", []):
-        meta = item.get("metadata", {}) or {}
-        ns = meta.get("namespace", "default")
-        name = meta.get("name", "")
-        created = meta.get("creationTimestamp", "N/A")
+    for line in sec_out.splitlines():
+        fields = line.split()
+        if len(fields) < 2:
+            continue
+        ns, name = fields[0], fields[1]
+        created = fields[2] if len(fields) > 2 else "N/A"
         tls_secrets.append({"namespace": ns, "name": name, "created": created})
         ns_counts[ns] += 1
 
@@ -87,28 +97,19 @@ def summarize_tls_secrets(sec_code: int, sec_data: dict) -> tuple[list[dict], st
     return tls_secrets, f"{len(tls_secrets)} secret(s) across {len(ns_counts)} namespace(s) [{ns_summary}]"
 
 
-def discover_installed_crds(env: dict[str, str]) -> set[str]:
-    """Return the set of installed cert-manager.io CRDs."""
+def discover_installed_crds(env: dict[str, str]) -> tuple[set[str] | None, str]:
+    """Return (installed cert-manager.io and ManagedCertificate CRDs, error); None when the listing failed."""
     code, out = run_cmd(
         ["kubectl", "get", "crd", "-o", "custom-columns=NAME:.metadata.name", "--no-headers"],
         env=env,
     )
-    if code == 0 and out:
-        return {
-            line.strip()
-            for line in out.splitlines()
-            if line.strip().endswith(".cert-manager.io")
-            or line.strip() == "managedcertificates.networking.gke.io"
-        }
-
-    # Fallback compatibility probe used by unit tests or restricted CRD listing
-    code_fb, out_fb = run_cmd(
-        ["kubectl", "get", "crd", "certificates.cert-manager.io", "issuers.cert-manager.io", "--no-headers"],
-        env=env,
-    )
-    if code_fb == 0 and out_fb:
-        return set(CERT_MANAGER_CRDS)
-    return set()
+    if code != 0:
+        return None, out[:UNREAD_REASON_MAX_CHARS]
+    return {
+        line.strip()
+        for line in out.splitlines()
+        if line.strip().endswith(".cert-manager.io") or line.strip() == MANAGED_CERT_CRD
+    }, ""
 
 
 def audit_certificates(kubeconfig: str | None = None) -> int:
@@ -118,20 +119,18 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
     if kubeconfig:
         env["KUBECONFIG"] = kubeconfig
 
-    installed_crds = discover_installed_crds(env)
+    installed_crds, crd_error = discover_installed_crds(env)
+    if installed_crds is None:
+        print("## Cert-Manager & TLS Certificate Fleet Audit\n")
+        print(f"- **cert-manager Status:** UNKNOWN (CRD listing failed: {crd_error})\n")
+        print("**Certificate Audit Verdict: Incomplete** (could not read: customresourcedefinitions).")
+        print("CLEAN_AUDIT_STOP: NO — Report certificate health as unread, not healthy.\n")
+        return 0
     cm_crds = sorted(c for c in installed_crds if c.endswith(".cert-manager.io"))
     cert_manager_installed = len(cm_crds) > 0
 
     # Build concurrent queries for all installed CRDs + native kubernetes.io/tls secrets
-    tasks: dict[str, list[str]] = {
-        "tls_secrets": [
-            "get",
-            "secrets",
-            "-A",
-            "--field-selector",
-            "type=kubernetes.io/tls",
-        ],
-    }
+    tasks: dict[str, list[str]] = {}
     if "certificates.cert-manager.io" in installed_crds:
         tasks["certificates"] = ["get", "certificates.cert-manager.io", "-A"]
     if "issuers.cert-manager.io" in installed_crds:
@@ -140,11 +139,16 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         tasks["clusterissuers"] = ["get", "clusterissuers.cert-manager.io"]
     if "certificaterequests.cert-manager.io" in installed_crds:
         tasks["certrequests"] = ["get", "certificaterequests.cert-manager.io", "-A"]
-    if "managedcertificates.networking.gke.io" in installed_crds:
-        tasks["managedcerts"] = ["get", "managedcertificates.networking.gke.io", "-A"]
+    if MANAGED_CERT_CRD in installed_crds:
+        tasks["managedcerts"] = ["get", MANAGED_CERT_CRD, "-A"]
 
     results: dict[str, tuple[int, dict]] = {}
-    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as executor:
+    with ThreadPoolExecutor(max_workers=len(tasks) + 1) as executor:
+        sec_future = executor.submit(
+            run_cmd,
+            ["kubectl", "get", "secrets", "-A", "--field-selector", "type=kubernetes.io/tls", "-o", TLS_SECRET_COLUMNS, "--no-headers"],
+            env,
+        )
         future_to_key = {
             executor.submit(run_kubectl_json, args, env): key
             for key, args in tasks.items()
@@ -155,17 +159,43 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
                 results[key] = future.result()
             except Exception as e:
                 results[key] = (1, {"error": str(e)})
+        sec_code, sec_out = sec_future.result()
 
-    sec_code, sec_data = results.get("tls_secrets", (1, {}))
-    tls_secrets, tls_summary_str = summarize_tls_secrets(sec_code, sec_data)
+    tls_secrets, tls_summary_str = summarize_tls_secrets(sec_code, sec_out)
+    tls_summary_str += " (count only; expiry not inspected)"
+    # A queried kind that failed (timeout, Forbidden, cut or unparseable reply) is unread, never empty.
+    unread = {
+        key: str(data.get("stderr") or data.get("error") or "")[:UNREAD_REASON_MAX_CHARS]
+        for key, (code, data) in results.items()
+        if code != 0
+    }
+    mc_items = results.get("managedcerts", (1, {}))[1].get("items", [])
+    unhealthy_mcs = [
+        (mc.get("metadata", {}).get("namespace", ""), mc.get("metadata", {}).get("name", ""), mc.get("status", {}).get("certificateStatus", "Unknown"))
+        for mc in mc_items
+        if mc.get("status", {}).get("certificateStatus") != MANAGED_CERT_ACTIVE
+    ]
+
+    def print_incomplete_or_mc_failures() -> bool:
+        """Print the unread kinds and failing ManagedCertificates; True when either exists."""
+        for key, reason in sorted(unread.items()):
+            print(f"- Could not read `{key}`: {reason}")
+        for ns, name, cert_status in unhealthy_mcs:
+            print(f"- ManagedCertificate `{ns}/{name}`: {cert_status}")
+        if unread or unhealthy_mcs:
+            print(f"\n**Certificate Audit Verdict: Incomplete or Degraded** ({len(unread)} unread kinds, {len(unhealthy_mcs)} ManagedCertificates not Active).")
+            print("CLEAN_AUDIT_STOP: NO — Report unread kinds as unread and failing ManagedCertificates as degraded.\n")
+        return bool(unread or unhealthy_mcs)
 
     if not cert_manager_installed:
         print("## Cert-Manager & TLS Certificate Fleet Audit\n")
         print("- **cert_manager_installed:** `false`")
         print("- **cert-manager Status:** NOT INSTALLED on this cluster (0 `cert-manager.io` CRDs found).")
+        print(f"- **GKE ManagedCertificates:** {len(mc_items)} total ({len(unhealthy_mcs)} not Active)")
         print(f"- **Native TLS Secrets (`kubernetes.io/tls`):** {tls_summary_str}\n")
-        print("**Certificate Audit Verdict: Clean / Not Installed** (cert-manager is not active on this cluster; zero errors).")
-        print("CLEAN_AUDIT_STOP: YES — No expiring or failed certificates/issuers found; call kanban_complete immediately.\n")
+        if not print_incomplete_or_mc_failures():
+            print("**Certificate Audit Verdict: Clean / Not Installed** (cert-manager is not active on this cluster; 0 failing ManagedCertificates).")
+            print("CLEAN_AUDIT_STOP: YES — No failed certificates found; native TLS Secrets were counted, not checked for expiry; call kanban_complete immediately.\n")
 
         if tls_secrets:
             print("### Active TLS Secrets")
@@ -176,11 +206,10 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
             print("")
         return 0
 
-    cert_items = results.get("certificates", (0, {}))[1].get("items", []) if results.get("certificates", (1, {}))[0] == 0 else []
-    issuer_items = results.get("issuers", (0, {}))[1].get("items", []) if results.get("issuers", (1, {}))[0] == 0 else []
-    ci_items = results.get("clusterissuers", (0, {}))[1].get("items", []) if results.get("clusterissuers", (1, {}))[0] == 0 else []
-    cr_items = results.get("certrequests", (0, {}))[1].get("items", []) if results.get("certrequests", (1, {}))[0] == 0 else []
-    mc_items = results.get("managedcerts", (0, {}))[1].get("items", []) if results.get("managedcerts", (1, {}))[0] == 0 else []
+    cert_items = results.get("certificates", (1, {}))[1].get("items", [])
+    issuer_items = results.get("issuers", (1, {}))[1].get("items", [])
+    ci_items = results.get("clusterissuers", (1, {}))[1].get("items", [])
+    cr_items = results.get("certrequests", (1, {}))[1].get("items", [])
 
     # Parse Certificates
     cert_list = []
@@ -200,6 +229,16 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         is_ready = ready_cond.get("status") == "True"
         reason = ready_cond.get("reason", "Ready" if is_ready else "NotReady")
         message = ready_cond.get("message", "")
+        issuing_cond = next((c for c in conditions if c.get("type") == "Issuing"), {})
+        if issuing_cond.get("status") == "False" and issuing_cond.get("reason") == ISSUING_FAILED_REASON:
+            is_ready, reason, message = False, "IssuingFailed", issuing_cond.get("message", message)
+        renewal_str = status.get("renewalTime", "")
+        try:
+            if is_ready and renewal_str and datetime.fromisoformat(renewal_str.replace("Z", "+00:00")) < now:
+                is_ready, reason = False, "RenewalOverdue"
+                message = message or f"renewalTime {renewal_str} has passed without a renewal"
+        except ValueError:
+            pass
 
         not_after_str = status.get("notAfter", "")
         days_remaining_str = "N/A"
@@ -294,16 +333,18 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
     print(f"- **cert-manager Status:** {crd_mode}")
     print(f"- **Certificates:** {total_certs} total ({ready_certs} Ready, {len(unready_certs)} Unready/Degraded)")
     print(f"- **Issuers & ClusterIssuers:** {total_issuers} total ({ready_issuers} Ready, {len(unready_issuers)} Unready)")
-    print(f"- **Active CertificateRequests:** {len(cr_items)} | **GKE ManagedCertificates:** {len(mc_items)}")
+    print(f"- **Active CertificateRequests:** {len(cr_items)} | **GKE ManagedCertificates:** {len(mc_items)} ({len(unhealthy_mcs)} not Active)")
     print(f"- **Native TLS Secrets (`kubernetes.io/tls`):** {tls_summary_str}\n")
 
     is_clean = len(unready_certs) == 0 and len(unready_issuers) == 0
-    if is_clean:
+    blocked = print_incomplete_or_mc_failures()
+    if is_clean and not blocked:
         print("**Certificate Audit Verdict: Clean & Fully Valid** (All Certificates & Issuers are Ready, 0 renewal errors).")
-        print("CLEAN_AUDIT_STOP: YES — No expiring or failed certificates/issuers found; call kanban_complete immediately.\n")
-    else:
+        print("CLEAN_AUDIT_STOP: YES — No failed, expired, or renewal-overdue certificates/issuers found; native TLS Secrets were counted, not checked for expiry; call kanban_complete immediately.\n")
+    elif not is_clean:
         print(f"**Certificate Audit Verdict: Degraded Certificates Detected** ({len(unready_certs)} unready certs, {len(unready_issuers)} unready issuers).")
-        print("CLEAN_AUDIT_STOP: NO — Inspect degraded certificates/issuers listed below.\n")
+        if not blocked:
+            print("CLEAN_AUDIT_STOP: NO — Inspect degraded certificates/issuers listed below.\n")
 
     if cert_list:
         print("### Certificates")
