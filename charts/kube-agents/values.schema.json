@@ -1391,6 +1391,23 @@
             }
           }
         },
+        "agentIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "gcpServiceAccount": {
+              "type": "string"
+            },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^,]+$"
+              }
+            }
+          }
+        },
         "resources": {
           "type": "object"
         },

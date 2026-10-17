@@ -27,22 +27,36 @@ limitations under the License.
 //
 //   - every route but /healthz refuses a Host header that is not loopback,
 //     which defeats DNS rebinding against the forwarded port;
-//   - POST /api/chat requires a custom header and a JSON body, so a page on
-//     another origin cannot send a turn without a CORS preflight this server
-//     never answers;
+//   - POST /api/chat and /api/chat/stream require a custom header and a
+//     JSON body, so a page on another origin cannot send a turn without a
+//     CORS preflight this server never answers;
 //   - every response forbids framing, so another page cannot overlay the
 //     console and trick a click into sending a turn.
 //
-// Each browser tab mints its own Hermes session ID with a "web-console-"
-// prefix. A client may only name a session with that prefix, so the console
-// cannot be used to post into the event watcher's triage sessions or any
-// other caller's.
+// Each console thread has its own Hermes session ID with a "web-console-"
+// prefix, minted by the page. A turn may also name an event triage or
+// scheduled session, to reply in the thread the cluster opened. That ID is
+// checked against Hermes' record of the session (source and title) before
+// the turn, and such a session is never created or recreated here. Slack,
+// Google Chat and every other caller's session are refused.
 //
 // A turn reaches the Planning Agent, the same front door a chat message
 // reaches. When it delegates work to a kanban card, the card's result arrives
 // later as a new assistant message on the same session, after the turn's own
 // reply has been returned. The page polls GET /api/sessions/{id}/messages for
 // those, through a route limited to this console's own session IDs.
+//
+// Two read-only routes sit beside the chat. GET /api/insights (insights.go)
+// returns the model, LiteLLM's token and spend counters, the agent's identity
+// as recorded at install, and the cluster. GET /api/sessions/{id}/transcript
+// (activity.go) returns the text of an event triage, scheduled check or
+// console session, and refuses every other session, Slack and Google Chat
+// included. GET /api/channels/{name}/posts (channels.go) lists the event
+// triage sessions as #alerts and the scheduled checks as #scheduled.
+//
+// POST /api/chat/stream (stream.go) runs the same turn as POST /api/chat and
+// relays one status line per agent step as server-sent events, then the
+// reply. The page falls back to /api/chat when the route is missing.
 package main
 
 import (
@@ -78,6 +92,17 @@ const (
 	envClusterName  = "CLUSTER_NAME"
 	envProjectID    = "PROJECT_ID"
 	envLocation     = "LOCATION"
+	// The model, usage and identity sources the insights banner reads; see
+	// insights.go.
+	envModelName        = "MODEL_NAME"
+	envModelProvider    = "MODEL_PROVIDER"
+	envLiteLLMPeersHost = "LITELLM_PEERS_HOST"
+	envAgentKSA         = "AGENT_KSA"
+	envAgentGSA         = "AGENT_GSA"
+	envAgentRoles       = "AGENT_ROLES"
+	envChatPlatform     = "CHAT_PLATFORM"
+	// agentRolesSeparator splits AGENT_ROLES, which the chart joins with it.
+	agentRolesSeparator = ","
 
 	// turnTimeout matches the in-tree callers of the same endpoint
 	// (session_kv_server.py's _start_agent_turn): a diagnostic turn that
@@ -94,6 +119,17 @@ const (
 	sessionCreateTimeout = 15 * time.Second
 	sessionListTimeout   = 10 * time.Second
 	messagesTimeout      = 10 * time.Second
+	sessionLookupTimeout = 10 * time.Second
+
+	// agentBusyWindow is how recently an agent session must have been
+	// active for an unanswered newest message to count as a turn in
+	// progress. Older than this, the turn is taken to have died, and a
+	// reply is let through.
+	agentBusyWindow = 10 * time.Minute
+	// agentBusyPageLimit is how many of the newest messages the busy check
+	// reads.
+	agentBusyPageLimit = 5
+	agentBusyDetail    = "The agent is still working on this thread; try again once it has answered, or after the 10-minute window passes."
 
 	// maxRequestBodyBytes bounds a chat request. A turn is a typed message,
 	// and the container's memory limit is 128Mi.
@@ -158,6 +194,14 @@ type config struct {
 	ClusterName  string
 	ProjectID    string
 	Location     string
+
+	ModelName        string
+	ModelProvider    string
+	LiteLLMPeersHost string
+	AgentKSA         string
+	AgentGSA         string
+	AgentRoles       []string
+	ChatPlatform     string
 }
 
 func loadConfig() config {
@@ -168,8 +212,28 @@ func loadConfig() config {
 		ClusterName:  os.Getenv(envClusterName),
 		ProjectID:    os.Getenv(envProjectID),
 		Location:     os.Getenv(envLocation),
+
+		ModelName:        os.Getenv(envModelName),
+		ModelProvider:    os.Getenv(envModelProvider),
+		LiteLLMPeersHost: strings.TrimSpace(os.Getenv(envLiteLLMPeersHost)),
+		AgentKSA:         os.Getenv(envAgentKSA),
+		AgentGSA:         os.Getenv(envAgentGSA),
+		AgentRoles:       splitList(os.Getenv(envAgentRoles), agentRolesSeparator),
+		ChatPlatform:     strings.TrimSpace(os.Getenv(envChatPlatform)),
 	}
 	return cfg
+}
+
+// splitList splits a separated list, trimming each item and dropping empty
+// ones, so an unset variable yields an empty list.
+func splitList(raw, sep string) []string {
+	out := []string{}
+	for _, item := range strings.Split(raw, sep) {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {
@@ -179,8 +243,9 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// server holds the console's handlers and the one piece of mutable state it
-// keeps: which sessions have a turn in flight.
+// server holds the console's handlers and the mutable state it keeps: which
+// sessions have a turn in flight, the last LiteLLM usage read, and the
+// session summaries already computed.
 type server struct {
 	cfg           config
 	client        *http.Client
@@ -188,15 +253,36 @@ type server struct {
 
 	mu       sync.Mutex
 	inflight map[string]bool
+
+	// resolver finds the LiteLLM replicas and fetchMetrics reads one of
+	// them. Tests replace both.
+	resolver     hostResolver
+	fetchMetrics metricsFetcher
+	peerPort     string
+	usage        usageCache
+
+	summaries summaryCache
+
+	// streamCeiling bounds one streamed turn; streamTurnCeiling, or less
+	// in tests.
+	streamCeiling time.Duration
 }
 
 func newServer(cfg config) *server {
-	return &server{
+	s := &server{
 		cfg:           cfg,
 		client:        &http.Client{}, // deadlines come from each request's context
 		createTimeout: sessionCreateTimeout,
 		inflight:      map[string]bool{},
+		resolver:      net.DefaultResolver,
+		peerPort:      litellmMetricsPort,
+		summaries: summaryCache{
+			entries: map[string]summaryEntry{},
+		},
+		streamCeiling: streamTurnCeiling,
 	}
+	s.fetchMetrics = s.fetchPeerMetrics
+	return s
 }
 
 func (s *server) routes() http.Handler {
@@ -210,7 +296,11 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/status", s.requireLocalHost(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("GET /api/sessions/recent", s.requireLocalHost(http.HandlerFunc(s.handleRecentSessions)))
 	mux.Handle("GET /api/sessions/{id}/messages", s.requireLocalHost(http.HandlerFunc(s.handleSessionMessages)))
+	mux.Handle("GET /api/sessions/{id}/transcript", s.requireLocalHost(http.HandlerFunc(s.handleTranscript)))
+	mux.Handle("GET /api/channels/{name}/posts", s.requireLocalHost(http.HandlerFunc(s.handleChannelPosts)))
+	mux.Handle("GET /api/insights", s.requireLocalHost(http.HandlerFunc(s.handleInsights)))
 	mux.Handle("POST /api/chat", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChat))))
+	mux.Handle("POST /api/chat/stream", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChatStream))))
 	return denyFraming(mux)
 }
 
@@ -278,10 +368,11 @@ type upstreamStatus struct {
 }
 
 type statusResponse struct {
-	Cluster  string         `json:"cluster"`
-	Project  string         `json:"project"`
-	Location string         `json:"location"`
-	Agent    upstreamStatus `json:"agent"`
+	Cluster      string         `json:"cluster"`
+	Project      string         `json:"project"`
+	Location     string         `json:"location"`
+	ChatPlatform string         `json:"chat_platform,omitempty"`
+	Agent        upstreamStatus `json:"agent"`
 }
 
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -298,63 +389,93 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		agent.Detail = fmt.Sprintf("agent gateway answered HTTP %d", resp.StatusCode)
 	}
 	writeJSON(w, http.StatusOK, statusResponse{
-		Cluster:  s.cfg.ClusterName,
-		Project:  s.cfg.ProjectID,
-		Location: s.cfg.Location,
-		Agent:    agent,
+		Cluster:      s.cfg.ClusterName,
+		Project:      s.cfg.ProjectID,
+		Location:     s.cfg.Location,
+		ChatPlatform: s.cfg.ChatPlatform,
+		Agent:        agent,
 	})
 }
 
-// recentSession is the subset of a Hermes session row the page shows. The
-// message preview is left out on purpose: the list covers sessions this
-// console did not open, and their titles say enough.
+// recentSession is the subset of a Hermes session row the page shows.
+// Hermes' message preview is left out on purpose. Kind is added here. Summary
+// is set only on channel posts (channels.go), for the kinds summaryKinds
+// lists, so a Slack or Google Chat session shows its title and nothing else.
 type recentSession struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	Source       string   `json:"source"`
-	StartedAt    *float64 `json:"started_at"`
-	LastActive   *float64 `json:"last_active"`
-	MessageCount *int     `json:"message_count"`
-	Console      bool     `json:"console"`
+	ID           string          `json:"id"`
+	Title        string          `json:"title"`
+	Source       string          `json:"source"`
+	StartedAt    *float64        `json:"started_at"`
+	LastActive   *float64        `json:"last_active"`
+	MessageCount *int            `json:"message_count"`
+	Console      bool            `json:"console"`
+	Kind         string          `json:"kind"`
+	Summary      *sessionSummary `json:"summary,omitempty"`
 }
 
 func (s *server) handleRecentSessions(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), sessionListTimeout)
 	defer cancel()
-	path := fmt.Sprintf("/api/sessions?limit=%d", recentSessionsLimit)
+	sessions, failure := s.listSessions(ctx, fmt.Sprintf("/api/sessions?limit=%d", recentSessionsLimit))
+	if failure != nil {
+		writeError(w, failure.status, failure.code, failure.message)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+// listSessions reads one Hermes session list and sets each row's kind.
+func (s *server) listSessions(ctx context.Context, path string) ([]recentSession, *upstreamFailure) {
 	resp, err := s.hermes(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "agent_unreachable", "Could not reach the agent gateway: "+err.Error())
-		return
+		return nil, &upstreamFailure{http.StatusBadGateway, "agent_unreachable", "Could not reach the agent gateway: " + err.Error()}
 	}
 	defer drainAndClose(resp)
 	if resp.StatusCode != http.StatusOK {
-		writeError(w, http.StatusBadGateway, "agent_error", upstreamErrorDetail(resp))
-		return
+		return nil, &upstreamFailure{http.StatusBadGateway, "agent_error", upstreamErrorDetail(resp)}
 	}
 	var listed struct {
 		Data []recentSession `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(&listed); err != nil {
-		writeError(w, http.StatusBadGateway, "agent_bad_response", "Agent gateway returned an unreadable session list.")
-		return
+		return nil, &upstreamFailure{http.StatusBadGateway, "agent_bad_response", "Agent gateway returned an unreadable session list."}
 	}
 	sessions := make([]recentSession, 0, len(listed.Data))
 	for _, sess := range listed.Data {
 		sess.Console = sessionIDPattern.MatchString(sess.ID)
+		sess.Kind = classifySession(sess.ID, sess.Source, sess.Title)
 		sessions = append(sessions, sess)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+	return sessions, nil
+}
+
+// messageCard carries the fields the page lifts out of an automated prompt
+// (event watcher, scheduler, or kanban task notification) so the thread can
+// show a compact card instead of a raw routing template.
+type messageCard struct {
+	Kind     string `json:"kind,omitempty"`
+	Subject  string `json:"subject,omitempty"`
+	Resource string `json:"resource,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Warning  string `json:"warning,omitempty"`
+	TaskID   string `json:"task_id,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Assignee string `json:"assignee,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Summary  string `json:"summary,omitempty"`
 }
 
 // sessionMessage is one user or assistant message from a poll of the page's
-// own session. ID is Hermes' message row ID, which increases in insertion
-// order.
+// own session or a session transcript. ID is Hermes' message row ID, which
+// increases in insertion order. Author names who wrote the row ("user",
+// "agent", "event_watcher", "scheduler", or "kanban").
 type sessionMessage struct {
-	ID        int64    `json:"id"`
-	Role      string   `json:"role"`
-	Content   string   `json:"content"`
-	Timestamp *float64 `json:"timestamp,omitempty"`
+	ID        int64        `json:"id"`
+	Role      string       `json:"role"`
+	Author    string       `json:"author,omitempty"`
+	Content   string       `json:"content"`
+	Timestamp *float64     `json:"timestamp,omitempty"`
+	Card      *messageCard `json:"card,omitempty"`
 }
 
 type sessionMessagesResponse struct {
@@ -385,34 +506,57 @@ func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), messagesTimeout)
 	defer cancel()
-	// Pages back from the newest message until a page reaches ?after= or the
-	// session runs out. A long turn writes many tool rows, so one page can
-	// stop short of the mark.
-	var rows []hermesMessage
-	for page := 0; page < messagesMaxPages; page++ {
-		path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=%d",
-			url.PathEscape(sid), messagesPageLimit, page*messagesPageLimit)
-		listed, failure := s.fetchMessagesPage(ctx, path)
-		if failure != nil {
-			writeError(w, failure.status, failure.code, failure.message)
-			return
-		}
-		rows = append(listed, rows...)
-		if len(listed) < messagesPageLimit || listed[0].ID <= after {
-			break
-		}
+	rows, _, failure := s.pageMessages(ctx, sid, after, nil)
+	if failure != nil {
+		writeError(w, failure.status, failure.code, failure.message)
+		return
 	}
 	out := sessionMessagesResponse{SessionID: sid, LatestID: after, Messages: []sessionMessage{}}
 	for _, m := range rows {
 		if m.ID > out.LatestID {
 			out.LatestID = m.ID
 		}
-		if m.ID <= after || (m.Role != roleAssistant && m.Role != roleUser) || m.Content == nil || strings.TrimSpace(*m.Content) == "" {
+		if m.ID <= after || !hasText(m) {
 			continue
 		}
-		out.Messages = append(out.Messages, sessionMessage{ID: m.ID, Role: m.Role, Content: *m.Content, Timestamp: m.Timestamp})
+		out.Messages = append(out.Messages, s.buildSessionMessage(kindConsole, false, m))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// pageMessages pages back from a session's newest message until a page
+// reaches after, enough reports that the rows read so far suffice, or the
+// session runs out. A long turn writes many tool rows, so one page can stop
+// short of the mark. The rows come back oldest first, and reachedStart
+// reports whether the last page ran the session dry (fewer than
+// messagesPageLimit rows). A nil enough reads until after or the page cap.
+func (s *server) pageMessages(ctx context.Context, sid string, after int64, enough func([]hermesMessage) bool) ([]hermesMessage, bool, *upstreamFailure) {
+	var rows []hermesMessage
+	reachedStart := false
+	for page := 0; page < messagesMaxPages; page++ {
+		path := fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=%d",
+			url.PathEscape(sid), messagesPageLimit, page*messagesPageLimit)
+		listed, failure := s.fetchMessagesPage(ctx, path)
+		if failure != nil {
+			return nil, false, failure
+		}
+		rows = append(listed, rows...)
+		if len(listed) < messagesPageLimit {
+			reachedStart = true
+			break
+		}
+		if listed[0].ID <= after || (enough != nil && enough(rows)) {
+			break
+		}
+	}
+	return rows, reachedStart, nil
+}
+
+// hasText reports whether a message is a user or assistant row with text,
+// the only rows the page shows. Tool rows and tool-call-only assistant rows
+// are not.
+func hasText(m hermesMessage) bool {
+	return (m.Role == roleAssistant || m.Role == roleUser) && m.Content != nil && strings.TrimSpace(*m.Content) != ""
 }
 
 // hermesMessage is one row of Hermes' session messages list.
@@ -466,38 +610,15 @@ type chatResponse struct {
 }
 
 func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	var req chatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "message_too_large", "Message is too large.")
-			return
-		}
-		writeError(w, http.StatusBadRequest, "invalid_json", "Request body is not valid JSON.")
-		return
-	}
-	msg := strings.TrimSpace(req.Message)
-	if msg == "" {
-		writeError(w, http.StatusBadRequest, "empty_message", "Message cannot be empty.")
-		return
-	}
-
-	sid := req.SessionID
-	if !sessionIDPattern.MatchString(sid) {
-		writeError(w, http.StatusBadRequest, "invalid_session_id", "Session ID was not issued by this console.")
-		return
-	}
-
-	if !s.claim(sid) {
-		writeError(w, http.StatusConflict, "turn_in_progress", "This session already has a turn running. Wait for its reply.")
+	sid, msg, agentSession, ok := s.beginTurn(w, r)
+	if !ok {
 		return
 	}
 	defer s.release(sid)
 
 	created := false
 	beforeID, exists := s.latestMessageID(r.Context(), sid)
-	if !exists {
+	if !exists && !agentSession {
 		if err := s.createSession(r.Context(), sid); err != nil {
 			writeError(w, http.StatusBadGateway, "session_create_failed", err.Error())
 			return
@@ -508,7 +629,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), turnTimeout)
 	defer cancel()
 	reply, err := s.runTurn(ctx, sid, msg)
-	if errors.Is(err, errSessionNotFound) {
+	if errors.Is(err, errSessionNotFound) && !agentSession {
 		// The agent pod's session store does not have this ID, for instance
 		// after the pod was replaced. Recreate it and run the turn once more.
 		beforeID = 0
@@ -520,17 +641,8 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		reply, err = s.runTurn(ctx, sid, msg)
 	}
 	if err != nil {
-		var ue *upstreamError
-		switch {
-		case errors.As(err, &ue) && ue.status == http.StatusTooManyRequests,
-			errors.As(err, &ue) && ue.status == http.StatusServiceUnavailable:
-			writeError(w, http.StatusServiceUnavailable, "agent_busy", ue.Error())
-		case errors.Is(ctx.Err(), context.DeadlineExceeded):
-			writeError(w, http.StatusGatewayTimeout, "turn_timeout",
-				fmt.Sprintf("The agent did not answer within %s. It may still be working; ask for a status update.", turnTimeout))
-		default:
-			writeError(w, http.StatusBadGateway, "agent_error", err.Error())
-		}
+		status, body := turnFailure(ctx, err, sid)
+		writeJSON(w, status, body)
 		return
 	}
 	replyID := s.replyMessageID(r.Context(), sid, beforeID, reply)
@@ -595,6 +707,131 @@ func (s *server) replyMessageID(parent context.Context, sid string, beforeID int
 		return matchedID
 	}
 	return newestID
+}
+
+// beginTurn reads and checks a chat request and claims the session's one
+// in-flight turn. The page mints console session IDs; the caller creates the
+// Hermes session when it does not exist yet. When ok
+// is false it has written the error response. The caller releases the claim.
+//
+// A request may name one of this console's sessions, or reply into an event
+// triage or scheduled session the cluster opened (agentSession). The second
+// kind is checked against Hermes' record of the session and never created:
+// a reply into a session that does not exist is a 404, not a new session.
+// Every other session, Slack and Google Chat included, is refused.
+func (s *server) beginTurn(w http.ResponseWriter, r *http.Request) (sid, msg string, agentSession, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	var req chatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "message_too_large", "Message is too large.")
+			return "", "", false, false
+		}
+		writeError(w, http.StatusBadRequest, "invalid_json", "Request body is not valid JSON.")
+		return "", "", false, false
+	}
+	msg = strings.TrimSpace(req.Message)
+	if msg == "" {
+		writeError(w, http.StatusBadRequest, "empty_message", "Message cannot be empty.")
+		return "", "", false, false
+	}
+
+	sid = req.SessionID
+	switch {
+	case sessionIDPattern.MatchString(sid):
+	case strings.HasPrefix(sid, sessionIDPrefix):
+		// Console IDs have one shape. A malformed one was not issued here.
+		writeError(w, http.StatusBadRequest, "invalid_session_id", "Session ID was not issued by this console.")
+		return "", "", false, false
+	case transcriptIDPattern.MatchString(sid):
+		if !s.allowAgentSessionReply(w, r.Context(), sid) {
+			return "", "", false, false
+		}
+		agentSession = true
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_session_id", "Session ID was not issued by this console.")
+		return "", "", false, false
+	}
+	if !s.claim(sid) {
+		writeError(w, http.StatusConflict, "turn_in_progress", "This session already has a turn running. Wait for its reply.")
+		return "", "", false, false
+	}
+	return sid, msg, agentSession, true
+}
+
+// allowAgentSessionReply checks that sid names an event triage or scheduled
+// session the gateway API created, and writes the refusal when it does not.
+func (s *server) allowAgentSessionReply(w http.ResponseWriter, parent context.Context, sid string) bool {
+	ctx, cancel := context.WithTimeout(parent, sessionLookupTimeout)
+	defer cancel()
+	sess, failure := s.lookupSession(ctx, sid)
+	if failure != nil {
+		writeError(w, failure.status, failure.code, failure.message)
+		return false
+	}
+	if kind := classifySession(sid, sess.Source, sess.Title); kind != kindEventTriage && kind != kindScheduled {
+		writeError(w, http.StatusForbidden, "session_not_allowed",
+			"The console posts only into its own sessions, event triage and scheduled checks.")
+		return false
+	}
+	if s.cfg.ChatPlatform != "" {
+		writeError(w, http.StatusForbidden, "session_not_allowed",
+			fmt.Sprintf("Alert and scheduled threads are read-only in the console when %s is enabled; reply in %s.", s.cfg.ChatPlatform, s.cfg.ChatPlatform))
+		return false
+	}
+	busy, failure := s.agentSessionBusy(ctx, sid, sess, time.Now())
+	if failure != nil {
+		writeError(w, failure.status, failure.code, failure.message)
+		return false
+	}
+	if busy {
+		writeError(w, http.StatusConflict, "agent_busy", agentBusyDetail)
+		return false
+	}
+	return true
+}
+
+// agentSessionBusy guesses whether another writer has a turn running on an
+// agent session: the event watcher's own triage turn, a reply from the chat
+// thread the alert went to, or a kanban card's wake. Hermes does not
+// serialize turns on one session and does not say which sessions have a run
+// in flight, so the guess is this: the newest message is not an assistant
+// reply with text, and the session was active within agentBusyWindow. A
+// session with no messages yet is not busy.
+func (s *server) agentSessionBusy(ctx context.Context, sid string, sess hermesSession, now time.Time) (bool, *upstreamFailure) {
+	if sess.LastActive == nil || now.Sub(time.Unix(0, int64(*sess.LastActive*float64(time.Second)))) > agentBusyWindow {
+		return false, nil
+	}
+	newest, failure := s.fetchMessagesPage(ctx, fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=0",
+		url.PathEscape(sid), agentBusyPageLimit))
+	if failure != nil {
+		return false, failure
+	}
+	if len(newest) == 0 {
+		return false, nil
+	}
+	last := newest[len(newest)-1]
+	return !(last.Role == roleAssistant && hasText(last)), nil
+}
+
+// turnFailure maps a failed turn to the status and error body the page
+// shows. The body carries the session ID so the page keeps the session.
+func turnFailure(turnCtx context.Context, err error, sid string) (int, errorResponse) {
+	var ue *upstreamError
+	switch {
+	case errors.Is(err, errSessionNotFound):
+		return http.StatusNotFound, errorResponse{Error: "session_not_found", Detail: "The agent has no record of this session.", SessionID: sid}
+	case errors.As(err, &ue) && ue.status == http.StatusTooManyRequests,
+		errors.As(err, &ue) && ue.status == http.StatusServiceUnavailable:
+		return http.StatusServiceUnavailable, errorResponse{Error: "agent_busy", Detail: ue.Error(), SessionID: sid}
+	case errors.Is(turnCtx.Err(), context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, errorResponse{Error: "turn_timeout",
+			Detail:    fmt.Sprintf("The agent did not answer within %s. It may still be working; ask for a status update.", turnTimeout),
+			SessionID: sid}
+	default:
+		return http.StatusBadGateway, errorResponse{Error: "agent_error", Detail: err.Error(), SessionID: sid}
+	}
 }
 
 func (s *server) claim(sid string) bool {
@@ -719,6 +956,8 @@ func drainAndClose(resp *http.Response) {
 type errorResponse struct {
 	Error  string `json:"error"`
 	Detail string `json:"detail"`
+	// SessionID names the session a failed turn ran on.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, code, detail string) {
