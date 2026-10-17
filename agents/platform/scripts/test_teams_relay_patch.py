@@ -458,6 +458,28 @@ class TestTeamsRelayPatch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received_events[0].text, "check pods")
         self.assertEqual(received_events[0].message_id, "act-777")
         self.assertEqual(received_events[0].source["platform"], "teams")
+        # The activity id is per message: as thread_id it would key a new
+        # session per message and mark every DM as a shared thread.
+        self.assertIsNone(received_events[0].source["thread_id"])
+        self.assertEqual(received_events[0].source["chat_type"], "channel")
+
+        for conversation_type, chat_type in (
+            ("personal", "dm"),
+            ("groupChat", "group"),
+            ("channel", "channel"),
+            ("unknownType", "channel"),
+        ):
+            received_events.clear()
+            typed = dict(activity, conversation={"id": "conv-777", "conversationType": conversation_type})
+            with mock.patch("urllib.request.urlopen") as mock_urlopen:
+                mock_resp = mock.MagicMock()
+                mock_resp.read.return_value = json.dumps({"status": "ok"}).encode("utf-8")
+                mock_resp.__enter__.return_value = mock_resp
+                mock_urlopen.return_value = mock_resp
+                await adapter._process_activity(typed)
+            self.assertEqual(len(received_events), 1, conversation_type)
+            self.assertEqual(received_events[0].source["chat_type"], chat_type, conversation_type)
+            self.assertIsNone(received_events[0].source["thread_id"], conversation_type)
 
     async def test_send_and_send_typing(self):
         from gateway.platforms.base import SendResult

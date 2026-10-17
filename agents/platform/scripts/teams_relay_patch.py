@@ -18,6 +18,15 @@ from credential_proxy_client import authorization_headers
 LOGGER = logging.getLogger("teams-relay-patch")
 DEFAULT_RELAY_READY_TIMEOUT = 120.0
 TEAMS_TRUSTED_SERVICE_HOSTS = ("smba.trafficmanager.net", "api.botframework.com")
+# Bot Framework `conversation.conversationType` -> gateway `chat_type`. The
+# memory providers treat only "dm" as single-person, so a Teams 1:1 chat
+# (`personal`) must arrive as "dm" for personal memory to stay on.
+TEAMS_CONVERSATION_TYPE_TO_CHAT_TYPE = {
+    "personal": "dm",
+    "groupchat": "group",
+    "channel": "channel",
+}
+TEAMS_DEFAULT_CHAT_TYPE = "channel"
 
 
 def relay_enabled() -> bool:
@@ -575,10 +584,12 @@ def _build_teams_adapter_and_sender(
             source = self.build_source(
                 chat_id=conv_id,
                 chat_name=str(conv.get("name") or conv_id),
-                chat_type=str(conv.get("conversationType") or "channel"),
+                chat_type=TEAMS_CONVERSATION_TYPE_TO_CHAT_TYPE.get(
+                    str(conv.get("conversationType") or "").strip().lower(),
+                    TEAMS_DEFAULT_CHAT_TYPE,
+                ),
                 user_id=sender_aad_id or sender_id,
                 user_name=sender_name or sender_id,
-                thread_id=activity_id or None,
             )
             event = message_event_cls(
                 text=text,

@@ -15521,6 +15521,12 @@ class TeamsRelayTest(unittest.TestCase):
             "v3/conversations/123/../admin",
             "v3/attachments/123",
             "v3/conversations/123/activities/history",
+            "v3/conversations/123/activities/History",
+            "V3/Conversations/123/Activities/HISTORY",
+            "v3/conversations/123/activities/%68istory",
+            "v3/conversations/123/activities/hist%6Fry",
+            "v3/conversations/123%2F..%2Fmembers/activities",
+            "v3/conversations/123/activities\\history",
         ):
             with self.assertRaises(ValueError, msg=bad_path):
                 relay.api_call(
