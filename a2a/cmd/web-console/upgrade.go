@@ -122,7 +122,7 @@ func (k *kubeClient) doJSON(ctx context.Context, method, path string, body any, 
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", bearerPrefix+k.token)
+	req.Header.Set("Authorization", bearerPrefix+k.bearer())
 	req.Header.Set("Accept", contentTypeJSON)
 	if body != nil {
 		if method == http.MethodPatch {
@@ -153,7 +153,7 @@ func (k *kubeClient) getText(ctx context.Context, path string, maxBytes int64) (
 	if err != nil {
 		return 0, "", err
 	}
-	req.Header.Set("Authorization", bearerPrefix+k.token)
+	req.Header.Set("Authorization", bearerPrefix+k.bearer())
 	resp, err := k.client.Do(req)
 	if err != nil {
 		return 0, "", err

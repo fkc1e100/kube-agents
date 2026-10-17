@@ -71,7 +71,10 @@ const (
 	helmReleaseNamespaceAnnotation = "meta.helm.sh/release-namespace"
 	managedByLabel                 = "app.kubernetes.io/managed-by"
 	argoCDInstanceLabel            = "argocd.argoproj.io/instance"
-	replicaSetsAPIPath             = "/apis/apps/v1/namespaces/%s/replicasets"
+	// Argo CD's annotation tracking stamps this instead of the instance
+	// label; its value is "<app>:<group>/<kind>:<namespace>/<name>".
+	argoCDTrackingAnnotation = "argocd.argoproj.io/tracking-id"
+	replicaSetsAPIPath       = "/apis/apps/v1/namespaces/%s/replicasets"
 )
 
 // countedKinds are the list calls behind the workload counts. The install
@@ -149,6 +152,9 @@ func installManagedBy(labels, annotations map[string]string) (managedBy, helmRel
 	if app := labels[argoCDInstanceLabel]; app != "" {
 		return "argocd", helmRelease, releaseNamespace, app
 	}
+	if app, _, _ := strings.Cut(annotations[argoCDTrackingAnnotation], ":"); app != "" {
+		return "argocd", helmRelease, releaseNamespace, app
+	}
 	if helmRelease != "" || strings.EqualFold(labels[managedByLabel], "Helm") {
 		return "helm", helmRelease, releaseNamespace, ""
 	}
@@ -157,9 +163,25 @@ func installManagedBy(labels, annotations map[string]string) (managedBy, helmRel
 
 // kubeClient reads the API from inside the pod. Tests replace it.
 type kubeClient struct {
-	base   string
-	token  string
-	client *http.Client
+	base  string
+	token string
+	// tokenPath, when set, is re-read on every request: the kubelet rotates
+	// the projected token on disk before it expires.
+	tokenPath string
+	client    *http.Client
+}
+
+// bearer returns the current service-account token, falling back to the one
+// read at startup when the file cannot be read.
+func (k *kubeClient) bearer() string {
+	if k.tokenPath != "" {
+		if b, err := os.ReadFile(k.tokenPath); err == nil {
+			if tok := strings.TrimSpace(string(b)); tok != "" {
+				return tok
+			}
+		}
+	}
+	return k.token
 }
 
 type environmentCache struct {
@@ -176,7 +198,8 @@ func loadKubeClient() *kubeClient {
 	if host == "" || port == "" {
 		return nil
 	}
-	token, err := os.ReadFile(serviceAccountDir + "/token")
+	tokenPath := serviceAccountDir + "/token"
+	token, err := os.ReadFile(tokenPath)
 	if err != nil {
 		return nil
 	}
@@ -184,7 +207,7 @@ func loadKubeClient() *kubeClient {
 	if ca, err := os.ReadFile(serviceAccountDir + "/ca.crt"); err == nil {
 		client.Transport = transportWithCA(ca)
 	}
-	return &kubeClient{base: "https://" + host + ":" + port, token: strings.TrimSpace(string(token)), client: client}
+	return &kubeClient{base: "https://" + host + ":" + port, token: strings.TrimSpace(string(token)), tokenPath: tokenPath, client: client}
 }
 
 func (k *kubeClient) get(ctx context.Context, path string, out any) error {
@@ -192,7 +215,7 @@ func (k *kubeClient) get(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", bearerPrefix+k.token)
+	req.Header.Set("Authorization", bearerPrefix+k.bearer())
 	req.Header.Set("Accept", contentTypeJSON)
 	resp, err := k.client.Do(req)
 	if err != nil {

@@ -422,7 +422,14 @@ func (s *server) readRelease(ctx context.Context) releaseResponse {
 		out.Detail = "GitHub lists no published release for " + s.cfg.ReleaseRepo + "."
 		return out
 	}
+	// GitHub lists releases newest-created first, which is not the highest
+	// version once a patch to an older line is published.
 	latest := published[0]
+	for _, r := range published[1:] {
+		if compareReleases(strings.TrimPrefix(latest.TagName, "v"), strings.TrimPrefix(r.TagName, "v")) < 0 {
+			latest = r
+		}
+	}
 	out.Latest, out.LatestURL, out.LatestAt = strings.TrimPrefix(latest.TagName, "v"), latest.HTMLURL, latest.PublishedAt
 	out.CheckedAt = time.Now().UTC().Format(time.RFC3339)
 	switch kind {

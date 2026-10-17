@@ -379,3 +379,12 @@ func TestAssistRetriesWithoutJSONModeWhenTheModelRefusesIt(t *testing.T) {
 		t.Fatalf("want one call with response_format then one without, got %v", calls)
 	}
 }
+
+func TestReleaseLatestIsTheHighestVersionNotTheFirstListed(t *testing.T) {
+	// A patch to an older line, published last, is listed first.
+	gh, _ := fakeGitHub(t, []string{"v0.8.3", "v0.9.1", "v0.9.0"}, nil)
+	got := releaseFor(t, releaseServer(t, gh, "0.9.0", "0.9.0"))
+	if got.Latest != "0.9.1" || got.Status != "behind" {
+		t.Errorf("latest = %q status = %q, want 0.9.1 behind", got.Latest, got.Status)
+	}
+}
