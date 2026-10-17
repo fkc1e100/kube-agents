@@ -20,8 +20,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,22 +43,59 @@ const testKey = "test-api-key"
 // in insertion order; errors are OpenAI-shaped {"error":{"message":...}}.
 // Every route requires the bearer key, as the agent's auth sidecar does.
 type fakeHermes struct {
-	mu                 sync.Mutex
-	sessions           map[string]bool
-	messages           map[string][]map[string]any
-	nextID             int64
-	lastQuery          string
-	chats              []map[string]any
-	reply              string
-	postTurnWake       string
-	chatDelay          time.Duration
-	chatCode           int
+	mu        sync.Mutex
+	sessions  map[string]bool
+	messages  map[string][]map[string]any
+	nextID    int64
+	lastQuery string
+	// lastListQuery is the query of the latest GET /api/sessions.
+	lastListQuery string
+	chats         []map[string]any
+	reply         string
+	chatDelay     time.Duration
+	chatCode      int
+	// seeded holds sessions the console did not open, by ID, with their
+	// source and title, as the event watcher or a chat platform creates them.
+	seeded map[string]map[string]any
+	// messageGets counts GET .../messages calls per session.
+	messageGets map[string]int
+	// stream is the raw SSE body POST .../chat/stream answers with.
+	stream string
+	// streamCode, when set, is the status the stream route answers with
+	// instead of a stream.
+	streamCode int
+	streams    int
+	// creates counts POST /api/sessions calls.
+	creates int
+	// streamGate, when set, holds the stream after `stream` is written;
+	// streamTail is written once it closes. streamEnd records how the
+	// stream ended: "finished" when the tail was written to a reader still
+	// there, "abandoned" when the reader left first.
+	streamGate   chan struct{}
+	streamTail   string
+	streamEnd    string
+	postTurnWake string
+	chatEntered  chan struct{}
+	chatGate     chan struct{}
+	// createDelay holds POST /api/sessions; dropSessionOnFirst forgets the
+	// session on the next chat, as a replaced agent pod would.
 	createDelay        time.Duration
 	dropSessionOnFirst bool
 }
 
 func newFakeHermes() *fakeHermes {
-	return &fakeHermes{sessions: map[string]bool{}, messages: map[string][]map[string]any{}, reply: "pods are healthy"}
+	return &fakeHermes{
+		sessions: map[string]bool{}, messages: map[string][]map[string]any{}, reply: "pods are healthy",
+		seeded: map[string]map[string]any{}, messageGets: map[string]int{},
+	}
+}
+
+// seed adds a session another caller opened.
+func (f *fakeHermes) seed(id, source, title string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions[id] = true
+	f.seeded[id] = map[string]any{"id": id, "source": source, "title": title}
 }
 
 // post appends a message to a session, as a turn or a card's wake does.
@@ -88,9 +125,18 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/sessions":
 		f.mu.Lock()
-		data := []map[string]any{{"id": "k8s-evt-abc", "title": "Triage k8s-evt-abc", "source": "api_server", "preview": "secret text"}}
+		f.lastListQuery = r.URL.RawQuery
+		data := []map[string]any{{"id": "k8s-evt-00000abc", "title": "Triage k8s-evt-00000abc", "source": "api_server", "preview": "secret text"}}
 		for id := range f.sessions {
-			data = append(data, map[string]any{"id": id, "title": "Web console", "source": "api_server"})
+			row := map[string]any{"id": id, "title": "Web console", "source": "api_server", "message_count": len(f.messages[id])}
+			for k, v := range f.seeded[id] {
+				row[k] = v
+			}
+			// Hermes filters on source when asked, as list_sessions_rich does.
+			if want := r.URL.Query().Get("source"); want != "" && row["source"] != want {
+				continue
+			}
+			data = append(data, row)
 		}
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
@@ -105,6 +151,7 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.creates++
 		if f.sessions[body["session_id"]] {
 			hermesError(w, http.StatusConflict, "Session already exists")
 			return
@@ -112,6 +159,46 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.sessions[body["session_id"]] = true
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "hermes.session", "session": map[string]any{"id": body["session_id"]}})
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/sessions/") && strings.HasSuffix(r.URL.Path, "/chat/stream"):
+		sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/chat/stream")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		known := f.sessions[sid]
+		f.streams++
+		stream, code, delay := f.stream, f.streamCode, f.chatDelay
+		f.mu.Unlock()
+		if !known {
+			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
+			return
+		}
+		if code != 0 {
+			hermesError(w, code, "upstream refused")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		time.Sleep(delay)
+		_, _ = w.Write([]byte(stream))
+		f.mu.Lock()
+		gate, tail := f.streamGate, f.streamTail
+		f.mu.Unlock()
+		if gate == nil {
+			return
+		}
+		w.(http.Flusher).Flush()
+		end := "abandoned"
+		select {
+		case <-gate:
+			if _, err := w.Write([]byte(tail)); err == nil && r.Context().Err() == nil {
+				w.(http.Flusher).Flush()
+				end = "finished"
+			}
+		case <-r.Context().Done():
+		}
+		f.mu.Lock()
+		f.streamEnd = end
+		f.mu.Unlock()
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/sessions/") && strings.HasSuffix(r.URL.Path, "/chat"):
 		sid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/chat")
 		var body map[string]any
@@ -124,7 +211,15 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		known := f.sessions[sid]
 		f.chats = append(f.chats, body)
 		delay, code, reply := f.chatDelay, f.chatCode, f.reply
+		entered, gate := f.chatEntered, f.chatGate
+		f.chatEntered, f.chatGate = nil, nil
 		f.mu.Unlock()
+		if entered != nil {
+			close(entered)
+		}
+		if gate != nil {
+			<-gate
+		}
 		if !known {
 			hermesError(w, http.StatusNotFound, "Session not found")
 			return
@@ -158,13 +253,14 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.lastQuery = r.URL.RawQuery
+		f.messageGets[sid]++
 		if !f.sessions[sid] {
 			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
 			return
 		}
-		// Same paging as Hermes with order=latest: offset counts back from
-		// the newest message, and the page comes back oldest first.
-		// When order is omitted or not latest, Hermes serves insertion order.
+		// Same paging as Hermes. With order=latest, offset counts back from
+		// the newest message; with order=oldest, forward from the first.
+		// Either way the page comes back oldest first.
 		all := f.messages[sid]
 		limit, offset := len(all), 0
 		if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
@@ -174,18 +270,44 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			offset = v
 		}
 		var page []map[string]any
-		if r.URL.Query().Get("order") == "latest" {
+		if r.URL.Query().Get("order") == "oldest" {
+			start := min(offset, len(all))
+			page = all[start:min(start+limit, len(all))]
+		} else {
 			end := max(len(all)-offset, 0)
 			page = all[max(end-limit, 0):end]
-		} else {
-			start := min(offset, len(all))
-			end := min(start+limit, len(all))
-			page = all[start:end]
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "session_id": sid, "data": page})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/sessions/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/sessions/"), "/"):
+		sid := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !f.sessions[sid] {
+			hermesError(w, http.StatusNotFound, "Session not found: "+sid)
+			return
+		}
+		session := map[string]any{"id": sid, "source": "api_server", "title": "Web console"}
+		for k, v := range f.seeded[sid] {
+			session[k] = v
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "hermes.session", "session": session})
 	default:
 		hermesError(w, http.StatusNotFound, "no route")
 	}
+}
+
+// createCount returns how many sessions callers asked the fake to create.
+func (f *fakeHermes) createCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.creates
+}
+
+// gets returns how many message reads a session has had.
+func (f *fakeHermes) gets(sid string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.messageGets[sid]
 }
 
 // state returns copies of what the fake has recorded, under its lock.
@@ -207,6 +329,13 @@ func hermesError(w http.ResponseWriter, status int, msg string) {
 
 func setup(t *testing.T) (*fakeHermes, http.Handler) {
 	t.Helper()
+	fake, s := setupServer(t)
+	return fake, s.routes()
+}
+
+// setupServer is setup for a test that changes a server field first.
+func setupServer(t *testing.T) (*fakeHermes, *server) {
+	t.Helper()
 	fake := newFakeHermes()
 	upstream := httptest.NewServer(fake)
 	t.Cleanup(upstream.Close)
@@ -215,9 +344,11 @@ func setup(t *testing.T) (*fakeHermes, http.Handler) {
 		APIServerKey: testKey,
 		ClusterName:  "c1",
 	}
-	return fake, newServer(cfg).routes()
+	return fake, newServer(cfg)
 }
 
+// defaultTestSessionID is the page-minted ID chatReq adds to a body that
+// names no session, since the console no longer mints one.
 const defaultTestSessionID = "web-console-0123456789abcdef0123456789abcdef"
 
 func chatReq(body string) *http.Request {
@@ -307,18 +438,122 @@ func TestEachNewChatGetsItsOwnSession(t *testing.T) {
 
 func TestChatRefusesForeignSessionIDs(t *testing.T) {
 	fake, h := setup(t)
-	for _, sid := range []string{"", "k8s-evt-abc", "web-console-../../x", "web-console-ABC", "../api/sessions"} {
+	for _, sid := range []string{"", "web-console-../../x", "web-console-ABC", "../api/sessions"} {
 		raw := `{"message":"hi","session_id":` + strconv.Quote(sid) + `}`
-		req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/chat", strings.NewReader(raw))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set(consoleHeader, consoleHeaderValue)
-		rec := serve(h, req)
+		rec := serve(h, chatReq(raw))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("session %q: status %d, want 400", sid, rec.Code)
 		}
 	}
 	if _, chats := fake.state(); len(chats) != 0 {
 		t.Errorf("a refused session still reached Hermes: %v", chats)
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("a refused session created %d sessions", fake.createCount())
+	}
+}
+
+func TestChatRepliesIntoAnAgentSession(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
+	fake.seed("cron-daily-report-20261006", "api_server", "Triage cron-daily-report-20261006")
+	for _, sid := range []string{"k8s-evt-0000000a", "cron-daily-report-20261006"} {
+		rec := serve(h, chatReq(`{"message":"is it fixed?","session_id":"`+sid+`"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", sid, rec.Code, rec.Body.String())
+		}
+		if got := decode[chatResponse](t, rec); got.SessionID != sid {
+			t.Errorf("reply went to %q, want %q", got.SessionID, sid)
+		}
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("a reply into an agent session created %d sessions", fake.createCount())
+	}
+}
+
+func TestChatRefusesAgentSessionRepliesWhenChatPlatformIsEnabled(t *testing.T) {
+	fake, s := setupServer(t)
+	s.cfg.ChatPlatform = "Slack"
+	h := s.routes()
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
+	fake.seed("cron-daily-report-20261006", "api_server", "Triage cron-daily-report-20261006")
+	fake.mu.Lock()
+	fake.post("k8s-evt-0000000a", "user", "triage this")
+	fake.mu.Unlock()
+
+	status := decode[statusResponse](t, serve(h, httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/status", nil)))
+	if status.ChatPlatform != "Slack" {
+		t.Errorf("status.ChatPlatform = %q, want Slack", status.ChatPlatform)
+	}
+	tr := decode[transcriptResponse](t, serve(h, transcriptReq("k8s-evt-0000000a")))
+	if tr.ChatPlatform != "Slack" {
+		t.Errorf("transcript.ChatPlatform = %q, want Slack", tr.ChatPlatform)
+	}
+	for _, sid := range []string{"k8s-evt-0000000a", "cron-daily-report-20261006"} {
+		for _, req := range []*http.Request{
+			chatReq(`{"message":"is it fixed?","session_id":"` + sid + `"}`),
+			streamReq(`{"message":"is it fixed?","session_id":"` + sid + `"}`),
+		} {
+			rec := serve(h, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("%s on %s: status %d, want 403: %s", req.URL.Path, sid, rec.Code, rec.Body.String())
+			}
+			got := decode[errorResponse](t, rec)
+			if got.Error != "session_not_allowed" || !strings.Contains(got.Detail, "reply in Slack") {
+				t.Errorf("%s on %s: error = %+v, want session_not_allowed naming Slack", req.URL.Path, sid, got)
+			}
+		}
+	}
+	if _, chats := fake.state(); len(chats) != 0 {
+		t.Errorf("a refused agent-session reply still reached Hermes: %v", chats)
+	}
+	// Console's own threads remain writable when Slack is enabled.
+	own := serve(h, chatReq(`{"message":"check pods"}`))
+	if own.Code != http.StatusOK {
+		t.Errorf("console thread turn with ChatPlatform set: status %d: %s", own.Code, own.Body.String())
+	}
+}
+
+func TestChatRefusesChatPlatformAndUnknownSessions(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("slack-thread-1", "slack", "Triage k8s-evt-0000000b")
+	fake.seed("api-other", "api_server", "Something else")
+	cases := map[string]int{
+		"slack-thread-1":   http.StatusForbidden,
+		"api-other":        http.StatusForbidden,
+		"k8s-evt-0000dead": http.StatusNotFound,
+	}
+	for sid, want := range cases {
+		rec := serve(h, chatReq(`{"message":"hi","session_id":"`+sid+`"}`))
+		if rec.Code != want {
+			t.Errorf("%s: status %d, want %d: %s", sid, rec.Code, want, rec.Body.String())
+		}
+	}
+	if _, chats := fake.state(); len(chats) != 0 {
+		t.Errorf("a refused session still reached Hermes: %v", chats)
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("a refused session created %d sessions", fake.createCount())
+	}
+}
+
+func TestChatDoesNotRecreateAnAgentSession(t *testing.T) {
+	fake, h := setup(t)
+	fake.seed("k8s-evt-0000000a", "api_server", "Triage k8s-evt-0000000a")
+	// The session vanishes between the lookup and the turn, as when the
+	// agent pod is replaced mid-request: the lookup still sees it.
+	fake.mu.Lock()
+	fake.chatCode = http.StatusNotFound
+	fake.mu.Unlock()
+	rec := serve(h, chatReq(`{"message":"hi","session_id":"k8s-evt-0000000a"}`))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if got := decode[errorResponse](t, rec); got.Error != "session_not_found" || got.SessionID != "k8s-evt-0000000a" {
+		t.Errorf("error body = %+v", got)
+	}
+	if fake.createCount() != 0 {
+		t.Errorf("an agent session was recreated (%d creates)", fake.createCount())
 	}
 }
 
@@ -363,10 +598,7 @@ func TestChatRecreatesAMissingSession(t *testing.T) {
 }
 
 func TestChatSessionCreateTimeoutReports502Not504(t *testing.T) {
-	fake := newFakeHermes()
-	upstream := httptest.NewServer(fake)
-	t.Cleanup(upstream.Close)
-	srv := newServer(config{HermesURL: upstream.URL, APIServerKey: testKey, ClusterName: "c1"})
+	fake, srv := setupServer(t)
 	srv.createTimeout = 40 * time.Millisecond
 	h := srv.routes()
 
@@ -400,6 +632,9 @@ func TestChatSurfacesUpstreamErrorsWithoutAFallback(t *testing.T) {
 	if !strings.Contains(got.Detail, "upstream refused") {
 		t.Errorf("detail %q does not carry the gateway's message", got.Detail)
 	}
+	if got.SessionID == "" {
+		t.Errorf("error response dropped the session id, so the page would open a new session next turn")
+	}
 
 	fake.mu.Lock()
 	fake.chatCode = http.StatusTooManyRequests
@@ -412,17 +647,21 @@ func TestChatSurfacesUpstreamErrorsWithoutAFallback(t *testing.T) {
 func TestChatRefusesAConcurrentTurnOnOneSession(t *testing.T) {
 	fake, h := setup(t)
 	first := decode[chatResponse](t, serve(h, chatReq(`{"message":"start"}`)))
+	entered := make(chan struct{})
+	gate := make(chan struct{})
 	fake.mu.Lock()
-	fake.chatDelay = 200 * time.Millisecond
+	fake.chatEntered = entered
+	fake.chatGate = gate
 	fake.mu.Unlock()
 
 	body := `{"message":"x","session_id":"` + first.SessionID + `"}`
 	done := make(chan int)
 	go func() { done <- serve(h, chatReq(body)).Code }()
-	time.Sleep(50 * time.Millisecond)
+	<-entered
 	if code := serve(h, chatReq(body)).Code; code != http.StatusConflict {
 		t.Errorf("second turn while one is in flight: status %d, want 409", code)
 	}
+	close(gate)
 	if code := <-done; code != http.StatusOK {
 		t.Errorf("first turn: status %d", code)
 	}
@@ -468,7 +707,11 @@ func TestChatRequiresTheConsoleRequestShape(t *testing.T) {
 
 func TestNonLoopbackHostIsRefused(t *testing.T) {
 	_, h := setup(t)
-	for _, path := range []string{"/", "/api/status", "/api/sessions/recent", "/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages"} {
+	for _, path := range []string{
+		"/", "/api/status", "/api/sessions/recent", "/api/insights",
+		"/api/sessions/" + sessionIDPrefix + strings.Repeat("a", 32) + "/messages",
+		"/api/sessions/k8s-evt-00000abc/transcript", "/api/channels/alerts/posts",
+	} {
 		req := httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:8080"+path, nil)
 		if rec := serve(h, req); rec.Code != http.StatusForbidden {
 			t.Errorf("%s via a foreign Host: status %d, want 403", path, rec.Code)
@@ -521,7 +764,7 @@ func TestRecentSessionsOmitsPreviewsAndMarksConsoleSessions(t *testing.T) {
 	for _, s := range got.Sessions {
 		marked[s.ID] = s.Console
 	}
-	if !marked[mine.SessionID] || marked["k8s-evt-abc"] {
+	if !marked[mine.SessionID] || marked["k8s-evt-00000abc"] {
 		t.Errorf("console flags wrong: %v", marked)
 	}
 }
@@ -619,7 +862,7 @@ func TestMessagesPagesBackPastALongTurnToTheMark(t *testing.T) {
 
 func TestMessagesRefusesForeignSessionIDs(t *testing.T) {
 	fake, h := setup(t)
-	for _, sid := range []string{"k8s-evt-abc", sessionIDPrefix + "xyz", sessionIDPrefix + strings.Repeat("A", 32)} {
+	for _, sid := range []string{"k8s-evt-00000abc", sessionIDPrefix + "xyz", sessionIDPrefix + strings.Repeat("A", 32)} {
 		if rec := serve(h, messagesReq(sid, "")); rec.Code != http.StatusBadRequest {
 			t.Errorf("session %q: status %d, want 400", sid, rec.Code)
 		}
@@ -675,642 +918,719 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	html := string(page)
-	for _, tc := range []struct {
-		name    string
-		pattern string
-	}{
-		{"main grid row", `(?s)\bmain\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\);`},
-		{"main min-height", `(?s)\bmain\s*\{[^}]*min-height:\s*0;`},
-		{"chat-section min-height", `(?s)\.chat-section\s*\{[^}]*min-height:\s*0;`},
-		{"sidebar min-height", `(?s)\.sidebar\s*\{[^}]*min-height:\s*0;`},
-		{"sidebar-content scroll", `(?s)\.sidebar-content\s*\{[^}]*overflow-y:\s*auto;`},
+	// Each grid's one row is bounded by the window, and every column, pane
+	// and list down to the scrolling element has min-height: 0, so a long
+	// feed or transcript scrolls inside its pane instead of pushing either
+	// message box off the bottom of the page. The rail, top bar and banner
+	// keep their height.
+	for selector, rules := range map[string][]string{
+		".app":           {"min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
+		".rail":          {"min-height: 0;"},
+		".rail-scroll":   {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".workspace":     {"min-height: 0;"},
+		".topbar":        {"flex-shrink: 0;"},
+		".insights":      {"flex-shrink: 0;"},
+		".panes":         {"flex: 1;", "min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
+		".centre":        {"min-height: 0;"},
+		".view":          {"min-height: 0;"},
+		".feed":          {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".chat-stream":   {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".side-pane":     {"min-height: 0;"},
+		".side-body":     {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".about":         {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".composer":      {"flex-shrink: 0;"},
+		".thread-remove": {"opacity: 0;"},
 	} {
-		if !regexp.MustCompile(tc.pattern).MatchString(html) {
-			t.Errorf("index.html is missing %s (%s)", tc.name, tc.pattern)
+		block := cssBlock(t, string(page), selector)
+		for _, rule := range rules {
+			if !strings.Contains(block, rule) {
+				t.Errorf("%s is missing %q", selector, rule)
+			}
+		}
+	}
+	if strings.Contains(cssBlock(t, string(page), ".thread-remove"), "visibility: hidden") {
+		t.Errorf(".thread-remove must not use visibility: hidden, which removes it from keyboard tab order")
+	}
+}
+
+func TestPageNeverAsksForNotificationsOnLoad(t *testing.T) {
+	page, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The one permission request sits in the handler of the rail button.
+	if n := strings.Count(string(page), "Notification.requestPermission("); n != 1 {
+		t.Fatalf("index.html requests notification permission %d times, want once", n)
+	}
+	toggle := string(page)[strings.Index(string(page), "async function toggleNotifications()"):]
+	endIdx := strings.Index(toggle, "\n      }\n")
+	if endIdx < 0 {
+		endIdx = strings.Index(toggle, "\n    }\n")
+	}
+	toggle = toggle[:endIdx]
+	if !strings.Contains(toggle, "Notification.requestPermission(") {
+		t.Errorf("the permission request is not inside toggleNotifications")
+	}
+	if !strings.Contains(string(page), `$("btn-notify").addEventListener("click", toggleNotifications)`) {
+		t.Errorf("toggleNotifications is not bound to the button's click")
+	}
+	for _, call := range []string{"toggleNotifications();", "toggleNotifications()\n"} {
+		if strings.Contains(string(page), call) {
+			t.Errorf("toggleNotifications is called outside a click handler")
 		}
 	}
 }
 
-// TestPageSettleAndWakeLogic executes the embedded script from static/index.html
-// in Node's vm module against stubbed DOM and fetch globals, verifying:
-//  1. A failed settle fetch keeps the mark at its pre-turn value and queues the
-//     turn in unsettledTurns so the next poll shows any pre-turn or mid-turn
-//     wakes and advances the mark past replyId without replaying the turn's own
-//     assistant reply as an "update".
-//  1b. Two consecutive failed settles (with or without replyId) queue both
-//      turns and settle them in order on the next poll or next settle fetch
-//      without replaying either turn's reply.
-//  2. Results that landed before the turn, multiple card wakes that landed
-//     mid-turn (followed by intermediate assistant rows of the typed turn), and
-//     results that landed after the reply are each shown once while the typed
-//     turn's own assistant messages are not duplicated, including when the
-//     turn's final reply is empty.
-//  3. renderMarkdown formats line-opening fenced code blocks (including empty
-//     fenced blocks) while keeping mid-line backticks and literal **bold**
-//     markers inside inline code spans intact.
-//  4. First turn on a fresh tab mints the session and sets the mark to 0
-//     before the request, so a dropped connection preserves the session and
-//     displays the late reply on the next poll.
-func TestPageSettleAndWakeLogic(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is not in PATH")
+// cssBlock returns the declarations of the first rule whose selector is
+// exactly selector.
+func cssBlock(t *testing.T, page, selector string) string {
+	t.Helper()
+	start := strings.Index(page, "      "+selector+" {")
+	if start < 0 {
+		start = strings.Index(page, "    "+selector+" {")
 	}
-	cmd := exec.Command(node, "--input-type=module", "-e", `
+	if start < 0 {
+		t.Fatalf("index.html has no %s rule", selector)
+	}
+	end := strings.Index(page[start:], "}")
+	return page[start : start+end]
+}
+
+func TestReplyIntoABusyAgentSessionIsRefused(t *testing.T) {
+	recent := float64(time.Now().Add(-time.Minute).Unix())
+	stale := float64(time.Now().Add(-agentBusyWindow - time.Minute).Unix())
+	for _, tc := range []struct {
+		name       string
+		lastActive float64
+		rows       [][2]any // role, content
+		want       int
+	}{
+		{"unanswered user row", recent, [][2]any{{"user", "Pod crashlooping"}}, http.StatusConflict},
+		{"mid-turn tool row", recent, [][2]any{{"user", "x"}, {"assistant", nil}, {"tool", "pods"}}, http.StatusConflict},
+		{"answered", recent, [][2]any{{"user", "x"}, {"assistant", "Filed card t_1."}}, http.StatusOK},
+		{"unanswered but stale", stale, [][2]any{{"user", "x"}}, http.StatusOK},
+		{"no messages yet", recent, nil, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, h := setup(t)
+			sid := "k8s-evt-0000000a"
+			fake.seed(sid, "api_server", "Triage "+sid)
+			fake.mu.Lock()
+			fake.seeded[sid]["last_active"] = tc.lastActive
+			for _, r := range tc.rows {
+				fake.post(sid, r[0].(string), r[1])
+			}
+			fake.mu.Unlock()
+			for _, req := range []*http.Request{
+				chatReq(`{"message":"hi","session_id":"` + sid + `"}`),
+				streamReq(`{"message":"hi","session_id":"` + sid + `"}`),
+			} {
+				rec := serve(h, req)
+				if rec.Code != tc.want {
+					t.Fatalf("%s: status %d, want %d: %s", req.URL.Path, rec.Code, tc.want, rec.Body.String())
+				}
+				if tc.want == http.StatusConflict {
+					if got := decode[errorResponse](t, rec); got.Error != "agent_busy" || got.Detail != agentBusyDetail {
+						t.Errorf("busy body = %+v", got)
+					}
+				}
+			}
+			if _, chats := fake.state(); tc.want == http.StatusConflict && len(chats) != 0 {
+				t.Errorf("a busy session still got a turn: %v", chats)
+			}
+		})
+	}
+}
+
+func TestPageHarnessCoversThreadsUnreadStatusStepsTimerAndCards(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("node not available in PATH on CI: %v", err)
+		}
+		t.Skip("node not available in PATH")
+	}
+	page, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(page)
+	start := strings.Index(src, "// ---- Thread state.")
+	end := strings.Index(src, "// Builds one message row.")
+	renderStart := strings.Index(src, "let threadsHtml = \"\";")
+	renderEnd := strings.Index(src, "function showView(name)")
+	enterStart := strings.Index(src, "function onEnter(input, send)")
+	enterEnd := strings.Index(src, "$(\"btn-send\").addEventListener")
+	if start < 0 || end <= start || renderStart < 0 || renderEnd <= renderStart || enterStart < 0 || enterEnd <= enterStart {
+		t.Fatal("index.html is missing the thread-state, renderThreads, or onEnter slice markers")
+	}
+	slice := src[start:end] + "\n" + src[renderStart:renderEnd] + "\n" + src[enterStart:enterEnd]
+
+	cmd := exec.Command("node", "--input-type=module", "-e", `
 import assert from "node:assert/strict";
-import fs from "node:fs";
 import vm from "node:vm";
+import crypto from "node:crypto";
 
-const html = fs.readFileSync("static/index.html", "utf8");
-const match = html.match(/<script>([\s\S]*?)<\/script>/);
-assert.ok(match, "static/index.html has no <script> block");
-const scriptSource = match[1];
+const scriptSource = `+strconv.Quote(slice)+`;
 
-function makeContext(fetchImpl, initialStorage = {}) {
-  const store = new Map(Object.entries(initialStorage));
+function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
+  const local = new Map(Object.entries(initialLocal));
+  const session = new Map(Object.entries(initialSession));
   const appended = [];
-  const elements = new Map();
-  const makeEl = () => {
-    const listeners = {};
-    return {
-      className: "",
-      innerHTML: "",
-      innerText: "",
-      value: "",
-      title: "",
-      hidden: false,
-      disabled: false,
-      scrollTop: 0,
-      scrollHeight: 0,
-      dataset: {},
-      listeners,
-      addEventListener(type, fn) {
-        (listeners[type] ||= []).push(fn);
-      },
-      appendChild() {},
-      remove() {},
-    };
-  };
+  const statusCalls = [];
+  let cleared = 0;
+  let changed = 0;
+  let selectedThread = null;
+  let selectedChannel = null;
   const ctx = {
     console,
-    crypto,
     Date,
+    Math,
     Number,
     String,
-    Uint8Array,
     Array,
+    Object,
+    Set,
     JSON,
+    RegExp,
+    Uint8Array,
+    TextDecoder,
+    crypto: crypto.webcrypto,
     encodeURIComponent,
-    setInterval() {},
+    localStorage: {
+      getItem: k => (local.has(k) ? local.get(k) : null),
+      setItem: (k, v) => local.set(k, String(v)),
+      removeItem: k => local.delete(k),
+    },
     sessionStorage: {
-      getItem: k => (store.has(k) ? store.get(k) : null),
-      setItem: (k, v) => store.set(k, String(v)),
-      removeItem: k => store.delete(k),
+      getItem: k => (session.has(k) ? session.get(k) : null),
+      setItem: (k, v) => session.set(k, String(v)),
+      removeItem: k => session.delete(k),
     },
-    document: {
-      getElementById: id => {
-        if (!elements.has(id)) elements.set(id, makeEl());
-        return elements.get(id);
-      },
-      createElement: () => makeEl(),
-      querySelectorAll: () => [],
+    document: { getElementById: () => ({}) },
+    fetch: fetchImpl || (async () => ({ ok: false, status: 503 })),
+    appendMessage: (author, text, tag, ts, card, meta) => {
+      appended.push({ author, text, tag, ts, card, meta });
     },
-    fetch: fetchImpl,
-    appended,
-    store,
-    elements,
+    clearStream: () => { cleared++; },
+    threadsChanged: () => { changed++; },
+    statusChanged: id => { statusCalls.push(id); },
+    selectThread: id => { selectedThread = id; },
+    selectChannel: name => { selectedChannel = name; },
+    getState: () => ({
+      local,
+      session,
+      appended,
+      statusCalls,
+      cleared,
+      changed,
+      selectedThread,
+      selectedChannel,
+    }),
   };
   vm.createContext(ctx);
-  vm.runInContext(scriptSource + "\n;appendMessage = (role, text, tag) => { appended.push({role, text, tag}); return { remove() {} }; };", ctx);
+  vm.runInContext(scriptSource, ctx);
   return ctx;
 }
 
-// Case 1: failed settle fetch keeps the mark at 4 so pre-turn wakes are not
-// skipped, then the next poll settles the turn to replyId (8) without replaying
-// the turn's own assistant reply as an "update".
+// 1. Legacy sessionStorage migration into localStorage threads.
 {
-  let pollCalls = [];
-  const ctx = makeContext(async (url) => {
-    if (!String(url).includes("/messages")) {
-      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-    }
-    pollCalls.push(String(url));
-    if (pollCalls.length === 1) {
-      return { ok: false, status: 502, text: async () => "bad gateway" };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        latest_id: 8,
-        messages: [
-          { id: 5, role: "user", content: "[kanban] card done" },
-          { id: 6, role: "assistant", content: "pre-turn wake during outage" },
-          { id: 7, role: "user", content: "again" },
-          { id: 8, role: "assistant", content: "pods are healthy" },
-        ],
-      }),
-    };
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
-    "kube-agents-web-console-mark": "4",
+  const legacyId = "web-console-" + "1".repeat(32);
+  const ctx = makeHarness(null, {}, {
+    "kube-agents-web-console-session": legacyId,
+    "kube-agents-web-console-mark": "12",
   });
-  pollCalls = [];
-  await vm.runInContext("settleAfterReply('again', 'pods are healthy', 6, 8)", ctx);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "4", "failed settle must not advance mark past unseen rows");
-  await vm.runInContext("pollMessages()", ctx);
-  assert.ok(pollCalls[1].endsWith("?after=4"), "next poll must request ?after=4, got " + pollCalls[1]);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "8", "poll after failed settle must advance mark to replyId");
+  vm.runInContext("loadThreads()", ctx);
+  const threads = JSON.parse(vm.runInContext("JSON.stringify(threads)", ctx));
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0].id, legacyId);
+  assert.equal(threads[0].mark, 12);
+  assert.equal(threads[0].markKnown, true);
+  assert.equal(ctx.getState().session.has("kube-agents-web-console-session"), false);
+}
+
+// 2. capThreads keeps at most MAX_THREADS and never drops in-flight or activeId.
+{
+  const ctx = makeHarness();
+  const protectedId = "web-console-" + "a".repeat(32);
+  vm.runInContext("addThread(" + JSON.stringify(protectedId) + ", 'protected', true); startInflight(" + JSON.stringify(protectedId) + ", 'running');", ctx);
+  for (let i = 0; i < 15; i++) {
+    const id = "web-console-" + i.toString(16).padStart(32, "0");
+    vm.runInContext("addThread(" + JSON.stringify(id) + ", 't' + " + i + ", true)", ctx);
+  }
+  const ids = JSON.parse(vm.runInContext("JSON.stringify(threads.map(t => t.id))", ctx));
+  assert.equal(ids.length, 12);
+  assert.ok(ids.includes(protectedId), "in-flight thread must never be evicted by capThreads");
+  assert.equal(vm.runInContext("removeThread(" + JSON.stringify(protectedId) + ")", ctx), false);
+}
+
+// 3. mergeStoredThreads preserves object identity, keeps local in-flight threads,
+// does not advance mark on the on-screen thread, and preserves the on-screen thread
+// even if evicted by another tab.
+{
+  const idA = "web-console-" + "a".repeat(32);
+  const idB = "web-console-" + "b".repeat(32);
+  const idC = "web-console-" + "c".repeat(32);
+  const ctx = makeHarness();
+  vm.runInContext(
+    "const tA = addThread(" + JSON.stringify(idA) + ", 'A', true);" +
+    "const tB = addThread(" + JSON.stringify(idB) + ", 'B', true);" +
+    "const tC = addThread(" + JSON.stringify(idC) + ", 'C', true);" +
+    "tA.mark = 4; tA.markKnown = true;" +
+    "tB.mark = 2; tB.markKnown = true;" +
+    "activeId = " + JSON.stringify(idA) + "; view = 'thread';" +
+    "startInflight(" + JSON.stringify(idC) + ", 'busy');",
+    ctx
+  );
+  // Tab 2 advanced tA.mark to 9 and tB.mark to 7, and did not know about tC.
+  const tab2Raw = JSON.stringify([
+    { id: idA, title: "A", mark: 9, markKnown: true, updated: 100, unread: true, started: true },
+    { id: idB, title: "B", mark: 7, markKnown: true, updated: 100, unread: true, started: true },
+  ]);
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab2Raw) + ")", ctx);
+  assert.equal(vm.runInContext("findThread(" + JSON.stringify(idA) + ") === tA", ctx), true, "object identity preserved");
+  assert.equal(vm.runInContext("tA.mark", ctx), 4, "on-screen thread mark must not jump ahead before pollThread renders");
+  assert.equal(vm.runInContext("tA.unread", ctx), false, "on-screen thread stays read");
+  assert.equal(vm.runInContext("tB.mark", ctx), 7, "background thread adopts higher mark from other tab");
+  assert.equal(vm.runInContext("!!findThread(" + JSON.stringify(idC) + ")", ctx), true, "in-flight thread preserved across storage merge");
+
+  // An on-screen thread idA missing from another tab's update (e.g. evicted by capThreads in tab B)
+  // is preserved in merged threads so this tab does not jump away mid-read.
+  const tab2WithoutA = JSON.stringify([
+    { id: idB, title: "B", mark: 7, markKnown: true, updated: 100, unread: false, started: true },
+  ]);
+  vm.runInContext("delete inflight[" + JSON.stringify(idC) + "]; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
+  assert.equal(vm.runInContext("!!findThread(" + JSON.stringify(idA) + ")", ctx), true, "on-screen thread preserved across storage merge");
+  assert.equal(vm.runInContext("activeId", ctx), idA, "stays on active thread");
+  assert.equal(ctx.getState().selectedThread, null, "selectThread not called because on-screen thread kept");
+
+  // When a thread was not on screen, it is removed by another tab's update.
+  vm.runInContext("view = 'channel'; activeId = ''; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
+  assert.equal(vm.runInContext("findThread(" + JSON.stringify(idA) + ")", ctx), null, "background thread removed");
+
+  // Retaining an on-screen thread into a 12-thread stored list still caps
+  // at MAX_THREADS (12) by evicting the oldest idle thread, rather than
+  // saving 13 and letting parseThreads slice by position.
+  const full12 = Array.from({ length: 12 }, (_, i) => ({
+    id: "web-console-" + (i + 1).toString(16).padStart(32, "0"),
+    title: "T" + i,
+    mark: 1,
+    markKnown: true,
+    updated: i === 5 ? 1 : 50 + i,
+    unread: false,
+    started: true,
+  }));
+  vm.runInContext(
+    "addThread(" + JSON.stringify(idA) + ", 'Active', true);" +
+    "activeId = " + JSON.stringify(idA) + "; view = 'thread';" +
+    "mergeStoredThreads(" + JSON.stringify(JSON.stringify(full12)) + ");",
+    ctx
+  );
+  const afterCap = JSON.parse(vm.runInContext("JSON.stringify(threads.map(t => t.id))", ctx));
+  assert.equal(afterCap.length, 12, "mergeStoredThreads must cap at MAX_THREADS");
+  assert.ok(afterCap.includes(idA), "active retained thread kept");
+  assert.ok(!afterCap.includes(full12[5].id), "oldest idle thread evicted by LRU, not last by position");
+  assert.ok(afterCap.includes(full12[11].id), "newest tail thread kept");
+
+  // Two tabs viewing different older threads converge in one merge cycle
+  // instead of ping-ponging storage events forever.
+  const oldTab1 = "web-console-" + "91".padStart(32, "0");
+  const oldTab2 = "web-console-" + "92".padStart(32, "0");
+  const tab1Ctx = makeHarness();
+  const tab2Ctx = makeHarness();
+  const shared11 = Array.from({ length: 11 }, (_, i) => ({
+    id: "web-console-" + (i + 20).toString(16).padStart(32, "0"),
+    title: "S" + i,
+    mark: 1,
+    markKnown: true,
+    updated: 200 + i,
+    viewedAt: 200 + i,
+    unread: false,
+    started: true,
+  }));
+  const tab1Init = JSON.stringify([
+    { id: oldTab1, title: "Old1", mark: 1, markKnown: true, updated: 1, viewedAt: 1, unread: false, started: true },
+    ...shared11,
+  ]);
+  const tab2Init = JSON.stringify([
+    { id: oldTab2, title: "Old2", mark: 1, markKnown: true, updated: 2, viewedAt: 2, unread: false, started: true },
+    ...shared11,
+  ]);
+  vm.runInContext(
+    "threads = parseThreads(" + JSON.stringify(tab1Init) + "); activeId = " + JSON.stringify(oldTab1) + "; view = 'thread';",
+    tab1Ctx
+  );
+  vm.runInContext(
+    "threads = parseThreads(" + JSON.stringify(tab2Init) + "); activeId = " + JSON.stringify(oldTab2) + "; view = 'thread';",
+    tab2Ctx
+  );
+  // Tab 1 merges Tab 2's storage write; Tab 1 retains oldTab1 with a fresh viewedAt.
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab2Init) + ")", tab1Ctx);
+  const tab1Saved = tab1Ctx.getState().local.get("kube-agents-web-console-threads");
+  assert.ok(tab1Saved, "Tab 1 writes merged list retaining oldTab1");
+  // Tab 2 merges Tab 1's write; Tab 2 retains oldTab2 and evicts an idle shared thread, keeping oldTab1.
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab1Saved) + ")", tab2Ctx);
+  const tab2Saved = tab2Ctx.getState().local.get("kube-agents-web-console-threads");
+  assert.ok(tab2Saved, "Tab 2 writes merged list retaining oldTab2 and oldTab1");
+  // Tab 1 receives Tab 2's write: both oldTab1 and oldTab2 are present, so Tab 1 does not write again.
+  tab1Ctx.getState().local.delete("kube-agents-web-console-threads");
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab2Saved) + ")", tab1Ctx);
   assert.equal(
-    JSON.stringify(ctx.appended),
-    JSON.stringify([{ role: "agent", text: "pre-turn wake during outage", tag: "update" }]),
-    "pre-turn wake must be shown and turn reply must not be replayed"
+    tab1Ctx.getState().local.has("kube-agents-web-console-threads"),
+    false,
+    "Two-tab storage merge must converge without endless ping-pong writes"
+  );
+
+  // Removing a thread with × in Tab 2 is not undone by Tab 1 having it on screen.
+  vm.runInContext("removeThread(" + JSON.stringify(oldTab1) + ")", tab2Ctx);
+  const removedList = tab2Ctx.getState().local.get("kube-agents-web-console-removed");
+  const afterRemoveThreads = tab2Ctx.getState().local.get("kube-agents-web-console-threads");
+  tab1Ctx.getState().local.set("kube-agents-web-console-removed", removedList);
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(afterRemoveThreads) + ")", tab1Ctx);
+  assert.equal(
+    vm.runInContext("findThread(" + JSON.stringify(oldTab1) + ")", tab1Ctx),
+    null,
+    "Thread removed in Tab 2 must not be retained by Tab 1 even when on screen"
+  );
+  assert.notEqual(
+    vm.runInContext("activeId", tab1Ctx),
+    oldTab1,
+    "Tab 1 switches activeId off the removed thread"
+  );
+  // Deliberately re-adding the thread clears its removed tombstone.
+  vm.runInContext("addThread(" + JSON.stringify(oldTab1) + ", 'Reopened', true)", tab2Ctx);
+  assert.equal(
+    JSON.parse(tab2Ctx.getState().local.get("kube-agents-web-console-removed")).includes(oldTab1),
+    false,
+    "addThread clears the thread ID from kube-agents-web-console-removed"
   );
 }
 
-// Case 1b: two consecutive turns whose post-turn reads fail, followed by a poll,
-// and an unsettled turn A followed by a succeeding settleAfterReply on turn B:
-// neither turn's reply or intermediate working note is replayed as an "update".
+// 4. settleAfterReply advances mark to replyId when fetchNewMessages fails.
 {
-  let pollCalls = [];
-  const ctx = makeContext(async (url) => {
-    if (!String(url).includes("/messages")) {
-      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-    }
-    pollCalls.push(String(url));
-    if (pollCalls.length <= 2) {
-      return { ok: false, status: 502, text: async () => "bad gateway" };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        latest_id: 10,
-        messages: [
-          { id: 5, role: "user", content: "a" },
-          { id: 6, role: "assistant", content: "ra" },
-          { id: 7, role: "user", content: "b" },
-          { id: 8, role: "assistant", content: "rb" },
-          { id: 9, role: "user", content: "[kanban] card done" },
-          { id: 10, role: "assistant", content: "delegated result after outage" },
-        ],
-      }),
-    };
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
-    "kube-agents-web-console-mark": "4",
+  const id = "web-console-" + "d".repeat(32);
+  let calls = 0;
+  const ctx = makeHarness(async () => {
+    calls++;
+    if (calls === 1) return { ok: false, status: 502 };
+    return { ok: true, status: 200, json: async () => ({ latest_id: 8, messages: [] }) };
   });
-  pollCalls = [];
-  await vm.runInContext("settleAfterReply('a', 'ra', 4, undefined)", ctx);
-  await vm.runInContext("settleAfterReply('b', 'rb', 6, undefined)", ctx);
-  await vm.runInContext("pollMessages()", ctx);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "10");
-  assert.equal(
-    JSON.stringify(ctx.appended),
-    JSON.stringify([{ role: "agent", text: "delegated result after outage", tag: "update" }]),
-    "two failed settles followed by poll must not replay either turn reply"
+  vm.runInContext(
+    "const t = addThread(" + JSON.stringify(id) + ", 'test', true);" +
+    "t.mark = 4; t.markKnown = true; activeId = t.id; view = 'thread';",
+    ctx
   );
-
-  let callCount = 0;
-  const ctx2 = makeContext(async (url) => {
-    if (!String(url).includes("/messages")) {
-      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-    }
-    callCount++;
-    if (callCount === 1) {
-      return { ok: false, status: 502, text: async () => "bad gateway" };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        latest_id: 9,
-        messages: [
-          { id: 5, role: "user", content: "a" },
-          { id: 6, role: "assistant", content: "ra" },
-          { id: 7, role: "user", content: "b" },
-          { id: 8, role: "assistant", content: "checking..." },
-          { id: 9, role: "assistant", content: "rb" },
-        ],
-      }),
-    };
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
-    "kube-agents-web-console-mark": "4",
-  });
-  callCount = 0;
-  await vm.runInContext("settleAfterReply('a', 'ra', 4, undefined)", ctx2);
-  await vm.runInContext("settleAfterReply('b', 'rb', 6, 9)", ctx2);
-  assert.equal(ctx2.store.get("kube-agents-web-console-mark"), "9");
-  assert.deepEqual(ctx2.appended, [], "settling pending turn A before turn B must not replay B's working note or reply");
-
-  // Stale poll started before a turn that resolves while settleAfterReply is
-  // waiting must be discarded rather than settling unsettledTurns against
-  // pre-turn data and advancing the mark past unseen rows.
-  let resolveStalePoll;
-  let resolveSettle;
-  let msgCalls = 0;
-  const ctx3 = makeContext(async (url) => {
-    if (String(url) === "/api/chat") {
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          session_id: "web-console-" + "a".repeat(32),
-          reply: "turn reply",
-          before_id: 6,
-          reply_id: 8,
-        }),
-      };
-    }
-    if (!String(url).includes("/messages")) {
-      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-    }
-    msgCalls++;
-    if (msgCalls === 1) {
-      // Initial pre-turn poll started on script load.
-      return new Promise(r => { resolveStalePoll = r; });
-    }
-    return new Promise(r => { resolveSettle = r; });
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
-    "kube-agents-web-console-mark": "4",
-  });
-  ctx3.appended.length = 0;
-  const turnPromise = vm.runInContext("submitMessage('typed turn')", ctx3);
-  for (let i = 0; i < 20 && !resolveSettle; i++) await new Promise(r => setImmediate(r));
-  assert.ok(resolveSettle, "settleAfterReply fetch must be in flight");
-  resolveStalePoll({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      latest_id: 6,
-      messages: [
-        { id: 5, role: "user", content: "[kanban] card done" },
-        { id: 6, role: "assistant", content: "pre-turn wake result" },
-      ],
-    }),
-  });
-  await new Promise(r => setImmediate(r));
-  resolveSettle({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      latest_id: 8,
-      messages: [
-        { id: 5, role: "user", content: "[kanban] card done" },
-        { id: 6, role: "assistant", content: "pre-turn wake result" },
-        { id: 7, role: "user", content: "typed turn" },
-        { id: 8, role: "assistant", content: "turn reply" },
-      ],
-    }),
-  });
-  await turnPromise;
-  assert.equal(ctx3.store.get("kube-agents-web-console-mark"), "8");
-  assert.ok(
-    ctx3.appended.some(m => m.role === "agent" && m.text === "pre-turn wake result" && m.tag === "update"),
-    "stale pre-turn poll must not drop pre-turn wake result: " + JSON.stringify(ctx3.appended)
-  );
-
-  // Also verify seq !== turnSeq on its own: when a turn's settleAfterReply
-  // fails and submitMessage finishes (clearing turnInFlight while leaving the
-  // turn in unsettledTurns), a pre-turn poll resolving afterwards must still
-  // be discarded rather than settling the turn against pre-turn rows.
-  let resolveLateStalePoll = null;
-  let lateMsgCalls = 0;
-  const ctx3b = makeContext(async (url) => {
-    if (String(url) === "/api/chat") {
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          session_id: "web-console-" + "a".repeat(32),
-          reply: "turn reply",
-          before_id: 6,
-          reply_id: 8,
-        }),
-      };
-    }
-    if (!String(url).includes("/messages")) {
-      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-    }
-    lateMsgCalls++;
-    if (lateMsgCalls === 1) {
-      return new Promise(r => { resolveLateStalePoll = r; });
-    }
-    if (lateMsgCalls === 2) {
-      return { ok: false, status: 502, text: async () => "bad gateway" };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        latest_id: 8,
-        messages: [
-          { id: 5, role: "user", content: "[kanban] card done" },
-          { id: 6, role: "assistant", content: "pre-turn wake result" },
-          { id: 7, role: "user", content: "typed turn" },
-          { id: 8, role: "assistant", content: "turn reply" },
-        ],
-      }),
-    };
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "a".repeat(32),
-    "kube-agents-web-console-mark": "4",
-  });
-  ctx3b.appended.length = 0;
-  await vm.runInContext("submitMessage('typed turn')", ctx3b);
-  assert.equal(ctx3b.store.get("kube-agents-web-console-mark"), "4");
-  resolveLateStalePoll({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      latest_id: 6,
-      messages: [
-        { id: 5, role: "user", content: "[kanban] card done" },
-        { id: 6, role: "assistant", content: "pre-turn wake result" },
-      ],
-    }),
-  });
-  await new Promise(r => setImmediate(r));
-  await new Promise(r => setImmediate(r));
-  assert.equal(
-    ctx3b.store.get("kube-agents-web-console-mark"),
-    "4",
-    "stale pre-turn poll resolving after turn finishes must be dropped by seq !== turnSeq"
-  );
-  assert.ok(
-    !ctx3b.appended.some(m => m.tag === "update"),
-    "stale pre-turn poll must not settle pending turn early: " + JSON.stringify(ctx3b.appended)
-  );
-  await vm.runInContext("pollMessages()", ctx3b);
-  assert.equal(ctx3b.store.get("kube-agents-web-console-mark"), "8");
-  assert.equal(
-    ctx3b.appended.filter(m => m.role === "agent" && m.text === "pre-turn wake result" && m.tag === "update").length,
-    1,
-    "clean poll after discarded stale poll must show pre-turn wake once: " + JSON.stringify(ctx3b.appended)
-  );
+  await vm.runInContext("settleAfterReply(t, 'again', 'pods are healthy', 4, 8)", ctx);
+  assert.equal(vm.runInContext("t.mark", ctx), 8);
+  await vm.runInContext("pollThread(t)", ctx);
+  assert.deepEqual(ctx.getState().appended, []);
 }
 
-// Case 2: pre-turn result, two mid-turn wakes (including a multi-row wake and
-// an intermediate assistant row before the first wake), and a post-reply result,
-// even when replyId points at the post-reply wake row (id 16) rather than the
-// turn's own reply row (id 14), plus an empty-reply turn with a mid-turn wake.
+// 5. settleAfterReply handles pre-turn results (including another tab's user
+// question while inflight[t.id] is still set), mid-turn kanban wakes with
+// intermediate assistant notes on the user's own turn, and post-reply results.
 {
-  let settleReady = false;
+  const id = "web-console-" + "e".repeat(32);
   const messages = [
-    { id: 5, role: "user", content: "[kanban] card 1 done" },
-    { id: 6, role: "assistant", content: "pre-turn delegated result" },
-    { id: 7, role: "user", content: "check cluster" },
-    { id: 8, role: "assistant", content: "intermediate note before wake" },
-    { id: 9, role: "user", content: "[kanban] card 2 done mid-turn" },
-    { id: 10, role: "assistant", content: "first mid-turn wake result" },
-    { id: 11, role: "assistant", content: "first mid-turn wake second row" },
-    { id: 12, role: "user", content: "[kanban] card 3 done mid-turn" },
-    { id: 13, role: "assistant", content: "second mid-turn wake result" },
-    { id: 14, role: "assistant", content: "final turn reply" },
-    { id: 15, role: "user", content: "[kanban] card 4 done" },
-    { id: 16, role: "assistant", content: "post-reply delegated result" },
+    { id: 5, role: "user", author: "kanban", content: "[kanban] Task t_1 completed.", card: { task_id: "t_1", status: "completed", summary: "done 1" } },
+    { id: 6, role: "assistant", author: "agent", content: "pre-turn delegated result" },
+    { id: 7, role: "user", author: "user", content: "question from other tab" },
+    { id: 8, role: "assistant", author: "agent", content: "reply to other tab" },
+    { id: 9, role: "user", author: "user", content: "check cluster" },
+    { id: 10, role: "assistant", author: "agent", content: "intermediate note before wake" },
+    { id: 11, role: "user", author: "kanban", content: "[kanban] Task t_2 completed.", card: { task_id: "t_2", status: "completed", summary: "done 2" } },
+    { id: 12, role: "assistant", author: "agent", content: "first mid-turn wake result" },
+    { id: 13, role: "assistant", author: "agent", content: "intermediate note between wakes" },
+    { id: 14, role: "user", author: "kanban", content: "[kanban] Task t_3 blocked; needs attention.", card: { task_id: "t_3", status: "blocked; needs attention", summary: "blocked 3" } },
+    { id: 15, role: "assistant", author: "agent", content: "second mid-turn wake result" },
+    { id: 16, role: "assistant", author: "agent", content: "final turn reply" },
+    { id: 17, role: "user", author: "kanban", content: "[kanban] Task t_4 completed.", card: { task_id: "t_4", status: "completed", summary: "done 4" } },
+    { id: 18, role: "assistant", author: "agent", content: "post-reply delegated result" },
   ];
-  const ctx = makeContext(async (url) => {
-    if (!String(url).includes("/messages") || !settleReady) {
-      return { ok: false, status: 503, text: async () => "" };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ latest_id: 16, messages }),
-    };
-  }, {
-    "kube-agents-web-console-session": "web-console-" + "b".repeat(32),
-    "kube-agents-web-console-mark": "4",
-  });
-  settleReady = true;
-  await vm.runInContext("settleAfterReply('check cluster', 'final turn reply', 4, 16)", ctx);
-  assert.equal(
-    JSON.stringify(ctx.appended),
-    JSON.stringify([
-      { role: "agent", text: "pre-turn delegated result", tag: "update" },
-      { role: "agent", text: "first mid-turn wake result", tag: "update" },
-      { role: "agent", text: "first mid-turn wake second row", tag: "update" },
-      { role: "agent", text: "second mid-turn wake result", tag: "update" },
-      { role: "agent", text: "post-reply delegated result", tag: "update" },
-    ]),
-    "all delegated results (pre-turn, both mid-turn wakes including multi-row wake, post-reply) must be shown once"
+  const ctx = makeHarness(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ latest_id: 18, messages }),
+  }));
+  vm.runInContext(
+    "const t = addThread(" + JSON.stringify(id) + ", 'test', true);" +
+    "t.mark = 4; t.markKnown = true; activeId = t.id; view = 'thread';" +
+    "startInflight(t.id, 'check cluster');",
+    ctx
   );
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "16");
+  await vm.runInContext("settleAfterReply(t, 'check cluster', 'final turn reply', 4, 16)", ctx);
+  assert.deepEqual(
+    ctx.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [
+      { author: "kanban", text: "[kanban] Task t_1 completed.", tag: "Specialist report" },
+      { author: "agent", text: "pre-turn delegated result", tag: "update" },
+      { author: "user", text: "question from other tab", tag: "You" },
+      { author: "agent", text: "reply to other tab", tag: "update" },
+      { author: "kanban", text: "[kanban] Task t_2 completed.", tag: "Specialist report" },
+      { author: "agent", text: "first mid-turn wake result", tag: "update" },
+      { author: "kanban", text: "[kanban] Task t_3 blocked; needs attention.", tag: "Specialist report" },
+      { author: "agent", text: "second mid-turn wake result", tag: "update" },
+      { author: "kanban", text: "[kanban] Task t_4 completed.", tag: "Specialist report" },
+      { author: "agent", text: "post-reply delegated result", tag: "update" },
+    ]
+  );
+  assert.equal(vm.runInContext("t.mark", ctx), 18);
 
-  // Empty final reply (row 11 filtered out of /messages) with a mid-turn wake at row 10.
-  const emptyReplyCtx = makeContext(async () => ({
+  // Re-selecting a thread mid-turn after a kanban wake user row landed in its
+  // transcript (id <= mark) still delivers the wake's assistant reply when
+  // settleAfterReply runs with turnAt < 0 && replyAt >= 0.
+  const idReselect = "web-console-" + "f".repeat(32);
+  const ctxReselect = makeHarness(async () => ({
     ok: true,
     status: 200,
     json: async () => ({
-      latest_id: 11,
+      latest_id: 14,
       messages: [
-        { id: 7, role: "user", content: "check" },
-        { id: 8, role: "assistant", content: "working note" },
-        { id: 9, role: "user", content: "[kanban] card done" },
-        { id: 10, role: "assistant", content: "wake result on empty-reply turn" },
+        { id: 10, role: "assistant", author: "agent", content: "wake reply after reselect" },
+        { id: 11, role: "assistant", author: "agent", content: "intermediate note of user turn" },
+        { id: 14, role: "assistant", author: "agent", content: "final turn reply" },
       ],
     }),
-  }), {
-    "kube-agents-web-console-session": "web-console-" + "b".repeat(32),
-    "kube-agents-web-console-mark": "6",
-  });
-  await vm.runInContext("settleAfterReply('check', '', 6, 11)", emptyReplyCtx);
-  assert.equal(
-    JSON.stringify(emptyReplyCtx.appended),
-    JSON.stringify([{ role: "agent", text: "wake result on empty-reply turn", tag: "update" }]),
-    "mid-turn wake on an empty-reply turn must be shown once"
+  }));
+  vm.runInContext(
+    "const tr = addThread(" + JSON.stringify(idReselect) + ", 'reselect', true);" +
+    "activateThread(tr, { latest_id: 9, messages: [" +
+    "  { id: 7, role: 'user', author: 'user', content: 'check cluster' }," +
+    "  { id: 9, role: 'user', author: 'kanban', content: '[kanban] Task t_2 completed.' }" +
+    "] });",
+    ctxReselect
   );
-  assert.equal(emptyReplyCtx.store.get("kube-agents-web-console-mark"), "11");
+  ctxReselect.getState().appended.length = 0;
+  await vm.runInContext("settleAfterReply(tr, 'check cluster', 'final turn reply', 4, 14)", ctxReselect);
+  assert.deepEqual(
+    ctxReselect.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [{ author: "agent", text: "wake reply after reselect", tag: "update" }]
+  );
 }
 
-// Case 3: renderMarkdown handles column-0 fences, indented list fences,
-// indented closers, four-backtick fences, empty fenced blocks, mid-line
-// backticks, double-backtick inline code spans quoting a single backtick,
-// and literal **bold** markers inside inline code spans.
+// 6. loadSeen and updateChannel: first-visit seeding across both channels even
+// when one channel fails on first poll and the page reloads before it succeeds.
 {
-  const ctx = makeContext(async () => ({ ok: false, status: 503, text: async () => "" }));
+  const ctx1 = makeHarness();
+  vm.runInContext("loadSeen(null)", ctx1);
+  // Only alerts succeeds before reload.
+  vm.runInContext("updateChannel('alerts', [{ id: 'k8s-evt-1', message_count: 2 }], true, '')", ctx1);
+  const storedSeen = ctx1.getState().local.get("kube-agents-web-console-seen");
+  assert.ok(storedSeen, "seen map persisted after alerts seeded");
+
+  // Reload in a new context using storedSeen; scheduled must still seed on its first poll!
+  const ctx2 = makeHarness();
+  vm.runInContext("loadSeen(" + JSON.stringify(storedSeen) + ")", ctx2);
+  vm.runInContext("updateChannel('scheduled', [{ id: 'cron-a-20261012', message_count: 4 }], false, '')", ctx2);
+  assert.equal(vm.runInContext("channelUnread.scheduled", ctx2), 0, "scheduled must be seeded on first successful poll after partial reload");
+  // A subsequent message on cron-a-20261012 makes it unread and updates pageTitle.
+  vm.runInContext("updateChannel('scheduled', [{ id: 'cron-a-20261012', message_count: 5 }], false, '')", ctx2);
+  assert.equal(vm.runInContext("channelUnread.scheduled", ctx2), 1);
+  assert.equal(vm.runInContext("pageTitle()", ctx2), "(1) kube-agents");
+}
+
+// 7. postHeadline for empty triage, empty scheduled, and started sessions.
+{
+  const ctx = makeHarness();
+  const emptyAlert = JSON.parse(vm.runInContext("JSON.stringify(postHeadline({ id: 'k8s-evt-1', kind: 'event_triage', message_count: 0 }))", ctx));
+  assert.deepEqual(emptyAlert, {
+    text: "Event k8s-evt-1: the agent has not started on this yet",
+    muted: true,
+    started: false,
+  });
+  const emptySched = JSON.parse(vm.runInContext("JSON.stringify(postHeadline({ id: 'cron-sweep-20261012', kind: 'scheduled', message_count: 1, summary: { replies: 0 } }))", ctx));
+  assert.deepEqual(emptySched, {
+    text: "Check cron-sweep-20261012: the agent has not started on this yet",
+    muted: true,
+    started: false,
+  });
+  const started = JSON.parse(vm.runInContext("JSON.stringify(postHeadline({ id: 'k8s-evt-1', kind: 'event_triage', message_count: 3, summary: { subject: 'Triage Pod web-1', replies: 1 } }))", ctx));
+  assert.deepEqual(started, {
+    text: "Triage Pod web-1",
+    muted: false,
+    started: true,
+  });
+}
+
+// 8. startInflight, setStatus, addStep, appendDelta, and formatStatusWithTimer.
+{
+  const ctx = makeHarness();
+  vm.runInContext(
+    "const turn = startInflight('s1', 'hi');" +
+    "turn.startedAt = 100; turn.lastEventAt = 100;" +
+    "setStatus('s1', 'The agent started working');" +
+    "turn.lastEventAt = 100;",
+    ctx
+  );
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 102)", ctx), "The agent started working · 2 s");
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 104)", ctx), "Waiting for the model · 4 s");
+
+  // Running tool step stays on Running even after 3s.
+  vm.runInContext(
+    "addStep('s1', { id: 'kubectl_get#1', kind: 'tool', title: 'Running kubectl_get', detail: 'pods', state: 'running' });" +
+    "setStatus('s1', 'Running kubectl_get: pods');" +
+    "inflight.s1.lastEventAt = 104;",
+    ctx
+  );
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 110)", ctx), "Running kubectl_get: pods · 10 s");
+
+  // Failed tool step transitions to Waiting for the model after 3s.
+  vm.runInContext(
+    "addStep('s1', { id: 'kubectl_get#1', kind: 'tool', title: 'kubectl_get failed', state: 'failed' });" +
+    "setStatus('s1', 'kubectl_get failed');" +
+    "inflight.s1.lastEventAt = 110;",
+    ctx
+  );
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 111)", ctx), "kubectl_get failed · 11 s");
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 114)", ctx), "Waiting for the model · 14 s");
+
+  // Thinking status also transitions to Waiting for the model after 3s.
+  vm.runInContext(
+    "setStatus('s1', 'Thinking: check events');" +
+    "inflight.s1.lastEventAt = 114;",
+    ctx
+  );
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 118)", ctx), "Waiting for the model · 18 s");
+
+  // Once deltaText is streaming, it does not switch back to Waiting for the model.
+  vm.runInContext(
+    "setStatus('s1', 'Writing reply…'); appendDelta('s1', 'All '); appendDelta('s1', 'healthy.');" +
+    "inflight.s1.lastEventAt = 118;",
+    ctx
+  );
+  assert.equal(vm.runInContext("inflight.s1.deltaText", ctx), "All healthy.");
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 125)", ctx), "Writing reply… · 25 s");
+}
+
+// 9. matchTurnMetaIndex and activateThread attach step summary only to the turn's own reply row.
+{
+  const ctx = makeHarness();
+  const msgs = [
+    { id: 1, role: "user", content: "hi" },
+    { id: 2, role: "assistant", content: "turn reply" },
+    { id: 3, role: "user", author: "kanban", content: "[kanban] Task t_1 completed." },
+    { id: 4, role: "assistant", content: "later background wake reply" },
+  ];
+  assert.equal(
+    vm.runInContext("matchTurnMetaIndex(" + JSON.stringify(msgs) + ", { replyId: 2, reply: 'turn reply' })", ctx),
+    1
+  );
+  assert.equal(
+    vm.runInContext("matchTurnMetaIndex(" + JSON.stringify(msgs) + ", { reply: 'turn reply' })", ctx),
+    1
+  );
+  const tid = "web-console-" + "8".repeat(32);
+  const meta = {
+    steps: [{ id: "kubectl_get#1", state: "done", title: "Finished kubectl_get", detail: "pods" }],
+    elapsed: 5,
+    reply: "turn reply",
+    replyId: 2,
+  };
+  vm.runInContext(
+    "const tm = addThread(" + JSON.stringify(tid) + ", 'meta test', true);" +
+    "lastTurnMeta[tm.id] = " + JSON.stringify(meta) + ";" +
+    "activateThread(tm, { latest_id: 4, messages: " + JSON.stringify(msgs) + " });",
+    ctx
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(ctx.getState().appended.map(m => m.meta))),
+    [null, meta, null, null],
+    "activateThread restores lastTurnMeta on the matching reply row"
+  );
+}
+
+// 10. renderMarkdown and renderAuthorBody for event_watcher, scheduler, kanban, and agent with steps.
+{
+  const ctx = makeHarness();
   const fenced = vm.runInContext("renderMarkdown('Before\\n\\x60\\x60\\x60yaml\\nkind: Pod\\n\\x60\\x60\\x60\\nAfter')", ctx);
   assert.equal(fenced, "<p>Before</p><pre><code>kind: Pod</code></pre><p>After</p>");
-  const emptyFence = vm.runInContext("renderMarkdown('Run:\\n\\x60\\x60\\x60\\n\\x60\\x60\\x60\\nThen apply.')", ctx);
-  assert.equal(emptyFence, "<p>Run:</p><pre><code></code></pre><p>Then apply.</p>");
-  const codeWithStars = vm.runInContext("renderMarkdown('Pass \\x60**kwargs\\x60 to **func**.')", ctx);
-  assert.equal(codeWithStars, "<p>Pass <code>**kwargs</code> to <strong>func</strong>.</p>");
-  const boldWrappingCode = vm.runInContext("renderMarkdown('**Run \\x60kubectl rollout restart\\x60 next**')", ctx);
-  assert.equal(boldWrappingCode, "<p><strong>Run <code>kubectl rollout restart</code> next</strong></p>");
-  const tildeFence = vm.runInContext("renderMarkdown('~~~yaml\\nkind: Pod\\n~~~')", ctx);
-  assert.equal(tildeFence, "<pre><code>kind: Pod</code></pre>");
-  const longerInnerBackticks = vm.runInContext("renderMarkdown('\\x60a\\x60\\x60b\\x60')", ctx);
-  assert.equal(longerInnerBackticks, "<p><code>a\x60\x60b</code></p>");
-  const spacedStars = vm.runInContext("renderMarkdown('2 ** 3 ** 4')", ctx);
-  assert.equal(spacedStars, "<p>2 ** 3 ** 4</p>");
-  const indentedListFence = vm.runInContext(
-    "renderMarkdown('- Apply:\\n  \\x60\\x60\\x60yaml\\n  kind: Pod\\n\\n  spec: {}\\n  \\x60\\x60\\x60\\n- Done')",
-    ctx
+  const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
+  assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
+  assert.equal(
+    vm.runInContext("renderMarkdown('1. step\\n   \\x60\\x60\\x60yaml\\n   a: 1\\n   \\x60\\x60\\x60')", ctx),
+    "<p>1. step</p><pre><code>a: 1</code></pre>"
   );
   assert.equal(
-    indentedListFence,
-    "<p>- Apply:</p><pre><code>kind: Pod\n\nspec: {}</code></pre><p>- Done</p>"
-  );
-  const indentedCloser = vm.runInContext(
-    "renderMarkdown('\\x60\\x60\\x60yaml\\nkind: Pod\\n  \\x60\\x60\\x60\\nAfter that, apply it.')",
-    ctx
+    vm.runInContext("renderMarkdown('\\x60\\x60\\x60\\x60md\\n\\x60\\x60\\x60yaml\\nx: 1\\n\\x60\\x60\\x60\\n\\x60\\x60\\x60\\x60')", ctx),
+    "<pre><code>\x60\x60\x60yaml\nx: 1\n\x60\x60\x60</code></pre>"
   );
   assert.equal(
-    indentedCloser,
-    "<pre><code>kind: Pod</code></pre><p>After that, apply it.</p>"
-  );
-  const fourBacktick = vm.runInContext(
-    "renderMarkdown('\\x60\\x60\\x60\\x60\\n\\x60\\x60\\x60\\nnested\\n\\x60\\x60\\x60\\n\\x60\\x60\\x60\\x60')",
-    ctx
-  );
-  assert.equal(fourBacktick, "<pre><code>\x60\x60\x60\nnested\n\x60\x60\x60</code></pre>");
-  const doubleBacktickSpan = vm.runInContext(
-    "renderMarkdown('Use \\x60\\x60a \\x60 b\\x60\\x60 inline.')",
-    ctx
-  );
-  assert.equal(doubleBacktickSpan, "<p>Use <code>a \x60 b</code> inline.</p>");
-  const fenceAfterRejectedOpen = vm.runInContext(
-    "renderMarkdown('\\x60\\x60\\x60a\\x60b\\n\\x60\\x60\\x60\\ncode\\n\\x60\\x60\\x60\\nAfter')",
-    ctx
+    vm.runInContext("renderMarkdown('~~~sh\\necho hi\\n~~~')", ctx),
+    "<pre><code>echo hi</code></pre>"
   );
   assert.equal(
-    fenceAfterRejectedOpen,
+    vm.runInContext("renderMarkdown('glob \\x60a/**/b\\x60 and **bold \\x60x*y\\x60**')", ctx),
+    "<p>glob <code>a/**/b</code> and <strong>bold <code>x*y</code></strong></p>"
+  );
+  assert.equal(
+    vm.runInContext("renderMarkdown('2 ** 3 * 4 = 24')", ctx),
+    "<p>2 ** 3 * 4 = 24</p>"
+  );
+  assert.equal(
+    vm.runInContext("renderMarkdown('\\x60\\x60 \\x60foo\\x60 \\x60\\x60 and \\x60a\\x60\\x60b\\x60')", ctx),
+    "<p><code>\x60foo\x60</code> and <code>a\x60\x60b</code></p>"
+  );
+  assert.equal(
+    vm.runInContext("renderMarkdown('\\x60\\x60\\x60a\\x60b\\n\\x60\\x60\\x60\\ncode\\n\\x60\\x60\\x60\\nAfter')", ctx),
     "<p>\x60\x60\x60a\x60b</p><pre><code>code</code></pre><p>After</p>"
   );
-  const crossLineCodeSpan = vm.runInContext(
-    "renderMarkdown('Use \\x60kubectl\\nget pods\\x60 now.')",
-    ctx
-  );
   assert.equal(
-    crossLineCodeSpan,
+    vm.runInContext("renderMarkdown('Use \\x60kubectl\\nget pods\\x60 now.')", ctx),
     "<p>Use <code>kubectl get pods</code> now.</p>"
   );
-  const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
-  assert.ok(inline.includes("Use <code>yaml on its own line, not </code>inline"), "mid-line backticks must not drop surrounding prose: " + inline);
-  assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
+
+  const alertHtml = vm.runInContext("renderAuthorBody('event_watcher', 'raw prompt', { subject: 'Triage Pod web-1', resource: 'default/Pod/web-1', reason: 'BackOff', warning: 'CrashLoopBackOff' })", ctx);
+  assert.ok(alertHtml.includes("msg-card-alert") && alertHtml.includes("default/Pod/web-1") && alertHtml.includes("Show routing prompt"));
+
+  const schedHtml = vm.runInContext("renderAuthorBody('scheduler', 'sweep prompt', { subject: 'Run policy sweep' })", ctx);
+  assert.ok(schedHtml.includes("msg-card-cron") && schedHtml.includes("Run policy sweep") && schedHtml.includes("Show scheduled prompt"));
+
+  const kanbanHtml = vm.runInContext("renderAuthorBody('kanban', 'wake text', { task_id: 't_99', status: 'blocked; needs attention', title: 'Investigate PVC', summary: 'StorageClass missing' })", ctx);
+  assert.ok(kanbanHtml.includes("msg-card-kanban") && kanbanHtml.includes("t_99") && kanbanHtml.includes("blocked; needs attention") && kanbanHtml.includes("StorageClass missing"));
+
+  const agentHtml = vm.runInContext("renderAuthorBody('agent', 'All good.', null, { elapsed: 4, steps: [{ id: 'kubectl_get#1', state: 'done', title: 'Finished kubectl_get', detail: 'pods' }] })", ctx);
+  assert.ok(agentHtml.includes("Worked for 4 s &middot; 1 step") && agentHtml.includes("Finished kubectl_get") && agentHtml.includes("<p>All good.</p>"));
 }
 
-// Case 4: first turn on a fresh tab mints the session and sets the mark to 0
-// before the request, so a dropped connection preserves the session and
-// displays the late reply on the next poll.
+// 11. renderThreads template signature guard and onEnter IME composition guard.
 {
-  let chatSessionId = "";
-  const ctx = makeContext(async (url, opts) => {
-    if (String(url) === "/api/chat") {
-      chatSessionId = JSON.parse(opts.body).session_id;
-      throw new Error("socket hang up");
-    }
-    if (String(url).includes("/messages")) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          latest_id: 2,
-          messages: [
-            { id: 1, role: "user", content: "first question" },
-            { id: 2, role: "assistant", content: "late reply after drop" },
-          ],
-        }),
-      };
-    }
-    return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-  });
-  ctx.appended.length = 0;
-  await vm.runInContext("submitMessage('first question')", ctx);
-  assert.ok(/^web-console-[0-9a-f]{32}$/.test(chatSessionId), "first turn must send a minted session ID: " + chatSessionId);
-  assert.equal(ctx.store.get("kube-agents-web-console-session"), chatSessionId);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "0");
-  await vm.runInContext("pollMessages()", ctx);
-  assert.ok(
-    ctx.appended.some(m => m.role === "agent" && m.text === "late reply after drop" && m.tag === "update"),
-    "poll after dropped first turn must display late reply: " + JSON.stringify(ctx.appended)
-  );
-}
+  const ctx = makeHarness();
+  let writes = 0;
+  let storedInner = "";
+  const listEl = {
+    get innerHTML() {
+      // Simulate browser HTML serializer canonicalizing &times; to literal ×.
+      return storedInner.replace(/&times;/g, "\u00d7");
+    },
+    set innerHTML(v) {
+      writes++;
+      storedInner = v;
+    },
+    contains: () => false,
+    querySelector: () => null,
+  };
+  ctx.document.getElementById = id => (id === "thread-list" ? listEl : {});
+  ctx.CSS = { escape: s => s };
+  const tid = "web-console-" + "7".repeat(32);
+  vm.runInContext("addThread(" + JSON.stringify(tid) + ", 'Chat 1', true); renderThreads();", ctx);
+  assert.equal(writes, 1, "first renderThreads writes innerHTML");
+  vm.runInContext("renderThreads();", ctx);
+  assert.equal(writes, 1, "second renderThreads with unchanged template must skip DOM rewrite even when list.innerHTML canonicalized &times;");
 
-// Case 5: recreated session (created: true after store loss when the tab mark
-// is 138 and new IDs start at 1) resets the mark so delegated results on the
-// recreated session are shown, and Enter during IME composition (isComposing
-// or keyCode 229) does not send the half-typed message.
-{
-  let msgPhase = 0;
-  let chatCalls = 0;
-  const sid = "web-console-" + "e".repeat(32);
-  const ctx = makeContext(async (url) => {
-    if (String(url) === "/api/chat") {
-      chatCalls++;
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          session_id: sid,
-          reply: "fresh store reply",
-          reply_id: 2,
-          created: true,
-        }),
-      };
-    }
-    if (String(url).includes("/messages")) {
-      msgPhase++;
-      if (msgPhase === 1) {
-        return { ok: true, status: 200, json: async () => ({ latest_id: 138, messages: [] }) };
-      }
-      if (msgPhase === 2) {
-        return {
-          ok: true,
-          status: 200,
-          json: async () => ({
-            latest_id: 2,
-            messages: [
-              { id: 1, role: "user", content: "after store wipe" },
-              { id: 2, role: "assistant", content: "fresh store reply" },
-            ],
-          }),
-        };
-      }
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          latest_id: 4,
-          messages: [
-            { id: 3, role: "user", content: "[kanban] card done" },
-            { id: 4, role: "assistant", content: "delegated result on recreated session" },
-          ],
-        }),
-      };
-    }
-    return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
-  }, {
-    "kube-agents-web-console-session": sid,
-    "kube-agents-web-console-mark": "138",
-  });
-  ctx.SetImmediate = setImmediate;
-  ctx.appended.length = 0;
-  await vm.runInContext("submitMessage('after store wipe')", ctx);
-  assert.equal(ctx.store.get("kube-agents-web-console-mark"), "2", "created:true must reset old mark 138 and settle to new reply_id 2");
-  await vm.runInContext("pollMessages()", ctx);
-  assert.ok(
-    ctx.appended.some(m => m.role === "agent" && m.text === "delegated result on recreated session" && m.tag === "update"),
-    "poll after recreated session must show delegated result at id 4: " + JSON.stringify(ctx.appended)
-  );
-
-  // IME composition check on prompt-input keydown.
-  const inputEl = ctx.elements.get("prompt-input");
-  const keydown = inputEl.listeners.keydown[0];
-  inputEl.value = "half-typed";
-  const callsBefore = chatCalls;
-  keydown({ key: "Enter", shiftKey: false, isComposing: true, keyCode: 13, preventDefault() {} });
-  keydown({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 229, preventDefault() {} });
-  assert.equal(inputEl.value, "half-typed", "IME Enter must not clear prompt-input");
-  assert.equal(chatCalls, callsBefore, "IME Enter must not submit a turn");
+  let sent = 0;
+  let listener = null;
+  const fakeInput = { addEventListener: (_, fn) => { listener = fn; } };
+  ctx.fakeInput = fakeInput;
+  ctx.onSend = () => { sent++; };
+  vm.runInContext("onEnter(fakeInput, onSend)", ctx);
+  listener({ key: "Enter", shiftKey: false, isComposing: true, keyCode: 13, preventDefault() {} });
+  listener({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 229, preventDefault() {} });
+  assert.equal(sent, 0, "IME composition Enter must not submit");
+  listener({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13, preventDefault() {} });
+  assert.equal(sent, 1, "plain Enter submits once");
 }
 `)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("node page test failed: %v\n%s", err, out)
+		t.Fatalf("node page harness failed: %v\n%s", err, out)
 	}
 }

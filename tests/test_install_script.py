@@ -1377,6 +1377,10 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                 proc = self._run_install_func(cmd, env=env)
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("cannot be combined with --accept-no-network-policy", proc.stderr + proc.stdout)
+                self.assertIn(
+                    "remove any stale ACCEPT_NO_NETWORK_POLICY=true from install.env",
+                    proc.stderr + proc.stdout,
+                )
         # When ACCEPT_NO_NETWORK_POLICY=true was only recorded in install.env
         # (not passed as a flag), validate_existing_cluster_opt_in_flags lets
         # the run proceed to check_existing_cluster_network_policy_preflight so

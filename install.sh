@@ -4774,7 +4774,7 @@ validate_existing_cluster_opt_in_flags() {
      is_truthy "${PARAM_ACCEPT_NO_NETWORK_POLICY:-false}" && \
      is_truthy "${PARAM_ENABLE_WEB_CONSOLE:-${WEB_CONSOLE_ENABLED:-false}}"; then
     print_error "--enable-web-console (WEB_CONSOLE_ENABLED=true) cannot be combined with --accept-no-network-policy (ACCEPT_NO_NETWORK_POLICY=true)."
-    print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement (--enable-network-policy or Dataplane V2, and remove any stale ACCEPT_NO_NETWORK_POLICY=true from install.env), or leave the web console off (--enable-web-console=false)."
+    print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement (--enable-network-policy or Dataplane V2, and remove any stale ACCEPT_NO_NETWORK_POLICY=true from install.env if the cluster already enforces it), or leave the web console off (--enable-web-console=false)."
     write_json_report "REFUSED_WEB_CONSOLE_WITHOUT_NETWORK_POLICY"
     exit 1
   fi
