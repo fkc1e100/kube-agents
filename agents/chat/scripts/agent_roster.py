@@ -42,8 +42,9 @@ _MAX_NAME_LEN = 63
 # The reconcile's snapshot ($HERMES_HOME/fleet_scope.json) and the vocabulary its
 # writer, agents/platform/scripts/cluster_agent_reconcile.py, uses for each project
 # row. Read the way fleet_scope_targets.declared_scope_targets reads it: a row is in
-# scope only while its state is in-scope (not retiring), and listed only when the
-# reconcile could read it or it is the install's own project.
+# scope only while its state is in-scope (not retiring). A row the reconcile could
+# not read (denied, unreachable, over-cap) is still in scope and is listed with its
+# outcome, so a partial read never renders as a complete list.
 SNAPSHOT_FILE = "fleet_scope.json"
 SNAPSHOT_STATE_IN_SCOPE = "in-scope"
 SNAPSHOT_READABLE_OUTCOMES = ("ok", "api-disabled")
@@ -280,7 +281,7 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
 
 
 def _snapshot_projects(path: Path) -> list[str] | None:
-    """In-scope, readable projects from the reconcile's snapshot; ``None`` with no snapshot."""
+    """In-scope projects from the reconcile's snapshot, unreadable ones marked; ``None`` with no snapshot."""
     payload = _read_json_object(path)
     if payload is None or not isinstance(payload.get("projects"), list):
         return None
@@ -293,6 +294,8 @@ def _snapshot_projects(path: Path) -> list[str] | None:
         via = row.get("via") if isinstance(row.get("via"), list) else []
         if row.get("outcome") in SNAPSHOT_READABLE_OUTCOMES or SNAPSHOT_VIA_MANAGEMENT in via:
             found.append(str(row["id"]))
+        else:
+            found.append(f"{row['id']} ({row.get('outcome') or 'unread'})")
     return found
 
 
@@ -349,9 +352,12 @@ def _read_scope_projects(
             if isinstance(cid, dict) and cid.get("project"):
                 projects.add(str(cid["project"]))
 
-    # The host cluster's own project is always in scope.
-    if host_identity and host_identity.get("project"):
-        projects.add(host_identity["project"])
+    # The host cluster's own project is always in scope. A numeric project (the
+    # operator accepts a project number in spec.harness.projectId) is skipped: the
+    # snapshot and the render name projects by ID, so it would list the project twice.
+    host_project = (host_identity or {}).get("project", "")
+    if host_project and not host_project.isdigit():
+        projects.add(host_project)
 
     return sorted(projects)
 

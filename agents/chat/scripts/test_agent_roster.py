@@ -321,8 +321,11 @@ class TestHostAndFleetScopeRendering(unittest.TestCase):
             scope_file.write_text('{"present": true, "projects": ["render-only"]}\n')
             out = self._render(base, {"KUBEAGENTS_SCOPE_FILE": str(scope_file)})
 
-        self.assertIn("- GCP projects in scope (2): gca-gke-2025, kube-agents-demo", out)
-        for absent in ("sandbox-scratch", "retired-proj,", "denied-proj", "render-only"):
+        self.assertIn(
+            "- GCP projects in scope (3): denied-proj (denied), gca-gke-2025, kube-agents-demo\n",
+            out,
+        )
+        for absent in ("sandbox-scratch", "retired-proj,", "render-only"):
             self.assertNotIn(absent, out.split("- Cluster agents")[0])
 
     def test_render_drops_projects_matching_exclude_globs(self):
@@ -337,6 +340,24 @@ class TestHostAndFleetScopeRendering(unittest.TestCase):
 
         self.assertIn("- GCP projects in scope (2): gca-gke-2025, kube-agents-demo", out)
         self.assertNotIn("sandbox-scratch", out)
+
+    def test_a_numeric_host_project_is_not_listed_beside_its_id(self):
+        with TemporaryDirectory() as tmp:
+            base = self._setup_three_cluster_fleet(tmp)
+            (Path(tmp) / "fleet_scope.json").write_text(
+                '{"projects": [{"id": "kube-agents-demo", "state": "in-scope", '
+                '"outcome": "ok", "via": ["management"]}]}\n'
+            )
+            out = self._render(
+                base,
+                {
+                    "GKE_CLUSTER_NAME": "platform-agent-host",
+                    "GKE_PROJECT_ID": "123456789012",
+                    "GKE_LOCATION": "us-central1",
+                },
+            )
+
+        self.assertIn("- GCP projects in scope (1): kube-agents-demo\n", out)
 
     def test_a_partial_host_identity_elects_no_host_cluster(self):
         # Two cluster agents share gca-gke-2025; a project alone must not pick one.

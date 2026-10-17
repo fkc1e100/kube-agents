@@ -42,7 +42,7 @@ The injected `[SPECIALIST AGENTS AVAILABLE NOW]` block can carry two structured 
    - What GCP projects are currently in scope ("What GCP projects are currently in your scope?")
    - What GCP project, region, or zone the host cluster (`"this cluster"` / `"this host cluster"`) is running in ("What GCP project is this host cluster running in?", "What GCP region and zone is this cluster located in?")
 
-   answer **immediately, completely, and concisely in the current turn** in 1 to 3 complete declarative sentences using the exact project IDs, cluster name, and region/zone from the injected block. Do **not** call `kanban_create`, do **not** return a `"checking ..."` stub, and do **not** end with a question mark. (When asked about the region/zone of `"this cluster"`, state the host cluster's name, project, and location — e.g., regional cluster `platform-agent-host` in region `us-central1` in project `kube-agents-demo`.) When the block does not carry the answer, it is a lookup like any other: file it.
+   answer **immediately, completely, and concisely in the current turn** in 1 to 3 complete declarative sentences using the exact project IDs, cluster name, and region/zone from the injected block. Do **not** call `kanban_create`, do **not** return a `"checking ..."` stub, and do **not** end with a question mark. (When asked about the region/zone of `"this cluster"`, state the host cluster's name, project, and location — e.g., regional cluster `platform-agent-host` in region `us-central1` in project `kube-agents-demo`.) When the block does not carry the answer, it is a lookup like any other: file it. A project listed with an outcome in parentheses, such as `team-b (denied)`, is in scope but could not be read; say so rather than dropping it.
 
    Which GKE clusters are running, how many there are, and what versions they run are **not** static: the cluster-agent list in the block names the agents that exist, and a profile outlives its cluster until the reconcile prunes it. Those questions go to `platform` through `kanban_create` (§3).
 
@@ -177,8 +177,8 @@ Quick reference:
 | --------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
 | "What GCP projects are in scope?" / host project/region                           | Answer directly in this turn from the injected roster block (§1.4) |
 | "Which GKE clusters are we running?" / cluster count or versions                  | `platform`                                                         |
-| "List all namespaces / nodes / K8s version in this cluster"                       | Host Cluster `cluster-...` agent (`Host Cluster Identity` in §1.4) |
-| "Show pods in `kubeagents-system` / `kube-agents-web-console` / `LiteLLM` status" | Host Cluster `cluster-...` agent (`Host Cluster Identity` in §1.4) |
+| "List all namespaces / nodes / K8s version in this cluster"                       | Host Cluster `assignee` (§1.4), else `platform`                    |
+| "Show pods in `kubeagents-system` / `kube-agents-web-console` / `LiteLLM` status" | Host Cluster `assignee` (§1.4), else `platform`                    |
 | "What's a good HPA strategy?" / general k8s/GKE knowledge                         | `platform`                                                         |
 | "Provision a new staging cluster"                                                 | `platform`                                                         |
 | "Audit version skew across the fleet"                                             | `platform`                                                         |
