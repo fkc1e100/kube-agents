@@ -238,6 +238,14 @@ type config struct {
 	ReleaseRepo   string
 	AutoUpgrade   bool
 	GitHubAPIBase string
+
+	// AutoUpgradeWindow limits automatic upgrades to a maintenance window;
+	// nil means any time. AutoUpgradeMinReleaseAge is how long a release
+	// must have been published before an automatic upgrade installs it;
+	// zero turns the check off. Neither applies to the manual Upgrade
+	// button. See upgrade.go.
+	AutoUpgradeWindow        *upgradeWindow
+	AutoUpgradeMinReleaseAge time.Duration
 }
 
 func loadConfig() config {
@@ -276,6 +284,7 @@ func loadConfig() config {
 		log.Printf(logPrefix+"%s=%q is not owner/name; using %s", envReleaseRepo, cfg.ReleaseRepo, defaultReleaseRepo)
 		cfg.ReleaseRepo = defaultReleaseRepo
 	}
+	cfg.AutoUpgradeWindow, cfg.AutoUpgradeMinReleaseAge = loadAutoUpgradePolicy()
 	return cfg
 }
 
@@ -428,6 +437,13 @@ type server struct {
 	autoUpgradeSet        bool
 	autoUpgradeEnabled    bool
 	lastAutoUpgradeTarget string
+	// autoUpgradeHold is why the last automatic check did not start an
+	// upgrade (outside the window, agents busy, release too new); empty
+	// when nothing is held. GET /api/upgrade/status reports it as Detail.
+	autoUpgradeHold string
+	// now is the clock the automatic upgrade gates read; nil means
+	// time.Now. Tests replace it.
+	now func() time.Time
 
 	// reposMu guards the dynamically loaded / updated GitOps & IAM repositories.
 	reposMu        sync.RWMutex

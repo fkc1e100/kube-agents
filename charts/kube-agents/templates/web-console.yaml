@@ -178,6 +178,14 @@ spec:
             {{- $upgradeRunner := .Values.webConsole.upgradeRunner | default dict }}
             - name: AUTO_UPGRADE
               value: {{ ($upgradeRunner.autoUpgrade | default false) | ternary "true" "false" | quote }}
+            {{- with $upgradeRunner.autoUpgradeWindow }}
+            - name: AUTO_UPGRADE_WINDOW
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if hasKey $upgradeRunner "autoUpgradeMinReleaseAge" }}
+            - name: AUTO_UPGRADE_MIN_RELEASE_AGE
+              value: {{ $upgradeRunner.autoUpgradeMinReleaseAge | toString | quote }}
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
