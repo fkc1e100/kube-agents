@@ -1465,6 +1465,42 @@ plugins:
 # docs/site/src/content/docs/deploy/web-console.md.
 webConsole:
   enabled: false
+  # GET /api/environment: versions, install and last-rollout dates, and
+  # counts of nodes, namespaces, pods and controllers, for the console's
+  # feedback reports. Needs a service account with list on those kinds and
+  # get on the PlatformAgent, which the chart creates. Counts only: the
+  # console discards the listed items and never returns a name.
+  environment:
+    enabled: true
+  # "Polish with Gemini" in the feedback form: POST /api/assist sends the
+  # user's draft title and details to the install's own inference gateway
+  # (the LiteLLM Service the agent uses) with an editing prompt, and puts
+  # the edited text back in the form. One completion per click, no tools,
+  # nothing stored. Off when litellm.enabled is false, or set url to another
+  # OpenAI-compatible endpoint reachable from the console pod. The
+  # environment block of a report is generated and is never sent.
+  assist:
+    enabled: true
+    # The model name LiteLLM routes; empty means the gateway's default alias.
+    model: model-default
+    # Overrides the in-cluster inference-gateway URL.
+    url: ""
+  # GET /api/release: the version this install runs (from the image tag:
+  # a release tag, or a commit for a build from source) and the newest
+  # release on GitHub. One anonymous read of
+  # api.github.com/repos/<repo>/releases/latest per hour from the console
+  # pod; set enabled to false on a cluster without egress to GitHub.
+  releaseCheck:
+    enabled: true
+    repo: gke-labs/kube-agents
+  # POST /api/upgrade and GET /api/upgrade/status: launches an ephemeral
+  # Pod/kube-agents-upgrade-runner in the release namespace to run the
+  # release-pinned upgrade.sh script and stream its logs to the browser.
+  # When autoUpgrade is true (or enabled in the console UI), the console
+  # automatically runs upgrade.sh when a newer release is published.
+  upgradeRunner:
+    enabled: true
+    autoUpgrade: false
   image:
     repository: ghcr.io/gke-labs/kube-agents/web-console
     tag: "" # defaults to platformAgent.deployment.image.tag, then Chart.appVersion

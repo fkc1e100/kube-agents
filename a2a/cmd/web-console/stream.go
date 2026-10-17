@@ -140,6 +140,8 @@ type stepEvent struct {
 	Title  string `json:"title"`
 	Detail string `json:"detail,omitempty"`
 	State  string `json:"state"`
+	Tool   string `json:"tool,omitempty"`
+	Skill  string `json:"skill,omitempty"`
 }
 
 type deltaEvent struct {
@@ -323,6 +325,8 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 						Title:  "Running " + tool,
 						Detail: clip(ev.Preview, statusFragmentRunes),
 						State:  stepStateRunning,
+						Tool:   tool,
+						Skill:  detectSkillFromToolCall(ev.ToolName, ev.Preview),
 					}
 					openTools[ev.ToolName] = append(openTools[ev.ToolName], st)
 					if key != "" {

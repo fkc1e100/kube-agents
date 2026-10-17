@@ -124,6 +124,7 @@ var (
 	eventReasonPattern    = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Event Reason|What):\*{0,2}\s*(.+)$`)
 	eventWarningPattern   = regexp.MustCompile(`(?m)^-\s+\*{0,2}(?:Warning Message|Who):\*{0,2}\s*(.+)$`)
 	kanbanHeaderPattern   = regexp.MustCompile(`^\[kanban\] Task (t_[0-9a-zA-Z_-]+) ([^\r\n]+?)\.?\s*(?:\r?\n|$)`)
+	kanbanTaskIDPattern   = regexp.MustCompile(`^t_[0-9a-zA-Z_-]{1,40}$`)
 	kanbanTitlePattern    = regexp.MustCompile(`(?m)^Title:\s*(.+)$`)
 	kanbanAssigneePattern = regexp.MustCompile(`(?m)^Assignee:\s*(.+)$`)
 	kanbanResultPattern   = regexp.MustCompile(`(?ms)\n(?:Result|Reason):\s*(.+?)(?:\n\nThis is an automatic task-status notification|\z)`)
@@ -172,9 +173,13 @@ func classifySession(id, source, title string) string {
 // messagesPageLimit messages, so it is exact for a short session and a floor
 // for a long one.
 type sessionSummary struct {
-	Subject string `json:"subject"`
-	Latest  string `json:"latest"`
-	Replies int    `json:"replies"`
+	Subject string   `json:"subject"`
+	Latest  string   `json:"latest"`
+	Replies int      `json:"replies"`
+	Skills  []string `json:"skills,omitempty"`
+	// Agents are the kanban assignees that reported into the session, in
+	// the page's short form ("Cluster agent · name", "Platform agent").
+	Agents []string `json:"agents,omitempty"`
 }
 
 type summaryEntry struct {
@@ -262,10 +267,22 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 	if failure != nil {
 		return out, false
 	}
+	kind := kindOther
+	switch {
+	case eventTriageIDPattern.MatchString(sid):
+		kind = kindEventTriage
+	case scheduledIDPattern.MatchString(sid):
+		kind = kindScheduled
+	}
+	var skills []string
 	for _, m := range first {
-		if m.Role == roleUser && hasText(m) {
+		_, mSkills := extractMessageToolActivity(m)
+		skills = mergeSkills(skills, mSkills...)
+		if hasText(m) {
+			skills = mergeSkills(skills, extractTextSkills(kind, sid, *m.Content, nil)...)
+		}
+		if out.Subject == "" && m.Role == roleUser && hasText(m) {
 			out.Subject = summarySubject(*m.Content)
-			break
 		}
 	}
 	latest, failure := s.fetchMessagesPage(ctx, fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=%d&offset=0",
@@ -273,7 +290,18 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 	if failure != nil {
 		return out, false
 	}
+	var agents []string
 	for i := len(latest) - 1; i >= 0; i-- {
+		_, mSkills := extractMessageToolActivity(latest[i])
+		skills = mergeSkills(skills, mSkills...)
+		if hasText(latest[i]) {
+			skills = mergeSkills(skills, extractTextSkills(kind, sid, *latest[i].Content, nil)...)
+			if latest[i].Role == roleUser {
+				if card, ok := s.parseKanbanCard(*latest[i].Content); ok && card.Assignee != "" {
+					agents = mergeSkills(agents, card.Assignee)
+				}
+			}
+		}
 		if latest[i].Role != roleAssistant || !hasText(latest[i]) {
 			continue
 		}
@@ -282,6 +310,8 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 		}
 		out.Replies++
 	}
+	out.Skills = skills
+	out.Agents = agents
 	return out, true
 }
 
@@ -384,13 +414,36 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	if kind != kindConsole {
 		out.ChatPlatform = s.cfg.ChatPlatform
 	}
-	var textMessages []hermesMessage
+	type annotatedText struct {
+		msg    hermesMessage
+		steps  []messageStep
+		skills []string
+	}
+	var textMessages []annotatedText
+	var pendingSteps []messageStep
+	var pendingSkills []string
 	for _, m := range rows {
 		if m.ID > out.LatestID {
 			out.LatestID = m.ID
 		}
+		steps, skills := extractMessageToolActivity(m)
+		if len(steps) > 0 && len(pendingSteps) < maxStepsPerTurn {
+			rem := maxStepsPerTurn - len(pendingSteps)
+			if len(steps) > rem {
+				steps = steps[:rem]
+			}
+			pendingSteps = append(pendingSteps, steps...)
+		}
+		pendingSkills = mergeSkills(pendingSkills, skills...)
 		if hasText(m) {
-			textMessages = append(textMessages, m)
+			ann := annotatedText{msg: m}
+			if m.Role == roleAssistant {
+				ann.steps = foldDelegations(pendingSteps)
+				ann.skills = pendingSkills
+				pendingSteps = nil
+				pendingSkills = nil
+			}
+			textMessages = append(textMessages, ann)
 		}
 	}
 	truncatedHead := !reachedStart
@@ -405,13 +458,20 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		truncatedHead = true
 	}
 	seenUser := truncatedHead
-	for _, m := range textMessages {
+	for _, item := range textMessages {
 		firstUser := false
-		if m.Role == roleUser && !seenUser {
+		if item.msg.Role == roleUser && !seenUser {
 			firstUser = true
 			seenUser = true
 		}
-		out.Messages = append(out.Messages, s.buildSessionMessage(kind, firstUser, m))
+		built := s.buildSessionMessage(kind, sid, firstUser, item.msg)
+		if len(item.steps) > 0 {
+			built.Steps = item.steps
+		}
+		if len(item.skills) > 0 {
+			built.Skills = mergeSkills(built.Skills, item.skills...)
+		}
+		out.Messages = append(out.Messages, built)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -419,7 +479,7 @@ func (s *server) handleTranscript(w http.ResponseWriter, r *http.Request) {
 // buildSessionMessage tags a user or assistant row with its author and
 // extracts a card for automated prompts (event watcher, scheduler, or kanban
 // task completion).
-func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMessage) sessionMessage {
+func (s *server) buildSessionMessage(kind, sid string, isFirstUser bool, m hermesMessage) sessionMessage {
 	content := *m.Content
 	msg := sessionMessage{
 		ID:        m.ID,
@@ -429,16 +489,22 @@ func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMess
 		Timestamp: m.Timestamp,
 	}
 	if m.Role != roleUser {
+		msg.Skills = extractTextSkills(kind, sid, content, nil)
 		return msg
 	}
 	if card, ok := s.parseKanbanCard(content); ok {
+		card.Skills = extractTextSkills(kind, sid, content, card)
 		msg.Author = authorKanban
 		msg.Card = card
+		msg.Skills = card.Skills
 		return msg
 	}
 	if isFirstUser && kind == kindEventTriage {
 		msg.Author = authorEventWatcher
-		msg.Card = parseEventWatcherCard(content)
+		card := parseEventWatcherCard(content)
+		card.Skills = extractTextSkills(kind, sid, content, card)
+		msg.Card = card
+		msg.Skills = card.Skills
 		return msg
 	}
 	if kind == kindScheduled {
@@ -447,11 +513,15 @@ func (s *server) buildSessionMessage(kind string, isFirstUser bool, m hermesMess
 				msg.Content = body
 			}
 			msg.Author = authorScheduler
-			msg.Card = &messageCard{Subject: summarySubject(msg.Content)}
+			card := &messageCard{Subject: summarySubject(msg.Content)}
+			card.Skills = extractTextSkills(kind, sid, msg.Content, card)
+			msg.Card = card
+			msg.Skills = card.Skills
 			return msg
 		}
 	}
 	msg.Author = authorUser
+	msg.Skills = extractTextSkills(kind, sid, content, nil)
 	return msg
 }
 
@@ -542,4 +612,304 @@ func (s *server) lookupSession(ctx context.Context, sid string) (hermesSession, 
 		return out.Session, &upstreamFailure{http.StatusBadGateway, "agent_bad_response", "Agent gateway returned an unreadable session."}
 	}
 	return out.Session, nil
+}
+
+// knownPlatformSkills lists the built-in Kube-Agents platform and cluster
+// skills so references in tool calls, scheduled audit IDs, and kanban task
+// bodies or results can be surfaced as structured skill badges.
+var knownPlatformSkills = []string{
+	"gke-workload-troubleshooting",
+	"gke-stall-detection",
+	"gke-compute-classes",
+	"gke-cluster-autoscaler",
+	"gke-workload-scaling",
+	"gke-reliability",
+	"gke-storage",
+	"gke-networking",
+	"gke-service-networking",
+	"gke-platform-security",
+	"gke-workload-security",
+	"gke-observability",
+	"gke-cost-analysis",
+	"gke-cost-optimization",
+	"gke-upgrades",
+	"gke-backup-dr",
+	"gke-basics",
+	"gke-golden-path",
+	"gke-productionize",
+	"gke-app-onboarding",
+	"gke-manifest-generation",
+	"gke-multitenancy",
+	"gke-cluster-creation",
+	"gke-batch-hpc",
+	"gke-inference",
+	"gke-tpu-dynamic-slices-monitoring",
+	"gke-tpu-metrics-monitoring",
+	"gke-ai-troubleshooting-handle-disruption-gpu-tpu",
+	"gke-ai-troubleshooting-jobset-interruption",
+	"gke-ai-troubleshooting-tpu-vbar-oom",
+	"fleet-audit",
+	"fleet-audit-reports",
+	"fleet-upgrade-verification",
+	"gce-compute-fleet-audit",
+	"gcp-networking-fabric-audit",
+	"gcp-config-connector",
+	"capacity-obtainability",
+	"cluster-agent-lifecycle",
+	"kube-agents-observability",
+	"manage-cluster",
+	"workload-rebalancing",
+	"submit-suggestion",
+	"version-control",
+	"pr-conversation",
+	"inspect-repository",
+	"github-issue-resolver",
+}
+
+var (
+	skillPathPattern = regexp.MustCompile(`/skills/([a-z0-9][a-z0-9_-]{1,63})\b`)
+	skillNameJSONPat = regexp.MustCompile(`"name"\s*:\s*"([a-z0-9][a-z0-9_-]{1,63})"`)
+	cronSkillSlugPat = regexp.MustCompile(`^cron-(?:platform[-_])?([a-z0-9_-]+)-[0-9]{8}$`)
+)
+
+type hermesToolCallItem struct {
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+func parseHermesToolCalls(raw json.RawMessage) []hermesToolCallItem {
+	if len(raw) == 0 {
+		return nil
+	}
+	var items []hermesToolCallItem
+	if err := json.Unmarshal(raw, &items); err == nil {
+		return items
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil && encoded != "" {
+		_ = json.Unmarshal([]byte(encoded), &items)
+	}
+	return items
+}
+
+// toolKanbanCreate is the tool a routing turn calls to hand work to a card.
+// The step it yields is a delegation; its result row carries the task ID.
+const toolKanbanCreate = "kanban_create"
+
+func extractMessageToolActivity(m hermesMessage) ([]messageStep, []string) {
+	var steps []messageStep
+	var skills []string
+	for _, tc := range parseHermesToolCalls(m.ToolCalls) {
+		name := clip(tc.Function.Name, statusFragmentRunes)
+		if name == "" {
+			continue
+		}
+		detail := previewToolCallArgs(name, tc.Function.Arguments)
+		sk := detectSkillFromToolCall(name, tc.Function.Arguments)
+		if sk != "" {
+			skills = mergeSkills(skills, sk)
+		}
+		skills = mergeSkills(skills, findKnownSkillsInText(tc.Function.Arguments)...)
+		st := messageStep{
+			Tool:   name,
+			Title:  "Finished " + name,
+			Detail: detail,
+			Skill:  sk,
+		}
+		if name == toolKanbanCreate {
+			st.Delegation = true
+			st.Title = "Delegated to a kanban card"
+			var args struct {
+				Title    string `json:"title"`
+				Assignee string `json:"assignee"`
+			}
+			_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+			st.TaskTitle = clip(args.Title, statusFragmentRunes)
+			st.Assignee = clip(args.Assignee, statusFragmentRunes)
+		}
+		steps = append(steps, st)
+	}
+	if m.Role == roleTool && m.Content != nil {
+		if m.ToolName != nil && *m.ToolName == toolKanbanCreate {
+			if id := kanbanCreateTaskID(*m.Content); id != "" {
+				steps = append(steps, messageStep{Tool: toolKanbanCreate, Delegation: true, TaskID: id, Title: "Card " + id + " filed"})
+			}
+		}
+	}
+	return steps, skills
+}
+
+// kanbanCreateTaskID reads the task_id out of a kanban_create result row.
+func kanbanCreateTaskID(content string) string {
+	var out struct {
+		OK     bool   `json:"ok"`
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(content), &out); err != nil || !out.OK {
+		return ""
+	}
+	if !kanbanTaskIDPattern.MatchString(out.TaskID) {
+		return ""
+	}
+	return out.TaskID
+}
+
+// foldDelegations merges each kanban_create call with the result row that
+// follows it, so one step carries the card title, assignee and task ID.
+func foldDelegations(steps []messageStep) []messageStep {
+	out := steps[:0:0]
+	for _, st := range steps {
+		if st.Delegation && st.TaskID != "" && st.TaskTitle == "" {
+			for i := len(out) - 1; i >= 0; i-- {
+				if out[i].Delegation && out[i].TaskID == "" {
+					out[i].TaskID = st.TaskID
+					out[i].Title = "Delegated to card " + st.TaskID
+					st.Tool = ""
+					break
+				}
+			}
+			if st.Tool == "" {
+				continue
+			}
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+func previewToolCallArgs(toolName, rawArgs string) string {
+	trimmed := strings.TrimSpace(rawArgs)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+		for _, k := range []string{"name", "title", "task_id", "command", "query", "assignee", "target"} {
+			if v, ok := parsed[k].(string); ok && strings.TrimSpace(v) != "" {
+				return clip(k+": "+v, statusFragmentRunes)
+			}
+		}
+	}
+	return clip(trimmed, statusFragmentRunes)
+}
+
+func detectSkillFromToolCall(toolName, previewOrArgs string) string {
+	if toolName == "skill_view" {
+		if m := skillNameJSONPat.FindStringSubmatch(previewOrArgs); m != nil {
+			return m[1]
+		}
+		for _, sk := range knownPlatformSkills {
+			if strings.Contains(previewOrArgs, sk) {
+				return sk
+			}
+		}
+	}
+	if m := skillPathPattern.FindStringSubmatch(previewOrArgs); m != nil {
+		return m[1]
+	}
+	for _, sk := range knownPlatformSkills {
+		if strings.Contains(previewOrArgs, sk) {
+			return sk
+		}
+	}
+	return ""
+}
+
+func findKnownSkillsInText(text string) []string {
+	if text == "" {
+		return nil
+	}
+	var out []string
+	for _, m := range skillPathPattern.FindAllStringSubmatch(text, -1) {
+		if len(m) > 1 {
+			out = mergeSkills(out, m[1])
+		}
+	}
+	lower := strings.ToLower(text)
+	for _, sk := range knownPlatformSkills {
+		if strings.Contains(lower, sk) {
+			out = mergeSkills(out, sk)
+		}
+	}
+	return out
+}
+
+func extractTextSkills(kind, sid, text string, card *messageCard) []string {
+	var out []string
+	if m := cronSkillSlugPat.FindStringSubmatch(sid); m != nil {
+		slug := strings.ReplaceAll(m[1], "_", "-")
+		for _, sk := range knownPlatformSkills {
+			if slug == sk || strings.Contains(slug, sk) {
+				out = mergeSkills(out, sk)
+			}
+		}
+		if sk, ok := cronJobSkillAliases[slug]; ok {
+			out = mergeSkills(out, sk)
+		}
+	}
+	out = mergeSkills(out, findKnownSkillsInText(text)...)
+	// The topic rules below infer the skill a triage drew on from the
+	// incident's own words. They run only on incident text: an event triage
+	// session, or a card's fields. Plain chat gets only explicit references.
+	if kind != kindEventTriage && card == nil {
+		return out
+	}
+	combined := strings.ToLower(text)
+	if card != nil {
+		combined += " " + strings.ToLower(card.Subject+" "+card.Title+" "+card.Reason+" "+card.Warning+" "+card.Summary)
+	}
+	if kind == kindEventTriage || (card != nil && strings.HasPrefix(strings.ToLower(card.Title), "triage ")) {
+		out = mergeSkills(out, "gke-workload-troubleshooting")
+	}
+	for _, rule := range skillTopicRules {
+		if rule.pattern.MatchString(combined) {
+			out = mergeSkills(out, rule.skill)
+		}
+	}
+	return out
+}
+
+// cronJobSkillAliases name the skill a built-in scheduled job runs when the
+// job's slug is not the skill's name: the stall watch files cards that run
+// gke-stall-detection, and the board health check reads the kube-agents
+// install itself.
+var cronJobSkillAliases = map[string]string{
+	"stall-watch":         "gke-stall-detection",
+	"kanban-board-health": "kube-agents-observability",
+}
+
+// skillTopicRules map incident vocabulary to the skill that covers it.
+var skillTopicRules = []struct {
+	skill   string
+	pattern *regexp.Regexp
+}{
+	{"gke-compute-classes", regexp.MustCompile(`\b(computeclass|compute-class|nodepoolautocreation|crdmisconfigured)\b`)},
+	{"gke-storage", regexp.MustCompile(`\b(persistentvolumeclaims?|storageclass|unbound immediate)\b`)},
+	{"gke-workload-scaling", regexp.MustCompile(`\b(oomkilled|out of memory|vpa|hpa|horizontalpodautoscaler|verticalpodautoscaler)\b`)},
+	{"gke-stall-detection", regexp.MustCompile(`\b(stalled controllers?|available=false)\b`)},
+	{"gke-cluster-autoscaler", regexp.MustCompile(`\b(failedscheduling|0/\d+ nodes are available|cluster autoscaler)\b`)},
+	{"cluster-agent-lifecycle", regexp.MustCompile(`\b(kubeconfig|re-pinned|pinned to the wrong zone)\b`)},
+	{"submit-suggestion", regexp.MustCompile(`\b(gitops|pull request|option a)\b`)},
+}
+
+func mergeSkills(existing []string, added ...string) []string {
+	for _, a := range added {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		found := false
+		for _, e := range existing {
+			if e == a {
+				found = true
+				break
+			}
+		}
+		if !found {
+			existing = append(existing, a)
+		}
+	}
+	return existing
 }

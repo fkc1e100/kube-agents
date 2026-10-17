@@ -92,9 +92,15 @@ class WebConsoleChartTest(unittest.TestCase):
             cls.docs.setdefault(_kind(doc), doc)
 
     def test_service_type_is_a_literal_cluster_ip(self) -> None:
-        # The fourth document is the headless LiteLLM peers Service the console resolves to reach each LiteLLM pod.
-        self.assertEqual([_kind(d) for d in self.raw_docs], ["Deployment", "Service", "NetworkPolicy", "Service"])
-        self.assertIn("clusterIP: None", self.raw_docs[-1])
+        # The fourth document is the headless LiteLLM peers Service the console
+        # resolves to reach each LiteLLM pod; the rest are the upgrade runner's
+        # identities and grants.
+        self.assertEqual(
+            [_kind(d) for d in self.raw_docs],
+            ["Deployment", "Service", "NetworkPolicy", "Service", "ServiceAccount", "ClusterRole",
+             "ClusterRoleBinding", "Role", "RoleBinding", "ServiceAccount", "ClusterRoleBinding"],
+        )
+        self.assertIn("clusterIP: None", self.raw_docs[3])
         service = self.docs["Service"]
         self.assertRegex(service, r"(?m)^\s+type: ClusterIP$")
         self.assertRegex(service, r"(?m)^\s+port: 8080$")
@@ -128,13 +134,16 @@ class WebConsoleChartTest(unittest.TestCase):
         self.assertIn('{{- include "kube-agents.labels" . | nindent 8 }}', self.docs["Deployment"])
 
     def test_console_chats_only_through_the_agent_gateway(self) -> None:
-        # LITELLM_PEERS_HOST reads LiteLLM's metrics, never its chat API: the
-        # inference-gateway Service and the proxy port stay out.
+        # Chat turns go to Hermes. LITELLM_PEERS_HOST reads LiteLLM's metrics,
+        # and LITELLM_URL is read by one route, POST /api/assist, which edits
+        # a feedback draft's wording with a single completion; neither carries
+        # a chat turn, and Session KV and the proxy port stay out.
         deployment = self.docs["Deployment"]
         self.assertIn("HERMES_URL", deployment)
         self.assertRegex(deployment, r"svc\.cluster\.local:8642")
-        for gone in ("SESSION_KV", "8699", ":4000", "inference-gateway", "LITELLM_URL", "LITELLM_BASE"):
+        for gone in ("SESSION_KV", "8699", ":4000", "LITELLM_BASE", "OPENAI_"):
             self.assertNotIn(gone, deployment, f"the console still wires {gone}")
+        self.assertEqual(deployment.count("inference-gateway"), 1, "the gateway URL is wired once, for /api/assist")
 
     def test_insights_env_is_wired(self) -> None:
         deployment = self.docs["Deployment"]
@@ -375,6 +384,53 @@ class WebConsoleRenderTest(unittest.TestCase):
         config = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "litellm-config")
         self.assertIn("model: gemini/my-model", config["data"]["config.yaml"])
         self.assertEqual(self._console_env(docs)["MODEL_NAME"], "my-model")
+
+    def test_assist_points_at_the_install_gateway_or_is_off(self) -> None:
+        env = self._console_env(self._render("--set", "webConsole.enabled=true"))
+        self.assertEqual(env["LITELLM_URL"], "http://inference-gateway.ns.svc.cluster.local")
+        self.assertEqual(env["ASSIST_MODEL"], "model-default")
+
+        for off in (("--set", "webConsole.assist.enabled=false"), ("--set", "litellm.enabled=false")):
+            without = self._console_env(self._render("--set", "webConsole.enabled=true", *off))
+            self.assertNotIn("LITELLM_URL", without, off)
+            self.assertNotIn("ASSIST_MODEL", without, off)
+
+        own = self._console_env(self._render(
+            "--set", "webConsole.enabled=true", "--set", "litellm.enabled=false",
+            "--set", "webConsole.assist.url=http://gateway.other.svc.cluster.local:4000",
+            "--set", "webConsole.assist.model=editor",
+        ))
+        self.assertEqual(own["LITELLM_URL"], "http://gateway.other.svc.cluster.local:4000")
+        self.assertEqual(own["ASSIST_MODEL"], "editor")
+
+    def test_release_check_is_a_toggle_with_a_repo(self) -> None:
+        env = self._console_env(self._render("--set", "webConsole.enabled=true"))
+        self.assertEqual(env["RELEASE_CHECK"], "true")
+        self.assertEqual(env["RELEASE_REPO"], "gke-labs/kube-agents")
+        off = self._console_env(self._render("--set", "webConsole.enabled=true", "--set", "webConsole.releaseCheck.enabled=false"))
+        self.assertEqual(off["RELEASE_CHECK"], "false")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self._render("--set", "webConsole.enabled=true", "--set", "webConsole.releaseCheck.repo=not a repo")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self._render("--set", "webConsole.enabled=true", "--set", "webConsole.assist.url=ftp://x")
+
+    def test_upgrade_runner_renders_service_account_and_role_rules(self) -> None:
+        docs = self._render("--set", "webConsole.enabled=true")
+        sa_names = [d["metadata"]["name"] for d in docs if d["kind"] == "ServiceAccount"]
+        self.assertIn("kube-agents-upgrader", sa_names)
+        role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "t-web-console-environment")
+        resources = [tuple(r.get("resources", ())) for r in role["rules"]]
+        self.assertIn(("pods", "pods/log"), resources)
+        env = self._console_env(docs)
+        self.assertEqual(env["AUTO_UPGRADE"], "false")
+
+        env_auto = self._console_env(self._render("--set", "webConsole.enabled=true", "--set", "webConsole.upgradeRunner.autoUpgrade=true"))
+        self.assertEqual(env_auto["AUTO_UPGRADE"], "true")
+
+        docs_off = self._render("--set", "webConsole.enabled=true", "--set", "webConsole.upgradeRunner.enabled=false")
+        sa_names_off = [d["metadata"]["name"] for d in docs_off if d["kind"] == "ServiceAccount"]
+        self.assertNotIn("kube-agents-upgrader", sa_names_off)
+
 
 
 class WebConsoleImageTest(unittest.TestCase):

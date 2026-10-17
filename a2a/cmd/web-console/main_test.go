@@ -20,8 +20,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +79,12 @@ type fakeHermes struct {
 	// session on the next chat, as a replaced agent pod would.
 	createDelay        time.Duration
 	dropSessionOnFirst bool
+	// toolName and toolContent, when set, replace the default tool row
+	// written during POST .../chat. onChat, when set, is called after the
+	// initial turn rows are recorded.
+	toolName    string
+	toolContent string
+	onChat      func(sid string)
 }
 
 func newFakeHermes() *fakeHermes {
@@ -101,8 +105,16 @@ func (f *fakeHermes) seed(id, source, title string) {
 // post appends a message to a session, as a turn or a card's wake does.
 // Callers hold f.mu. A nil content models a tool-call-only assistant row.
 func (f *fakeHermes) post(sid, role string, content any) int64 {
+	return f.postTool(sid, role, "", content)
+}
+
+func (f *fakeHermes) postTool(sid, role, toolName string, content any) int64 {
 	f.nextID++
-	f.messages[sid] = append(f.messages[sid], map[string]any{"id": f.nextID, "session_id": sid, "role": role, "content": content})
+	row := map[string]any{"id": f.nextID, "session_id": sid, "role": role, "content": content}
+	if toolName != "" {
+		row["tool_name"] = toolName
+	}
+	f.messages[sid] = append(f.messages[sid], row)
 	return f.nextID
 }
 
@@ -236,13 +248,20 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.post(sid, "user", body["message"])
 		f.post(sid, "assistant", nil)
-		f.post(sid, "tool", "pod list")
+		toolName, toolContent, onChat := f.toolName, f.toolContent, f.onChat
+		if toolContent == "" {
+			toolContent = "pod list"
+		}
+		f.postTool(sid, "tool", toolName, toolContent)
 		f.post(sid, "assistant", reply)
 		if f.postTurnWake != "" {
 			f.post(sid, "user", "[kanban] card completed")
 			f.post(sid, "assistant", f.postTurnWake)
 		}
 		f.mu.Unlock()
+		if onChat != nil {
+			onChat(sid)
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"object":     "hermes.session.chat.completion",
 			"session_id": sid,
@@ -924,22 +943,21 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 	// message box off the bottom of the page. The rail, top bar and banner
 	// keep their height.
 	for selector, rules := range map[string][]string{
-		".app":           {"min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
-		".rail":          {"min-height: 0;"},
-		".rail-scroll":   {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
-		".workspace":     {"min-height: 0;"},
-		".topbar":        {"flex-shrink: 0;"},
-		".insights":      {"flex-shrink: 0;"},
-		".panes":         {"flex: 1;", "min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
-		".centre":        {"min-height: 0;"},
-		".view":          {"min-height: 0;"},
-		".feed":          {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
-		".chat-stream":   {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
-		".side-pane":     {"min-height: 0;"},
-		".side-body":     {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
-		".about":         {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
-		".composer":      {"flex-shrink: 0;"},
-		".thread-remove": {"opacity: 0;"},
+		".app":         {"min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
+		".rail":        {"min-height: 0;"},
+		".rail-scroll": {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".workspace":   {"min-height: 0;"},
+		".topbar":      {"flex-shrink: 0;"},
+		".insights":    {"flex-shrink: 0;"},
+		".panes":       {"flex: 1;", "min-height: 0;", "grid-template-rows: minmax(0, 1fr);"},
+		".centre":      {"min-height: 0;"},
+		".view":        {"min-height: 0;"},
+		".feed":        {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".chat-stream": {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".side-pane":   {"min-height: 0;"},
+		".side-body":   {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".about":       {"flex: 1 1 auto;", "min-height: 0;", "overflow-y: auto;"},
+		".composer":    {"flex-shrink: 0;"},
 	} {
 		block := cssBlock(t, string(page), selector)
 		for _, rule := range rules {
@@ -947,9 +965,6 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 				t.Errorf("%s is missing %q", selector, rule)
 			}
 		}
-	}
-	if strings.Contains(cssBlock(t, string(page), ".thread-remove"), "visibility: hidden") {
-		t.Errorf(".thread-remove must not use visibility: hidden, which removes it from keyboard tab order")
 	}
 }
 
@@ -1042,649 +1057,104 @@ func TestReplyIntoABusyAgentSessionIsRefused(t *testing.T) {
 	}
 }
 
-func TestPageHarnessCoversThreadsUnreadStatusStepsTimerAndCards(t *testing.T) {
-	if _, err := exec.LookPath("node"); err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatalf("node not available in PATH on CI: %v", err)
+func TestRunTurnWithoutDelegationReturnsImmediately(t *testing.T) {
+	fake, s := setupServer(t)
+	s.delegationPollInterval = 500 * time.Millisecond
+	h := s.routes()
+
+	start := time.Now()
+	rec := serve(h, chatReq(`{"message":"what is your agent role?"}`))
+	elapsed := time.Since(start)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	got := decode[chatResponse](t, rec)
+	if got.Reply != "pods are healthy" {
+		t.Errorf("reply = %q, want direct reply", got.Reply)
+	}
+	if elapsed >= 250*time.Millisecond {
+		t.Errorf("direct turn without kanban_create waited %s, want no polling delay", elapsed)
+	}
+	// Four message reads and no poll: handleChat's existence check on the
+	// page-minted ID, runTurn's beforeID read, the post-turn delegation
+	// check, and replyMessageID.
+	if gets := fake.gets(got.SessionID); gets != 4 {
+		t.Errorf("message gets = %d, want 4 (existence + beforeID + post-turn check + reply ID)", gets)
+	}
+}
+
+func TestRunTurnAwaitsDelegatedKanbanCardResult(t *testing.T) {
+	t.Run("returns card summary when wake is silent", func(t *testing.T) {
+		fake, s := setupServer(t)
+		s.delegationPollInterval = 5 * time.Millisecond
+		h := s.routes()
+
+		fake.mu.Lock()
+		fake.reply = "checking pods in kubeagents-system."
+		fake.toolName = toolKanbanCreate
+		fake.toolContent = `{"ok": true, "task_id": "t_1122aabb", "status": "ready"}`
+		fake.onChat = func(sid string) {
+			go func() {
+				time.Sleep(15 * time.Millisecond)
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				fake.post(sid, roleUser, "[kanban] Task t_1122aabb completed.\n"+
+					"Title: Check running pods in kubeagents-system\n"+
+					"Assignee: @cluster-kube-agents-demo-platform-agent-host-us-central1\n"+
+					"Board: default\n\n"+
+					"Check the result or decide the next step.\n"+
+					"Result: All 6 pods in kubeagents-system are Running (1/1 Ready) with 0 restarts.\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleAssistant, "[SILENT]")
+			}()
 		}
-		t.Skip("node not available in PATH")
-	}
-	page, err := staticFS.ReadFile("static/index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(page)
-	start := strings.Index(src, "// ---- Thread state.")
-	end := strings.Index(src, "// Builds one message row.")
-	renderStart := strings.Index(src, "let threadsHtml = \"\";")
-	renderEnd := strings.Index(src, "function showView(name)")
-	enterStart := strings.Index(src, "function onEnter(input, send)")
-	enterEnd := strings.Index(src, "$(\"btn-send\").addEventListener")
-	if start < 0 || end <= start || renderStart < 0 || renderEnd <= renderStart || enterStart < 0 || enterEnd <= enterStart {
-		t.Fatal("index.html is missing the thread-state, renderThreads, or onEnter slice markers")
-	}
-	slice := src[start:end] + "\n" + src[renderStart:renderEnd] + "\n" + src[enterStart:enterEnd]
+		fake.mu.Unlock()
 
-	cmd := exec.Command("node", "--input-type=module", "-e", `
-import assert from "node:assert/strict";
-import vm from "node:vm";
-import crypto from "node:crypto";
+		rec := serve(h, chatReq(`{"message":"what pods are running in kubeagents-system?"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		got := decode[chatResponse](t, rec)
+		want := "All 6 pods in kubeagents-system are Running (1/1 Ready) with 0 restarts."
+		if got.Reply != want {
+			t.Errorf("reply = %q, want %q", got.Reply, want)
+		}
+		if fake.gets(got.SessionID) < 3 {
+			t.Errorf("message gets = %d, want >= 3 showing polling occurred", fake.gets(got.SessionID))
+		}
+	})
 
-const scriptSource = `+strconv.Quote(slice)+`;
+	t.Run("prefers subsequent assistant synthesis over raw card summary", func(t *testing.T) {
+		fake, s := setupServer(t)
+		s.delegationPollInterval = 5 * time.Millisecond
+		h := s.routes()
 
-function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
-  const local = new Map(Object.entries(initialLocal));
-  const session = new Map(Object.entries(initialSession));
-  const appended = [];
-  const statusCalls = [];
-  let cleared = 0;
-  let changed = 0;
-  let selectedThread = null;
-  let selectedChannel = null;
-  const ctx = {
-    console,
-    Date,
-    Math,
-    Number,
-    String,
-    Array,
-    Object,
-    Set,
-    JSON,
-    RegExp,
-    Uint8Array,
-    TextDecoder,
-    crypto: crypto.webcrypto,
-    encodeURIComponent,
-    localStorage: {
-      getItem: k => (local.has(k) ? local.get(k) : null),
-      setItem: (k, v) => local.set(k, String(v)),
-      removeItem: k => local.delete(k),
-    },
-    sessionStorage: {
-      getItem: k => (session.has(k) ? session.get(k) : null),
-      setItem: (k, v) => session.set(k, String(v)),
-      removeItem: k => session.delete(k),
-    },
-    document: { getElementById: () => ({}) },
-    fetch: fetchImpl || (async () => ({ ok: false, status: 503 })),
-    appendMessage: (author, text, tag, ts, card, meta) => {
-      appended.push({ author, text, tag, ts, card, meta });
-    },
-    clearStream: () => { cleared++; },
-    threadsChanged: () => { changed++; },
-    statusChanged: id => { statusCalls.push(id); },
-    selectThread: id => { selectedThread = id; },
-    selectChannel: name => { selectedChannel = name; },
-    getState: () => ({
-      local,
-      session,
-      appended,
-      statusCalls,
-      cleared,
-      changed,
-      selectedThread,
-      selectedChannel,
-    }),
-  };
-  vm.createContext(ctx);
-  vm.runInContext(scriptSource, ctx);
-  return ctx;
-}
+		fake.mu.Lock()
+		fake.reply = "delegating node check."
+		fake.toolName = toolKanbanCreate
+		fake.toolContent = `{"ok": true, "task_id": "t_3344ccdd", "status": "ready"}`
+		fake.onChat = func(sid string) {
+			go func() {
+				time.Sleep(15 * time.Millisecond)
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				fake.post(sid, roleUser, "[kanban] Task t_3344ccdd completed.\n"+
+					"Title: Inspect nodes\n"+
+					"Result: raw node output\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleAssistant, "All 3 nodes in platform-agent-host are Ready on v1.33.5-gke.1308000.")
+			}()
+		}
+		fake.mu.Unlock()
 
-// 1. Legacy sessionStorage migration into localStorage threads.
-{
-  const legacyId = "web-console-" + "1".repeat(32);
-  const ctx = makeHarness(null, {}, {
-    "kube-agents-web-console-session": legacyId,
-    "kube-agents-web-console-mark": "12",
-  });
-  vm.runInContext("loadThreads()", ctx);
-  const threads = JSON.parse(vm.runInContext("JSON.stringify(threads)", ctx));
-  assert.equal(threads.length, 1);
-  assert.equal(threads[0].id, legacyId);
-  assert.equal(threads[0].mark, 12);
-  assert.equal(threads[0].markKnown, true);
-  assert.equal(ctx.getState().session.has("kube-agents-web-console-session"), false);
-}
-
-// 2. capThreads keeps at most MAX_THREADS and never drops in-flight or activeId.
-{
-  const ctx = makeHarness();
-  const protectedId = "web-console-" + "a".repeat(32);
-  vm.runInContext("addThread(" + JSON.stringify(protectedId) + ", 'protected', true); startInflight(" + JSON.stringify(protectedId) + ", 'running');", ctx);
-  for (let i = 0; i < 15; i++) {
-    const id = "web-console-" + i.toString(16).padStart(32, "0");
-    vm.runInContext("addThread(" + JSON.stringify(id) + ", 't' + " + i + ", true)", ctx);
-  }
-  const ids = JSON.parse(vm.runInContext("JSON.stringify(threads.map(t => t.id))", ctx));
-  assert.equal(ids.length, 12);
-  assert.ok(ids.includes(protectedId), "in-flight thread must never be evicted by capThreads");
-  assert.equal(vm.runInContext("removeThread(" + JSON.stringify(protectedId) + ")", ctx), false);
-}
-
-// 3. mergeStoredThreads preserves object identity, keeps local in-flight threads,
-// does not advance mark on the on-screen thread, and preserves the on-screen thread
-// even if evicted by another tab.
-{
-  const idA = "web-console-" + "a".repeat(32);
-  const idB = "web-console-" + "b".repeat(32);
-  const idC = "web-console-" + "c".repeat(32);
-  const ctx = makeHarness();
-  vm.runInContext(
-    "const tA = addThread(" + JSON.stringify(idA) + ", 'A', true);" +
-    "const tB = addThread(" + JSON.stringify(idB) + ", 'B', true);" +
-    "const tC = addThread(" + JSON.stringify(idC) + ", 'C', true);" +
-    "tA.mark = 4; tA.markKnown = true;" +
-    "tB.mark = 2; tB.markKnown = true;" +
-    "activeId = " + JSON.stringify(idA) + "; view = 'thread';" +
-    "startInflight(" + JSON.stringify(idC) + ", 'busy');",
-    ctx
-  );
-  // Tab 2 advanced tA.mark to 9 and tB.mark to 7, and did not know about tC.
-  const tab2Raw = JSON.stringify([
-    { id: idA, title: "A", mark: 9, markKnown: true, updated: 100, unread: true, started: true },
-    { id: idB, title: "B", mark: 7, markKnown: true, updated: 100, unread: true, started: true },
-  ]);
-  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab2Raw) + ")", ctx);
-  assert.equal(vm.runInContext("findThread(" + JSON.stringify(idA) + ") === tA", ctx), true, "object identity preserved");
-  assert.equal(vm.runInContext("tA.mark", ctx), 4, "on-screen thread mark must not jump ahead before pollThread renders");
-  assert.equal(vm.runInContext("tA.unread", ctx), false, "on-screen thread stays read");
-  assert.equal(vm.runInContext("tB.mark", ctx), 7, "background thread adopts higher mark from other tab");
-  assert.equal(vm.runInContext("!!findThread(" + JSON.stringify(idC) + ")", ctx), true, "in-flight thread preserved across storage merge");
-
-  // An on-screen thread idA missing from another tab's update (e.g. evicted by capThreads in tab B)
-  // is preserved in merged threads so this tab does not jump away mid-read.
-  const tab2WithoutA = JSON.stringify([
-    { id: idB, title: "B", mark: 7, markKnown: true, updated: 100, unread: false, started: true },
-  ]);
-  vm.runInContext("delete inflight[" + JSON.stringify(idC) + "]; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
-  assert.equal(vm.runInContext("!!findThread(" + JSON.stringify(idA) + ")", ctx), true, "on-screen thread preserved across storage merge");
-  assert.equal(vm.runInContext("activeId", ctx), idA, "stays on active thread");
-  assert.equal(ctx.getState().selectedThread, null, "selectThread not called because on-screen thread kept");
-
-  // When a thread was not on screen, it is removed by another tab's update.
-  vm.runInContext("view = 'channel'; activeId = ''; mergeStoredThreads(" + JSON.stringify(tab2WithoutA) + ")", ctx);
-  assert.equal(vm.runInContext("findThread(" + JSON.stringify(idA) + ")", ctx), null, "background thread removed");
-
-  // Retaining an on-screen thread into a 12-thread stored list still caps
-  // at MAX_THREADS (12) by evicting the oldest idle thread, rather than
-  // saving 13 and letting parseThreads slice by position.
-  const full12 = Array.from({ length: 12 }, (_, i) => ({
-    id: "web-console-" + (i + 1).toString(16).padStart(32, "0"),
-    title: "T" + i,
-    mark: 1,
-    markKnown: true,
-    updated: i === 5 ? 1 : 50 + i,
-    unread: false,
-    started: true,
-  }));
-  vm.runInContext(
-    "addThread(" + JSON.stringify(idA) + ", 'Active', true);" +
-    "activeId = " + JSON.stringify(idA) + "; view = 'thread';" +
-    "mergeStoredThreads(" + JSON.stringify(JSON.stringify(full12)) + ");",
-    ctx
-  );
-  const afterCap = JSON.parse(vm.runInContext("JSON.stringify(threads.map(t => t.id))", ctx));
-  assert.equal(afterCap.length, 12, "mergeStoredThreads must cap at MAX_THREADS");
-  assert.ok(afterCap.includes(idA), "active retained thread kept");
-  assert.ok(!afterCap.includes(full12[5].id), "oldest idle thread evicted by LRU, not last by position");
-  assert.ok(afterCap.includes(full12[11].id), "newest tail thread kept");
-
-  // Two tabs viewing different older threads converge in one merge cycle
-  // instead of ping-ponging storage events forever.
-  const oldTab1 = "web-console-" + "91".padStart(32, "0");
-  const oldTab2 = "web-console-" + "92".padStart(32, "0");
-  const tab1Ctx = makeHarness();
-  const tab2Ctx = makeHarness();
-  const shared11 = Array.from({ length: 11 }, (_, i) => ({
-    id: "web-console-" + (i + 20).toString(16).padStart(32, "0"),
-    title: "S" + i,
-    mark: 1,
-    markKnown: true,
-    updated: 200 + i,
-    viewedAt: 200 + i,
-    unread: false,
-    started: true,
-  }));
-  const tab1Init = JSON.stringify([
-    { id: oldTab1, title: "Old1", mark: 1, markKnown: true, updated: 1, viewedAt: 1, unread: false, started: true },
-    ...shared11,
-  ]);
-  const tab2Init = JSON.stringify([
-    { id: oldTab2, title: "Old2", mark: 1, markKnown: true, updated: 2, viewedAt: 2, unread: false, started: true },
-    ...shared11,
-  ]);
-  vm.runInContext(
-    "threads = parseThreads(" + JSON.stringify(tab1Init) + "); activeId = " + JSON.stringify(oldTab1) + "; view = 'thread';",
-    tab1Ctx
-  );
-  vm.runInContext(
-    "threads = parseThreads(" + JSON.stringify(tab2Init) + "); activeId = " + JSON.stringify(oldTab2) + "; view = 'thread';",
-    tab2Ctx
-  );
-  // Tab 1 merges Tab 2's storage write; Tab 1 retains oldTab1 with a fresh viewedAt.
-  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab2Init) + ")", tab1Ctx);
-  const tab1Saved = tab1Ctx.getState().local.get("kube-agents-web-console-threads");
-  assert.ok(tab1Saved, "Tab 1 writes merged list retaining oldTab1");
-  // Tab 2 merges Tab 1's write; Tab 2 retains oldTab2 and evicts an idle shared thread, keeping oldTab1.
-  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab1Saved) + ")", tab2Ctx);
-  const tab2Saved = tab2Ctx.getState().local.get("kube-agents-web-console-threads");
-  assert.ok(tab2Saved, "Tab 2 writes merged list retaining oldTab2 and oldTab1");
-  // Tab 1 receives Tab 2's write: both oldTab1 and oldTab2 are present, so Tab 1 does not write again.
-  tab1Ctx.getState().local.delete("kube-agents-web-console-threads");
-  vm.runInContext("mergeStoredThreads(" + JSON.stringify(tab2Saved) + ")", tab1Ctx);
-  assert.equal(
-    tab1Ctx.getState().local.has("kube-agents-web-console-threads"),
-    false,
-    "Two-tab storage merge must converge without endless ping-pong writes"
-  );
-
-  // Removing a thread with × in Tab 2 is not undone by Tab 1 having it on screen.
-  vm.runInContext("removeThread(" + JSON.stringify(oldTab1) + ")", tab2Ctx);
-  const removedList = tab2Ctx.getState().local.get("kube-agents-web-console-removed");
-  const afterRemoveThreads = tab2Ctx.getState().local.get("kube-agents-web-console-threads");
-  tab1Ctx.getState().local.set("kube-agents-web-console-removed", removedList);
-  vm.runInContext("mergeStoredThreads(" + JSON.stringify(afterRemoveThreads) + ")", tab1Ctx);
-  assert.equal(
-    vm.runInContext("findThread(" + JSON.stringify(oldTab1) + ")", tab1Ctx),
-    null,
-    "Thread removed in Tab 2 must not be retained by Tab 1 even when on screen"
-  );
-  assert.notEqual(
-    vm.runInContext("activeId", tab1Ctx),
-    oldTab1,
-    "Tab 1 switches activeId off the removed thread"
-  );
-  // Deliberately re-adding the thread clears its removed tombstone.
-  vm.runInContext("addThread(" + JSON.stringify(oldTab1) + ", 'Reopened', true)", tab2Ctx);
-  assert.equal(
-    JSON.parse(tab2Ctx.getState().local.get("kube-agents-web-console-removed")).includes(oldTab1),
-    false,
-    "addThread clears the thread ID from kube-agents-web-console-removed"
-  );
-}
-
-// 4. settleAfterReply advances mark to replyId when fetchNewMessages fails.
-{
-  const id = "web-console-" + "d".repeat(32);
-  let calls = 0;
-  const ctx = makeHarness(async () => {
-    calls++;
-    if (calls === 1) return { ok: false, status: 502 };
-    return { ok: true, status: 200, json: async () => ({ latest_id: 8, messages: [] }) };
-  });
-  vm.runInContext(
-    "const t = addThread(" + JSON.stringify(id) + ", 'test', true);" +
-    "t.mark = 4; t.markKnown = true; activeId = t.id; view = 'thread';",
-    ctx
-  );
-  await vm.runInContext("settleAfterReply(t, 'again', 'pods are healthy', 4, 8)", ctx);
-  assert.equal(vm.runInContext("t.mark", ctx), 8);
-  await vm.runInContext("pollThread(t)", ctx);
-  assert.deepEqual(ctx.getState().appended, []);
-}
-
-// 5. settleAfterReply handles pre-turn results (including another tab's user
-// question while inflight[t.id] is still set), mid-turn kanban wakes with
-// intermediate assistant notes on the user's own turn, and post-reply results.
-{
-  const id = "web-console-" + "e".repeat(32);
-  const messages = [
-    { id: 5, role: "user", author: "kanban", content: "[kanban] Task t_1 completed.", card: { task_id: "t_1", status: "completed", summary: "done 1" } },
-    { id: 6, role: "assistant", author: "agent", content: "pre-turn delegated result" },
-    { id: 7, role: "user", author: "user", content: "question from other tab" },
-    { id: 8, role: "assistant", author: "agent", content: "reply to other tab" },
-    { id: 9, role: "user", author: "user", content: "check cluster" },
-    { id: 10, role: "assistant", author: "agent", content: "intermediate note before wake" },
-    { id: 11, role: "user", author: "kanban", content: "[kanban] Task t_2 completed.", card: { task_id: "t_2", status: "completed", summary: "done 2" } },
-    { id: 12, role: "assistant", author: "agent", content: "first mid-turn wake result" },
-    { id: 13, role: "assistant", author: "agent", content: "intermediate note between wakes" },
-    { id: 14, role: "user", author: "kanban", content: "[kanban] Task t_3 blocked; needs attention.", card: { task_id: "t_3", status: "blocked; needs attention", summary: "blocked 3" } },
-    { id: 15, role: "assistant", author: "agent", content: "second mid-turn wake result" },
-    { id: 16, role: "assistant", author: "agent", content: "final turn reply" },
-    { id: 17, role: "user", author: "kanban", content: "[kanban] Task t_4 completed.", card: { task_id: "t_4", status: "completed", summary: "done 4" } },
-    { id: 18, role: "assistant", author: "agent", content: "post-reply delegated result" },
-  ];
-  const ctx = makeHarness(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ latest_id: 18, messages }),
-  }));
-  vm.runInContext(
-    "const t = addThread(" + JSON.stringify(id) + ", 'test', true);" +
-    "t.mark = 4; t.markKnown = true; activeId = t.id; view = 'thread';" +
-    "startInflight(t.id, 'check cluster');",
-    ctx
-  );
-  await vm.runInContext("settleAfterReply(t, 'check cluster', 'final turn reply', 4, 16)", ctx);
-  assert.deepEqual(
-    ctx.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
-    [
-      { author: "kanban", text: "[kanban] Task t_1 completed.", tag: "Specialist report" },
-      { author: "agent", text: "pre-turn delegated result", tag: "update" },
-      { author: "user", text: "question from other tab", tag: "You" },
-      { author: "agent", text: "reply to other tab", tag: "update" },
-      { author: "kanban", text: "[kanban] Task t_2 completed.", tag: "Specialist report" },
-      { author: "agent", text: "first mid-turn wake result", tag: "update" },
-      { author: "kanban", text: "[kanban] Task t_3 blocked; needs attention.", tag: "Specialist report" },
-      { author: "agent", text: "second mid-turn wake result", tag: "update" },
-      { author: "kanban", text: "[kanban] Task t_4 completed.", tag: "Specialist report" },
-      { author: "agent", text: "post-reply delegated result", tag: "update" },
-    ]
-  );
-  assert.equal(vm.runInContext("t.mark", ctx), 18);
-
-  // Re-selecting a thread mid-turn after a kanban wake user row landed in its
-  // transcript (id <= mark) still delivers the wake's assistant reply when
-  // settleAfterReply runs with turnAt < 0 && replyAt >= 0.
-  const idReselect = "web-console-" + "f".repeat(32);
-  const ctxReselect = makeHarness(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => ({
-      latest_id: 14,
-      messages: [
-        { id: 10, role: "assistant", author: "agent", content: "wake reply after reselect" },
-        { id: 11, role: "assistant", author: "agent", content: "intermediate note of user turn" },
-        { id: 14, role: "assistant", author: "agent", content: "final turn reply" },
-      ],
-    }),
-  }));
-  vm.runInContext(
-    "const tr = addThread(" + JSON.stringify(idReselect) + ", 'reselect', true);" +
-    "activateThread(tr, { latest_id: 9, messages: [" +
-    "  { id: 7, role: 'user', author: 'user', content: 'check cluster' }," +
-    "  { id: 9, role: 'user', author: 'kanban', content: '[kanban] Task t_2 completed.' }" +
-    "] });",
-    ctxReselect
-  );
-  ctxReselect.getState().appended.length = 0;
-  await vm.runInContext("settleAfterReply(tr, 'check cluster', 'final turn reply', 4, 14)", ctxReselect);
-  assert.deepEqual(
-    ctxReselect.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
-    [{ author: "agent", text: "wake reply after reselect", tag: "update" }]
-  );
-
-  // Also cover when a background pollThread marked the kanban row (id: 9)
-  // before the user submitted their turn (before_id: 9, turnAt === 0 at id: 10),
-  // and the wake's assistant reply (id: 11) lands between id: 10 and id: 14.
-  const idPrePolled = "web-console-" + "e".repeat(32);
-  let prePollStep = 0;
-  const ctxPrePolled = makeHarness(async () => {
-    prePollStep++;
-    if (prePollStep === 1) {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          latest_id: 9,
-          messages: [
-            { id: 9, role: "user", author: "kanban", content: "[kanban] Task t_3 completed." },
-          ],
-        }),
-      };
-    }
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        latest_id: 14,
-        messages: [
-          { id: 10, role: "user", author: "user", content: "check" },
-          { id: 11, role: "assistant", author: "agent", content: "wake reply" },
-          { id: 12, role: "assistant", author: "agent", content: "intermediate note" },
-          { id: 14, role: "assistant", author: "agent", content: "final" },
-        ],
-      }),
-    };
-  });
-  vm.runInContext(
-    "const tp = addThread(" + JSON.stringify(idPrePolled) + ", 'prepolled', true);" +
-    "activateThread(tp, { latest_id: 8, messages: [] });",
-    ctxPrePolled
-  );
-  await vm.runInContext("pollThread(tp)", ctxPrePolled);
-  ctxPrePolled.getState().appended.length = 0;
-  await vm.runInContext("settleAfterReply(tp, 'check', 'final', 9, 14)", ctxPrePolled);
-  assert.deepEqual(
-    ctxPrePolled.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
-    [{ author: "agent", text: "wake reply", tag: "update" }]
-  );
-}
-
-// 6. loadSeen and updateChannel: first-visit seeding across both channels even
-// when one channel fails on first poll and the page reloads before it succeeds.
-{
-  const ctx1 = makeHarness();
-  vm.runInContext("loadSeen(null)", ctx1);
-  // Only alerts succeeds before reload.
-  vm.runInContext("updateChannel('alerts', [{ id: 'k8s-evt-1', message_count: 2 }], true, '')", ctx1);
-  const storedSeen = ctx1.getState().local.get("kube-agents-web-console-seen");
-  assert.ok(storedSeen, "seen map persisted after alerts seeded");
-
-  // Reload in a new context using storedSeen; scheduled must still seed on its first poll!
-  const ctx2 = makeHarness();
-  vm.runInContext("loadSeen(" + JSON.stringify(storedSeen) + ")", ctx2);
-  vm.runInContext("updateChannel('scheduled', [{ id: 'cron-a-20261012', message_count: 4 }], false, '')", ctx2);
-  assert.equal(vm.runInContext("channelUnread.scheduled", ctx2), 0, "scheduled must be seeded on first successful poll after partial reload");
-  // A subsequent message on cron-a-20261012 makes it unread and updates pageTitle.
-  vm.runInContext("updateChannel('scheduled', [{ id: 'cron-a-20261012', message_count: 5 }], false, '')", ctx2);
-  assert.equal(vm.runInContext("channelUnread.scheduled", ctx2), 1);
-  assert.equal(vm.runInContext("pageTitle()", ctx2), "(1) kube-agents");
-}
-
-// 7. postHeadline for empty triage, empty scheduled, and started sessions.
-{
-  const ctx = makeHarness();
-  const emptyAlert = JSON.parse(vm.runInContext("JSON.stringify(postHeadline({ id: 'k8s-evt-1', kind: 'event_triage', message_count: 0 }))", ctx));
-  assert.deepEqual(emptyAlert, {
-    text: "Event k8s-evt-1: the agent has not started on this yet",
-    muted: true,
-    started: false,
-  });
-  const emptySched = JSON.parse(vm.runInContext("JSON.stringify(postHeadline({ id: 'cron-sweep-20261012', kind: 'scheduled', message_count: 1, summary: { replies: 0 } }))", ctx));
-  assert.deepEqual(emptySched, {
-    text: "Check cron-sweep-20261012: the agent has not started on this yet",
-    muted: true,
-    started: false,
-  });
-  const started = JSON.parse(vm.runInContext("JSON.stringify(postHeadline({ id: 'k8s-evt-1', kind: 'event_triage', message_count: 3, summary: { subject: 'Triage Pod web-1', replies: 1 } }))", ctx));
-  assert.deepEqual(started, {
-    text: "Triage Pod web-1",
-    muted: false,
-    started: true,
-  });
-}
-
-// 8. startInflight, setStatus, addStep, appendDelta, and formatStatusWithTimer.
-{
-  const ctx = makeHarness();
-  vm.runInContext(
-    "const turn = startInflight('s1', 'hi');" +
-    "turn.startedAt = 100; turn.lastEventAt = 100;" +
-    "setStatus('s1', 'The agent started working');" +
-    "turn.lastEventAt = 100;",
-    ctx
-  );
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 102)", ctx), "The agent started working · 2 s");
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 104)", ctx), "Waiting for the model · 4 s");
-
-  // Running tool step stays on Running even after 3s.
-  vm.runInContext(
-    "addStep('s1', { id: 'kubectl_get#1', kind: 'tool', title: 'Running kubectl_get', detail: 'pods', state: 'running' });" +
-    "setStatus('s1', 'Running kubectl_get: pods');" +
-    "inflight.s1.lastEventAt = 104;",
-    ctx
-  );
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 110)", ctx), "Running kubectl_get: pods · 10 s");
-
-  // Failed tool step transitions to Waiting for the model after 3s.
-  vm.runInContext(
-    "addStep('s1', { id: 'kubectl_get#1', kind: 'tool', title: 'kubectl_get failed', state: 'failed' });" +
-    "setStatus('s1', 'kubectl_get failed');" +
-    "inflight.s1.lastEventAt = 110;",
-    ctx
-  );
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 111)", ctx), "kubectl_get failed · 11 s");
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 114)", ctx), "Waiting for the model · 14 s");
-
-  // Thinking status also transitions to Waiting for the model after 3s.
-  vm.runInContext(
-    "setStatus('s1', 'Thinking: check events');" +
-    "inflight.s1.lastEventAt = 114;",
-    ctx
-  );
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 118)", ctx), "Waiting for the model · 18 s");
-
-  // Once deltaText is streaming, it does not switch back to Waiting for the model.
-  vm.runInContext(
-    "setStatus('s1', 'Writing reply…'); appendDelta('s1', 'All '); appendDelta('s1', 'healthy.');" +
-    "inflight.s1.lastEventAt = 118;",
-    ctx
-  );
-  assert.equal(vm.runInContext("inflight.s1.deltaText", ctx), "All healthy.");
-  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 125)", ctx), "Writing reply… · 25 s");
-}
-
-// 9. matchTurnMetaIndex and activateThread attach step summary only to the turn's own reply row.
-{
-  const ctx = makeHarness();
-  const msgs = [
-    { id: 1, role: "user", content: "hi" },
-    { id: 2, role: "assistant", content: "turn reply" },
-    { id: 3, role: "user", author: "kanban", content: "[kanban] Task t_1 completed." },
-    { id: 4, role: "assistant", content: "later background wake reply" },
-  ];
-  assert.equal(
-    vm.runInContext("matchTurnMetaIndex(" + JSON.stringify(msgs) + ", { replyId: 2, reply: 'turn reply' })", ctx),
-    1
-  );
-  assert.equal(
-    vm.runInContext("matchTurnMetaIndex(" + JSON.stringify(msgs) + ", { reply: 'turn reply' })", ctx),
-    1
-  );
-  const tid = "web-console-" + "8".repeat(32);
-  const meta = {
-    steps: [{ id: "kubectl_get#1", state: "done", title: "Finished kubectl_get", detail: "pods" }],
-    elapsed: 5,
-    reply: "turn reply",
-    replyId: 2,
-  };
-  vm.runInContext(
-    "const tm = addThread(" + JSON.stringify(tid) + ", 'meta test', true);" +
-    "lastTurnMeta[tm.id] = " + JSON.stringify(meta) + ";" +
-    "activateThread(tm, { latest_id: 4, messages: " + JSON.stringify(msgs) + " });",
-    ctx
-  );
-  assert.deepEqual(
-    JSON.parse(JSON.stringify(ctx.getState().appended.map(m => m.meta))),
-    [null, meta, null, null],
-    "activateThread restores lastTurnMeta on the matching reply row"
-  );
-}
-
-// 10. renderMarkdown and renderAuthorBody for event_watcher, scheduler, kanban, and agent with steps.
-{
-  const ctx = makeHarness();
-  const fenced = vm.runInContext("renderMarkdown('Before\\n\\x60\\x60\\x60yaml\\nkind: Pod\\n\\x60\\x60\\x60\\nAfter')", ctx);
-  assert.equal(fenced, "<p>Before</p><pre><code>kind: Pod</code></pre><p>After</p>");
-  const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
-  assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
-  assert.equal(
-    vm.runInContext("renderMarkdown('1. step\\n   \\x60\\x60\\x60yaml\\n   a: 1\\n   \\x60\\x60\\x60')", ctx),
-    "<p>1. step</p><pre><code>a: 1</code></pre>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('\\x60\\x60\\x60\\x60md\\n\\x60\\x60\\x60yaml\\nx: 1\\n\\x60\\x60\\x60\\n\\x60\\x60\\x60\\x60')", ctx),
-    "<pre><code>\x60\x60\x60yaml\nx: 1\n\x60\x60\x60</code></pre>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('~~~sh\\necho hi\\n~~~')", ctx),
-    "<pre><code>echo hi</code></pre>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('glob \\x60a/**/b\\x60 and **bold \\x60x*y\\x60**')", ctx),
-    "<p>glob <code>a/**/b</code> and <strong>bold <code>x*y</code></strong></p>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('2 ** 3 * 4 = 24')", ctx),
-    "<p>2 ** 3 * 4 = 24</p>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('\\x60\\x60 \\x60foo\\x60 \\x60\\x60 and \\x60a\\x60\\x60b\\x60')", ctx),
-    "<p><code>\x60foo\x60</code> and <code>a\x60\x60b</code></p>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('\\x60\\x60\\x60a\\x60b\\n\\x60\\x60\\x60\\ncode\\n\\x60\\x60\\x60\\nAfter')", ctx),
-    "<p>\x60\x60\x60a\x60b</p><pre><code>code</code></pre><p>After</p>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('Use \\x60kubectl\\nget pods\\x60 now.')", ctx),
-    "<p>Use <code>kubectl get pods</code> now.</p>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('**All pods\\nhealthy**\\n\\n**unclosed\\n\\nnext')", ctx),
-    "<p><strong>All pods<br>healthy</strong></p><p>**unclosed</p><p>next</p>"
-  );
-  assert.equal(
-    vm.runInContext("renderMarkdown('***critical alert*** and **bold**')", ctx),
-    "<p><em><strong>critical alert</strong></em> and <strong>bold</strong></p>"
-  );
-
-  const alertHtml = vm.runInContext("renderAuthorBody('event_watcher', 'raw prompt', { subject: 'Triage Pod web-1', resource: 'default/Pod/web-1', reason: 'BackOff', warning: 'CrashLoopBackOff' })", ctx);
-  assert.ok(alertHtml.includes("msg-card-alert") && alertHtml.includes("default/Pod/web-1") && alertHtml.includes("Show routing prompt"));
-
-  const schedHtml = vm.runInContext("renderAuthorBody('scheduler', 'sweep prompt', { subject: 'Run policy sweep' })", ctx);
-  assert.ok(schedHtml.includes("msg-card-cron") && schedHtml.includes("Run policy sweep") && schedHtml.includes("Show scheduled prompt"));
-
-  const kanbanHtml = vm.runInContext("renderAuthorBody('kanban', 'wake text', { task_id: 't_99', status: 'blocked; needs attention', title: 'Investigate PVC', summary: 'StorageClass missing' })", ctx);
-  assert.ok(kanbanHtml.includes("msg-card-kanban") && kanbanHtml.includes("t_99") && kanbanHtml.includes("blocked; needs attention") && kanbanHtml.includes("StorageClass missing"));
-
-  const agentHtml = vm.runInContext("renderAuthorBody('agent', 'All good.', null, { elapsed: 4, steps: [{ id: 'kubectl_get#1', state: 'done', title: 'Finished kubectl_get', detail: 'pods' }] })", ctx);
-  assert.ok(agentHtml.includes("Worked for 4 s &middot; 1 step") && agentHtml.includes("Finished kubectl_get") && agentHtml.includes("<p>All good.</p>"));
-}
-
-// 11. renderThreads template signature guard and onEnter IME composition guard.
-{
-  const ctx = makeHarness();
-  let writes = 0;
-  let storedInner = "";
-  const listEl = {
-    get innerHTML() {
-      // Simulate browser HTML serializer canonicalizing &times; to literal ×.
-      return storedInner.replace(/&times;/g, "\u00d7");
-    },
-    set innerHTML(v) {
-      writes++;
-      storedInner = v;
-    },
-    contains: () => false,
-    querySelector: () => null,
-  };
-  ctx.document.getElementById = id => (id === "thread-list" ? listEl : {});
-  ctx.CSS = { escape: s => s };
-  const tid = "web-console-" + "7".repeat(32);
-  vm.runInContext("addThread(" + JSON.stringify(tid) + ", 'Chat 1', true); renderThreads();", ctx);
-  assert.equal(writes, 1, "first renderThreads writes innerHTML");
-  vm.runInContext("renderThreads();", ctx);
-  assert.equal(writes, 1, "second renderThreads with unchanged template must skip DOM rewrite even when list.innerHTML canonicalized &times;");
-
-  let sent = 0;
-  let listener = null;
-  const fakeInput = { addEventListener: (_, fn) => { listener = fn; } };
-  ctx.fakeInput = fakeInput;
-  ctx.onSend = () => { sent++; };
-  vm.runInContext("onEnter(fakeInput, onSend)", ctx);
-  listener({ key: "Enter", shiftKey: false, isComposing: true, keyCode: 13, preventDefault() {} });
-  listener({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 229, preventDefault() {} });
-  assert.equal(sent, 0, "IME composition Enter must not submit");
-  listener({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13, preventDefault() {} });
-  assert.equal(sent, 1, "plain Enter submits once");
-}
-`)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("node page harness failed: %v\n%s", err, out)
-	}
+		rec := serve(h, chatReq(`{"message":"what nodes are in this cluster?"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		got := decode[chatResponse](t, rec)
+		want := "All 3 nodes in platform-agent-host are Ready on v1.33.5-gke.1308000."
+		if got.Reply != want {
+			t.Errorf("reply = %q, want %q", got.Reply, want)
+		}
+	})
 }

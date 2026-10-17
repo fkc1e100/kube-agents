@@ -62,6 +62,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -103,6 +105,14 @@ const (
 	envChatPlatform     = "CHAT_PLATFORM"
 	// agentRolesSeparator splits AGENT_ROLES, which the chart joins with it.
 	agentRolesSeparator = ","
+	// envGitOpsRepos is a JSON list of the repositories declared at install
+	// ([{"forge","provider","host","repository","role"}]), rendered by the
+	// chart from platformAgent.integration. The page lists them as the
+	// targets the agent can open pull requests on; nothing here grants
+	// access, the credential proxy does.
+	envGitOpsRepos = "GITOPS_REPOS"
+	// maxGitOpsRepos bounds the list read from the environment.
+	maxGitOpsRepos = 50
 
 	// turnTimeout matches the in-tree callers of the same endpoint
 	// (session_kv_server.py's _start_agent_turn): a diagnostic turn that
@@ -120,6 +130,11 @@ const (
 	sessionListTimeout   = 10 * time.Second
 	messagesTimeout      = 10 * time.Second
 	sessionLookupTimeout = 10 * time.Second
+
+	// defaultDelegationPollInterval is how often runTurn polls session
+	// messages while waiting for a kanban_create card filed during the turn
+	// to reach a terminal status.
+	defaultDelegationPollInterval = 350 * time.Millisecond
 
 	// agentBusyWindow is how recently an agent session must have been
 	// active for an unanswered newest message to count as a turn in
@@ -154,6 +169,7 @@ const (
 	// from a delegated result that landed before it.
 	roleAssistant = "assistant"
 	roleUser      = "user"
+	roleTool      = "tool"
 
 	sessionIDPrefix = "web-console-"
 
@@ -202,6 +218,26 @@ type config struct {
 	AgentGSA         string
 	AgentRoles       []string
 	ChatPlatform     string
+	Repositories     []repositoryInfo
+
+	// What GET /api/environment reports about the install; see environment.go.
+	ChartVersion      string
+	AppVersion        string
+	ImageTag          string
+	HelmRevision      string
+	PodNamespace      string
+	PlatformAgentName string
+
+	// LiteLLMURL is the inference gateway POST /api/assist sends a feedback
+	// draft to; empty turns the route off. ReleaseCheck and ReleaseRepo
+	// drive GET /api/release; GitHubAPIBase is the API root (tests point it
+	// at a fake). See assist.go.
+	LiteLLMURL    string
+	AssistModel   string
+	ReleaseCheck  bool
+	ReleaseRepo   string
+	AutoUpgrade   bool
+	GitHubAPIBase string
 }
 
 func loadConfig() config {
@@ -220,8 +256,109 @@ func loadConfig() config {
 		AgentGSA:         os.Getenv(envAgentGSA),
 		AgentRoles:       splitList(os.Getenv(envAgentRoles), agentRolesSeparator),
 		ChatPlatform:     strings.TrimSpace(os.Getenv(envChatPlatform)),
+		Repositories:     parseRepositories(os.Getenv(envGitOpsRepos)),
+
+		ChartVersion:      strings.TrimSpace(os.Getenv(envKubeAgentsChartVersion)),
+		AppVersion:        strings.TrimSpace(os.Getenv(envKubeAgentsAppVersion)),
+		ImageTag:          strings.TrimSpace(os.Getenv(envKubeAgentsImageTag)),
+		HelmRevision:      strings.TrimSpace(os.Getenv(envHelmReleaseRevision)),
+		PodNamespace:      strings.TrimSpace(os.Getenv(envPodNamespace)),
+		PlatformAgentName: envOr(envPlatformAgentName, defaultPlatformAgentName),
+
+		LiteLLMURL:    strings.TrimRight(strings.TrimSpace(os.Getenv(envLiteLLMURL)), "/"),
+		AssistModel:   envOr(envAssistModel, defaultAssistModel),
+		ReleaseCheck:  envBool(envReleaseCheck, true),
+		ReleaseRepo:   envOr(envReleaseRepo, defaultReleaseRepo),
+		AutoUpgrade:   envBool(envAutoUpgrade, false),
+		GitHubAPIBase: gitHubAPIBase,
+	}
+	if !releaseRepoPat.MatchString(cfg.ReleaseRepo) {
+		log.Printf(logPrefix+"%s=%q is not owner/name; using %s", envReleaseRepo, cfg.ReleaseRepo, defaultReleaseRepo)
+		cfg.ReleaseRepo = defaultReleaseRepo
 	}
 	return cfg
+}
+
+// envBool reads an on/off setting; unset or unrecognised values give the
+// fallback.
+func envBool(key string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return fallback
+}
+
+// transportWithCA is an HTTP transport that trusts the cluster's CA.
+func transportWithCA(ca []byte) http.RoundTripper {
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca)
+	return &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
+}
+
+// parseRepositories reads GITOPS_REPOS. A malformed value yields an empty
+// list and a log line, never a crash: the list is informational.
+func parseRepositories(raw string) []repositoryInfo {
+	out := []repositoryInfo{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	var listed []repositoryInfo
+	if err := json.Unmarshal([]byte(raw), &listed); err != nil {
+		log.Printf(logPrefix+"%s is not a JSON list of repositories; ignoring it: %v", envGitOpsRepos, err)
+		return out
+	}
+	for _, r := range listed {
+		r.Repository = strings.TrimSpace(r.Repository)
+		if r.Repository == "" {
+			continue
+		}
+		if r.Provider == "" {
+			r.Provider = "github"
+		}
+		if r.Forge == "" {
+			r.Forge = r.Provider
+		}
+		if r.Role == "" {
+			r.Role = "gitops"
+		}
+		if r.URL == "" {
+			r.URL = repositoryURL(r)
+		}
+		out = append(out, r)
+		if len(out) >= maxGitOpsRepos {
+			break
+		}
+	}
+	return out
+}
+
+// repositoryURL is the browse URL for a repository the chart declared by
+// owner/name, or the value itself when it is already a URL.
+func repositoryURL(r repositoryInfo) string {
+	repo := strings.TrimSuffix(r.Repository, ".git")
+	if strings.Contains(repo, "://") {
+		return repo
+	}
+	host := r.Host
+	scheme := "https"
+	if host == "" {
+		switch r.Provider {
+		case "gitlab":
+			host = "gitlab.com"
+		case "gitea":
+			return ""
+		default:
+			host = "github.com"
+		}
+	}
+	if strings.HasSuffix(host, ".svc.cluster.local") || strings.Contains(host, ".svc.cluster.local:") {
+		scheme = "http"
+	}
+	return scheme + "://" + host + "/" + strings.Trim(repo, "/")
 }
 
 // splitList splits a separated list, trimming each item and dropping empty
@@ -260,12 +397,48 @@ type server struct {
 	fetchMetrics metricsFetcher
 	peerPort     string
 	usage        usageCache
+	model        modelCache
+	fetchModel   func(ctx context.Context, baseURL string) (modelInfo, error)
 
 	summaries summaryCache
+
+	// kube reads the Kubernetes API for /api/environment; nil when the pod
+	// has no service account token. environment caches the last read.
+	kube        *kubeClient
+	environment environmentCache
+
+	// githubClient reads the GitHub releases API for /api/release with its
+	// own deadline; releaseInfo caches the last answer for an hour.
+	githubClient *http.Client
+	releaseInfo  releaseCache
 
 	// streamCeiling bounds one streamed turn; streamTurnCeiling, or less
 	// in tests.
 	streamCeiling time.Duration
+
+	// delegationPollInterval is how often runTurn polls session messages
+	// when a synchronous /api/chat turn files a kanban_create card; tests
+	// lower it.
+	delegationPollInterval time.Duration
+
+	// autoUpgradeSet tracks whether auto-upgrade was toggled at runtime;
+	// autoUpgradeEnabled holds the runtime value; lastAutoUpgradeTarget
+	// records the newest release version the background loop attempted so a
+	// failed attempt is not retried in a tight loop.
+	autoUpgradeSet        bool
+	autoUpgradeEnabled    bool
+	lastAutoUpgradeTarget string
+
+	// reposMu guards the dynamically loaded / updated GitOps & IAM repositories.
+	reposMu        sync.RWMutex
+	cachedRepos    []repositoryInfo
+	cachedTopology string
+	cachedForges   []forgeInfo
+
+	// patchesMu guards the dynamically loaded / updated applied PRs & patches.
+	patchesMu        sync.RWMutex
+	cachedAppliedPRs []AppliedPR
+	patchesLoaded    bool
 }
 
 func newServer(cfg config) *server {
@@ -279,9 +452,13 @@ func newServer(cfg config) *server {
 		summaries: summaryCache{
 			entries: map[string]summaryEntry{},
 		},
-		streamCeiling: streamTurnCeiling,
+		githubClient:           &http.Client{Timeout: releaseTimeout},
+		streamCeiling:          streamTurnCeiling,
+		delegationPollInterval: defaultDelegationPollInterval,
+		kube:                   loadKubeClient(),
 	}
 	s.fetchMetrics = s.fetchPeerMetrics
+	s.fetchModel = s.fetchLiveModel
 	return s
 }
 
@@ -299,6 +476,23 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /api/sessions/{id}/transcript", s.requireLocalHost(http.HandlerFunc(s.handleTranscript)))
 	mux.Handle("GET /api/channels/{name}/posts", s.requireLocalHost(http.HandlerFunc(s.handleChannelPosts)))
 	mux.Handle("GET /api/insights", s.requireLocalHost(http.HandlerFunc(s.handleInsights)))
+	mux.Handle("GET /api/repositories", s.requireLocalHost(http.HandlerFunc(s.handleRepositoriesGet)))
+	mux.Handle("POST /api/repositories", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleRepositoriesSet))))
+	mux.Handle("POST /api/repositories/connect", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleRepositoriesConnect))))
+	mux.Handle("POST /api/repositories/disconnect", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleRepositoriesDisconnect))))
+	mux.Handle("POST /api/repositories/propose-pr", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleRepositoriesProposePR))))
+	mux.Handle("GET /api/patches", s.requireLocalHost(http.HandlerFunc(s.handlePatchesGet)))
+	mux.Handle("POST /api/patches", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handlePatchesPost))))
+	mux.Handle("GET /api/models", s.requireLocalHost(http.HandlerFunc(s.handleModelsGet)))
+	mux.Handle("POST /api/models", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleModelsPost))))
+	mux.Handle("POST /api/models/test", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleModelsTest))))
+	mux.Handle("GET /api/environment", s.requireLocalHost(http.HandlerFunc(s.handleEnvironment)))
+	mux.Handle("GET /api/release", s.requireLocalHost(http.HandlerFunc(s.handleRelease)))
+	mux.Handle("GET /api/upgrade/status", s.requireLocalHost(http.HandlerFunc(s.handleUpgradeStatus)))
+	mux.Handle("GET /api/upgrade/auto", s.requireLocalHost(http.HandlerFunc(s.handleUpgradeAutoGet)))
+	mux.Handle("POST /api/upgrade/auto", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleUpgradeAutoSet))))
+	mux.Handle("POST /api/upgrade", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleUpgradeStart))))
+	mux.Handle("POST /api/assist", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleAssist))))
 	mux.Handle("POST /api/chat", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChat))))
 	mux.Handle("POST /api/chat/stream", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChatStream))))
 	return denyFraming(mux)
@@ -453,16 +647,33 @@ func (s *server) listSessions(ctx context.Context, path string) ([]recentSession
 // (event watcher, scheduler, or kanban task notification) so the thread can
 // show a compact card instead of a raw routing template.
 type messageCard struct {
-	Kind     string `json:"kind,omitempty"`
-	Subject  string `json:"subject,omitempty"`
-	Resource string `json:"resource,omitempty"`
-	Reason   string `json:"reason,omitempty"`
-	Warning  string `json:"warning,omitempty"`
-	TaskID   string `json:"task_id,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Assignee string `json:"assignee,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Summary  string `json:"summary,omitempty"`
+	Kind     string   `json:"kind,omitempty"`
+	Subject  string   `json:"subject,omitempty"`
+	Resource string   `json:"resource,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+	Warning  string   `json:"warning,omitempty"`
+	TaskID   string   `json:"task_id,omitempty"`
+	Title    string   `json:"title,omitempty"`
+	Assignee string   `json:"assignee,omitempty"`
+	Status   string   `json:"status,omitempty"`
+	Summary  string   `json:"summary,omitempty"`
+	Skills   []string `json:"skills,omitempty"`
+}
+
+// messageStep is one tool or skill invocation recorded before an assistant
+// message in a session transcript or message poll. A kanban_create call is a
+// delegation: the work continues on a card after the reply, and TaskID (from
+// the tool's result row) lets the page follow it until the card's completion
+// notification lands on the session.
+type messageStep struct {
+	Tool       string `json:"tool,omitempty"`
+	Title      string `json:"title"`
+	Detail     string `json:"detail,omitempty"`
+	Skill      string `json:"skill,omitempty"`
+	Delegation bool   `json:"delegation,omitempty"`
+	TaskID     string `json:"task_id,omitempty"`
+	TaskTitle  string `json:"task_title,omitempty"`
+	Assignee   string `json:"assignee,omitempty"`
 }
 
 // sessionMessage is one user or assistant message from a poll of the page's
@@ -470,12 +681,14 @@ type messageCard struct {
 // increases in insertion order. Author names who wrote the row ("user",
 // "agent", "event_watcher", "scheduler", or "kanban").
 type sessionMessage struct {
-	ID        int64        `json:"id"`
-	Role      string       `json:"role"`
-	Author    string       `json:"author,omitempty"`
-	Content   string       `json:"content"`
-	Timestamp *float64     `json:"timestamp,omitempty"`
-	Card      *messageCard `json:"card,omitempty"`
+	ID        int64         `json:"id"`
+	Role      string        `json:"role"`
+	Author    string        `json:"author,omitempty"`
+	Content   string        `json:"content"`
+	Timestamp *float64      `json:"timestamp,omitempty"`
+	Card      *messageCard  `json:"card,omitempty"`
+	Steps     []messageStep `json:"steps,omitempty"`
+	Skills    []string      `json:"skills,omitempty"`
 }
 
 type sessionMessagesResponse struct {
@@ -486,9 +699,10 @@ type sessionMessagesResponse struct {
 
 // handleSessionMessages returns the user and assistant messages that have
 // text on one of this console's sessions with an ID above ?after=, oldest
-// first. Tool rows and tool-call-only assistant rows are left out. LatestID is
-// the highest message ID read, of any role, so the page can move its mark past
-// messages it does not show.
+// first. Tool rows and tool-call-only assistant rows are folded into Steps
+// and Skills on the next assistant message. LatestID is the highest message
+// ID read, of any role, so the page can move its mark past messages it does
+// not show.
 func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 	sid := r.PathValue("id")
 	if !sessionIDPattern.MatchString(sid) {
@@ -512,14 +726,37 @@ func (s *server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := sessionMessagesResponse{SessionID: sid, LatestID: after, Messages: []sessionMessage{}}
+	var pendingSteps []messageStep
+	var pendingSkills []string
 	for _, m := range rows {
 		if m.ID > out.LatestID {
 			out.LatestID = m.ID
 		}
-		if m.ID <= after || !hasText(m) {
+		if m.ID <= after {
 			continue
 		}
-		out.Messages = append(out.Messages, s.buildSessionMessage(kindConsole, false, m))
+		steps, skills := extractMessageToolActivity(m)
+		if len(steps) > 0 && len(pendingSteps) < maxStepsPerTurn {
+			rem := maxStepsPerTurn - len(pendingSteps)
+			if len(steps) > rem {
+				steps = steps[:rem]
+			}
+			pendingSteps = append(pendingSteps, steps...)
+		}
+		pendingSkills = mergeSkills(pendingSkills, skills...)
+		if !hasText(m) {
+			continue
+		}
+		msg := s.buildSessionMessage(kindConsole, sid, false, m)
+		if m.Role == roleAssistant {
+			if len(pendingSteps) > 0 {
+				msg.Steps = foldDelegations(pendingSteps)
+				pendingSteps = nil
+			}
+			msg.Skills = mergeSkills(msg.Skills, pendingSkills...)
+			pendingSkills = nil
+		}
+		out.Messages = append(out.Messages, msg)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -561,10 +798,12 @@ func hasText(m hermesMessage) bool {
 
 // hermesMessage is one row of Hermes' session messages list.
 type hermesMessage struct {
-	ID        int64    `json:"id"`
-	Role      string   `json:"role"`
-	Content   *string  `json:"content"`
-	Timestamp *float64 `json:"timestamp"`
+	ID        int64           `json:"id"`
+	Role      string          `json:"role"`
+	Content   *string         `json:"content"`
+	Timestamp *float64        `json:"timestamp"`
+	ToolName  *string         `json:"tool_name,omitempty"`
+	ToolCalls json.RawMessage `json:"tool_calls,omitempty"`
 }
 
 // upstreamFailure is an error response to send when a Hermes call fails.
@@ -870,8 +1109,16 @@ func (s *server) createSession(parent context.Context, sid string) error {
 
 // runTurn sends one message on a session and returns the agent's reply, per
 // Hermes' POST /api/sessions/{id}/chat: request {"message": ...}, response
-// {"message": {"role": "assistant", "content": ...}}.
+// {"message": {"role": "assistant", "content": ...}}. When the turn files one
+// or more kanban_create cards on the session, runTurn waits for those cards to
+// reach a terminal status and returns the completed card report (or a
+// subsequent assistant synthesis message) instead of the routing stub.
 func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
+	var beforeID int64
+	if latest, failure := s.fetchMessagesPage(ctx, fmt.Sprintf("/api/sessions/%s/messages?order=latest&limit=1&offset=0", url.PathEscape(sid))); failure == nil && len(latest) > 0 {
+		beforeID = latest[len(latest)-1].ID
+	}
+
 	resp, err := s.hermes(ctx, http.MethodPost, "/api/sessions/"+url.PathEscape(sid)+"/chat", map[string]string{"message": msg})
 	if err != nil {
 		return "", err
@@ -895,7 +1142,118 @@ func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
 	if err := json.Unmarshal(out.Message, &m); err != nil {
 		return "", fmt.Errorf("agent gateway reply has no message object: %w", err)
 	}
-	return m.Content, nil
+	return s.awaitDelegatedKanbanReply(ctx, sid, beforeID, m.Content)
+}
+
+// awaitDelegatedKanbanReply inspects the messages written during a turn
+// (ID > beforeID) for kanban_create calls. When none were filed, it returns
+// initialReply immediately with no polling delay. When one or more cards were
+// filed, it polls session messages until every delegated card reaches a
+// terminal status and returns either the subsequent assistant synthesis reply
+// or the joined card result summaries. If ctx expires before all cards settle,
+// it returns initialReply when non-empty.
+func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, beforeID int64, initialReply string) (string, error) {
+	rows, _, failure := s.pageMessages(ctx, sid, beforeID, nil)
+	if failure != nil {
+		return initialReply, nil
+	}
+	if reply, settled, delegated := s.resolveDelegatedTurn(rows, beforeID); !delegated {
+		return initialReply, nil
+	} else if settled {
+		return reply, nil
+	}
+
+	interval := s.delegationPollInterval
+	if interval <= 0 {
+		interval = defaultDelegationPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			if strings.TrimSpace(initialReply) != "" {
+				return initialReply, nil
+			}
+			return "", ctx.Err()
+		case <-ticker.C:
+			rows, _, failure = s.pageMessages(ctx, sid, beforeID, nil)
+			if failure != nil {
+				continue
+			}
+			if reply, settled, _ := s.resolveDelegatedTurn(rows, beforeID); settled {
+				return reply, nil
+			}
+		}
+	}
+}
+
+// resolveDelegatedTurn scans messages with ID > beforeID for kanban_create
+// tool results and their matching [kanban] Task <id> <status>. notifications.
+// It returns (reply, settled, delegated).
+func (s *server) resolveDelegatedTurn(rows []hermesMessage, beforeID int64) (string, bool, bool) {
+	var orderedIDs []string
+	pending := map[string]bool{}
+	completed := map[string]*messageCard{}
+	var lastCardMsgID int64
+	var synthesis string
+
+	for _, m := range rows {
+		if m.ID <= beforeID {
+			continue
+		}
+		if m.Role == roleTool && m.Content != nil && (m.ToolName == nil || *m.ToolName == toolKanbanCreate) {
+			if id := kanbanCreateTaskID(*m.Content); id != "" && !pending[id] {
+				pending[id] = true
+				orderedIDs = append(orderedIDs, id)
+			}
+		}
+		if m.Role == roleUser && m.Content != nil {
+			if card, ok := s.parseKanbanCard(*m.Content); ok && pending[card.TaskID] && isTerminalKanbanStatus(card.Status) {
+				completed[card.TaskID] = card
+				if m.ID > lastCardMsgID {
+					lastCardMsgID = m.ID
+				}
+			}
+		}
+		if m.Role == roleAssistant && m.Content != nil && lastCardMsgID > 0 && m.ID > lastCardMsgID {
+			if text := strings.TrimSpace(*m.Content); text != "" && !strings.EqualFold(text, "[SILENT]") {
+				synthesis = text
+			}
+		}
+	}
+
+	if len(orderedIDs) == 0 {
+		return "", false, false
+	}
+	for _, id := range orderedIDs {
+		if _, ok := completed[id]; !ok {
+			return "", false, true
+		}
+	}
+	if synthesis != "" {
+		return synthesis, true, true
+	}
+	var summaries []string
+	for _, id := range orderedIDs {
+		if sum := strings.TrimSpace(completed[id].Summary); sum != "" {
+			summaries = append(summaries, sum)
+		}
+	}
+	if len(summaries) > 0 {
+		return strings.Join(summaries, "\n\n"), true, true
+	}
+	return "", false, true
+}
+
+func isTerminalKanbanStatus(status string) bool {
+	switch status {
+	case "completed", "done", "blocked", "failed", "timed_out", "crashed", "gave_up":
+		return true
+	default:
+		return false
+	}
 }
 
 // hermes sends one request to the gateway with the API key attached.
@@ -976,9 +1334,14 @@ func main() {
 	if cfg.APIServerKey == "" {
 		log.Printf(logPrefix + "API_SERVER_KEY is empty; the agent gateway will refuse every turn")
 	}
+	s := newServer(cfg)
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	defer bgCancel()
+	go s.runAutoUpgradeLoop(bgCtx)
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.ListenPort,
-		Handler:           newServer(cfg).routes(),
+		Handler:           s.routes(),
 		ReadHeaderTimeout: serverHeaderTimeout,
 		ReadTimeout:       serverReadTimeout,
 		WriteTimeout:      serverWriteTimeout,
