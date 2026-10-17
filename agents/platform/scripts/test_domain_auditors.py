@@ -53,7 +53,7 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("- **cert_manager_installed:** `false`", out)
         self.assertIn("2 secret(s) across 2 namespace(s) [default (1), kubeagents-system (1)]", out)
-        self.assertIn("counted, not checked for expiry", out)
+        self.assertIn("not checked for expiry", out)
         self.assertIn("CLEAN_AUDIT_STOP: YES", out)
         # Secrets are listed metadata-only: no -o json, so no tls.key payload is fetched.
         self.assertNotIn("json", secret_args)
@@ -82,7 +82,8 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("- **cert_manager_installed:** `true`", out)
         self.assertIn("Partial CRD installation", out)
-        self.assertIn("RBAC restricts cluster-wide Secret listing", out)
+        self.assertIn("not counted (RBAC forbids cluster-wide Secret listing)", out)
+        self.assertNotIn("0 TLS errors", out)
         self.assertIn("CLEAN_AUDIT_STOP: YES — No failed, expired, or renewal-overdue certificates", out)
 
     def test_healthy_active_certs_and_issuers_emits_clean_stop(self):
@@ -259,6 +260,41 @@ class TestAuditCertificates(unittest.TestCase):
         self.assertIn("RenewalOverdue", out)
         self.assertIn("ACME order failed", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_failed_non_forbidden_secret_listing_is_unread(self):
+        out = self._run_certs(
+            (0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)),
+            lambda a, e: (0, {"items": []}),
+            secrets=(1, "Unable to connect to the server: i/o timeout"),
+        )
+        self.assertIn("Could not read `tls_secrets`: Unable to connect", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
+
+    def test_certificate_past_renewal_time_while_issuing_is_not_overdue(self):
+        def kubectl_json(args, env):
+            if "certificates.cert-manager.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "renewing"},
+                            "spec": {"secretName": "s", "issuerRef": {"kind": "ClusterIssuer", "name": "acme"}},
+                            "status": {
+                                "notAfter": "2099-01-01T00:00:00Z",
+                                "renewalTime": "2000-01-01T00:00:00Z",
+                                "conditions": [
+                                    {"type": "Ready", "status": "True", "reason": "Ready"},
+                                    {"type": "Issuing", "status": "True", "reason": "Renewing"},
+                                ],
+                            },
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
+        self.assertNotIn("RenewalOverdue", out)
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
 
 
 class TestAuditStorage(unittest.TestCase):
@@ -503,6 +539,26 @@ class TestAuditNetworking(unittest.TestCase):
         self.assertIn("NOT PROGRAMMED (Invalid)", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
+    def test_route_with_parent_refs_but_no_status_parents_is_not_attached(self):
+        def fake_run_kubectl_json(args, env):
+            if "httproutes.gateway.networking.k8s.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "orphan"},
+                            "spec": {"parentRefs": [{"name": "missing-gw"}]},
+                            "status": {"parents": []},
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("1 failing HTTPRoutes", out)
+        orphan_line = next(line for line in out.splitlines() if "orphan" in line)
+        self.assertIn("NotAttached", orphan_line)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
 
 class TestAuditNetworkPolicies(unittest.TestCase):
     def test_network_policies_summary_and_clean_stop(self):
@@ -551,6 +607,34 @@ class TestAuditNetworkPolicies(unittest.TestCase):
         db_line = next(line for line in out.splitlines() if "db-only" in line)
         self.assertIn("matchExpressions", db_line)
         self.assertNotIn("All Pods", db_line)
+
+    def _run_policies(self, fake_run_kubectl_json):
+        buf = io.StringIO()
+        with (
+            mock.patch.object(audit_network_policies, "run_kubectl_json", side_effect=fake_run_kubectl_json),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = audit_network_policies.audit_network_policies()
+        self.assertEqual(rc, 0)
+        return buf.getvalue()
+
+    def test_failed_listing_prints_stop_no(self):
+        def forbidden_policies(args, env):
+            if "networkpolicies" in args:
+                return 1, {"error": "Error from server (Forbidden): networkpolicies.networking.k8s.io is forbidden"}
+            return 0, {"items": [{"metadata": {"name": "default"}}]}
+
+        out = self._run_policies(forbidden_policies)
+        self.assertIn("could not read: networkpolicies", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
+
+    def test_empty_kubectl_output_is_an_error_not_zero_namespaces(self):
+        empty = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(audit_network_policies.subprocess, "run", return_value=empty):
+            code, data = audit_network_policies.run_kubectl_json(["get", "ns"], {})
+        self.assertNotEqual(code, 0)
+        self.assertIn("no output", data["error"])
 
 
 if __name__ == "__main__":
