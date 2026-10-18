@@ -1,15 +1,15 @@
 {
-  "version": "0.14.0",
-  "chart_url": "https://raw.githubusercontent.com/fkc1e100/kube-agents/lab/ce515-0.14.0/kube-agents-0.14.0.tgz",
-  "operator_tag": "lab-ce515-7cce4a82",
-  "sandbox_tag": "lab-ce515-7cce4a82",
-  "platform_agent_tag": "lab-ce515-7cce4a82",
+  "version": "0.12.0",
+  "chart_url": "https://raw.githubusercontent.com/fkc1e100/kube-agents/lab/ce515-0.12.0/kube-agents-0.12.0.tgz",
+  "operator_tag": "lab-ce515-6700e9f3",
+  "sandbox_tag": "lab-ce515-6700e9f3",
+  "platform_agent_tag": "lab-ce515-6700e9f3",
   "releases": {
     "0.12.0": {
       "chart_url": "https://raw.githubusercontent.com/fkc1e100/kube-agents/lab/ce515-0.12.0/kube-agents-0.12.0.tgz",
-      "operator_tag": "lab-ce515-7cce4a82",
-      "sandbox_tag": "lab-ce515-7cce4a82",
-      "platform_agent_tag": "lab-ce515-7cce4a82"
+      "operator_tag": "lab-ce515-6700e9f3",
+      "sandbox_tag": "lab-ce515-6700e9f3",
+      "platform_agent_tag": "lab-ce515-6700e9f3"
     },
     "0.13.0": {
       "chart_url": "https://raw.githubusercontent.com/fkc1e100/kube-agents/lab/ce515-0.13.0/kube-agents-0.13.0.tgz",
