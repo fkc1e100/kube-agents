@@ -22,7 +22,6 @@ from pathlib import Path
 import shlex
 import subprocess
 from typing import Any
-import urllib.error
 import urllib.request
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -132,6 +131,17 @@ def _load_samples_for_task(task_id: str) -> list[Sample]:
     return samples
 
 
+_ALLOWED_SUBCOMMANDS = {"get", "describe", "logs", "version", "cluster-info"}
+_MUTATING_SUBCOMMANDS = {
+    "delete", "apply", "patch", "edit", "scale", "exec", "run", "replace", "create",
+    "drain", "cordon", "uncordon", "taint", "rollout", "set", "attach", "cp", "port-forward",
+}
+_FLAG_ARGS = {
+    "-n", "--namespace", "-l", "--selector", "-c", "--container",
+    "--context", "--cluster", "--user", "--kubeconfig", "-s", "--server", "-f", "--filename",
+}
+
+
 @tool
 def kubectl_inspect() -> Tool:
     """Execute read-only kubectl commands against the target Kubernetes cluster.
@@ -147,10 +157,31 @@ def kubectl_inspect() -> Tool:
         tokens = shlex.split(command)
         if not tokens or tokens[0] != "kubectl":
             return "Error: Command must start with 'kubectl'."
-        allowed = {"get", "describe", "logs", "version", "cluster-info"}
-        subcmd = next((t for t in tokens[1:] if not t.startswith("-")), None)
-        if subcmd not in allowed:
-            return f"Error: Only read-only subcommands {sorted(allowed)} are permitted."
+
+        # Guard against mutating subcommands anywhere in the command arguments
+        for t in tokens[1:]:
+            if t.lower() in _MUTATING_SUBCOMMANDS:
+                return f"Error: Mutating subcommand '{t}' is prohibited."
+
+        # Extract subcommand with flag-argument awareness
+        subcmd = None
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok in _FLAG_ARGS:
+                i += 2
+                continue
+            if tok.startswith("-"):
+                i += 1
+                continue
+            subcmd = tok
+            break
+
+        if not subcmd:
+            return "Error: No kubectl subcommand specified."
+        if subcmd not in _ALLOWED_SUBCOMMANDS:
+            return f"Error: Only read-only subcommands {sorted(_ALLOWED_SUBCOMMANDS)} are permitted."
+
         try:
             res = subprocess.run(tokens, capture_output=True, text=True, timeout=30)
             out = res.stdout
@@ -179,9 +210,10 @@ def kube_agents_solver(
             url = ep.rstrip("/")
             if not url.endswith(("/v1/responses", "/api/chat")):
                 url = f"{url}/v1/responses"
+            sample_id = getattr(state, "sample_id", getattr(state, "id", "default"))
             payload = {
                 "model": os.environ.get("AGENT_MODEL_NAME", "model-default"),
-                "conversation": f"eval_{state.sample_id}",
+                "conversation": f"eval_{sample_id}",
                 "input": prompt,
                 "message": prompt,
             }
@@ -199,8 +231,12 @@ def kube_agents_solver(
                     state.messages.append(ChatMessageAssistant(content=text))
                     state.completed = True
                     return state
-            except Exception:
-                pass
+            except Exception as exc:
+                err_msg = f"Failed to reach kube-agents gateway at {url}: {exc}"
+                state.output = ModelOutput.from_content(model="kube-agents", content=err_msg)
+                state.messages.append(ChatMessageAssistant(content=err_msg))
+                state.completed = True
+                return state
 
         if sys_prompt and ChatMessageSystem and ChatMessageSystem != Any:
             state.messages.insert(0, ChatMessageSystem(content=sys_prompt))

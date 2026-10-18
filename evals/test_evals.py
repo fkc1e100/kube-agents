@@ -160,6 +160,29 @@ Please review this /plan before enabling or mutating cluster infrastructure.
         tool_fn = kubectl_inspect()
         self.assertIsNotNone(tool_fn)
 
+    def test_kubectl_inspect_security_guardrails(self):
+        """Tests that kubectl_inspect permits valid read queries and rejects mutating/bypass attempts."""
+        import asyncio
+        from kube_agents_tasks import kubectl_inspect
+
+        tool_fn = kubectl_inspect()
+
+        # Mutating command must be rejected
+        res = asyncio.run(tool_fn("kubectl delete pods --all"))
+        self.assertIn("prohibited", res)
+
+        # Flag argument bypass attempt must be rejected
+        res = asyncio.run(tool_fn("kubectl -n get delete pods --all"))
+        self.assertIn("prohibited", res)
+
+        # Non-kubectl command must be rejected
+        res = asyncio.run(tool_fn("rm -rf /"))
+        self.assertIn("must start with 'kubectl'", res)
+
+        # Mutating exec must be rejected
+        res = asyncio.run(tool_fn("kubectl exec -it pod -- bash"))
+        self.assertIn("prohibited", res)
+
 
 if __name__ == "__main__":
     unittest.main()
