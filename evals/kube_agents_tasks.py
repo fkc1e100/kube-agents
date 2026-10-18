@@ -16,12 +16,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 from typing import Any
 import urllib.request
 
@@ -29,6 +31,15 @@ CURRENT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = CURRENT_DIR / "datasets" / "kube_agents_eval_dataset.jsonl"
 DEFAULT_MODEL = "google/gemini-3.5-flash-lite"
 REQUIRED_RECORD_KEYS = ("id", "task_id", "input")
+
+_SCRIPTS_DIR = CURRENT_DIR.parent / "agents" / "platform" / "scripts"
+if _SCRIPTS_DIR.is_dir() and str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+try:
+    import command_policy
+except ImportError:
+    command_policy = None
 
 try:
     from inspect_ai import Task, task
@@ -90,14 +101,14 @@ except ImportError:
     Tool = Any
 
 try:
-    # Sibling import: Inspect loads this file by path, so it has no parent package.
-    from scorers import kube_agents_cx_scorer
-except ImportError:
-    # scorers.py defines kube_agents_cx_scorer only when inspect_ai imports; with
-    # inspect_ai present, a failed import is a real error and must not yield unscored tasks.
-    if _INSPECT_AVAILABLE:
-        raise
-    kube_agents_cx_scorer = None
+    from .scorers import kube_agents_cx_scorer
+except (ImportError, ValueError):
+    try:
+        from scorers import kube_agents_cx_scorer
+    except ImportError:
+        if _INSPECT_AVAILABLE:
+            raise
+        kube_agents_cx_scorer = None
 
 
 def _resolve_model():
@@ -158,6 +169,8 @@ _DENIED_FLAGS = {
     "-s", "--server", "--kubeconfig", "--token", "--as", "--as-group", "--as-uid", "--username",
     "--password", "--certificate-authority", "--client-certificate", "--client-key",
     "--insecure-skip-tls-verify", "--raw",
+    "--context", "--cluster", "--user",
+    "-f", "--filename", "-k", "--kustomize", "-R", "--recursive",
 }
 _DENIED_RESOURCES = {"secret", "secrets"}
 
@@ -178,16 +191,22 @@ def kubectl_inspect() -> Tool:
         if not tokens or tokens[0] != "kubectl":
             return "Error: Command must start with 'kubectl'."
 
-        # Guard against mutating subcommands anywhere in the command arguments
+        # 1. Consult repository command policy first if available
+        if command_policy is not None:
+            decision = command_policy.evaluate(tokens)
+            if not decision.allowed:
+                return f"Error: {decision.message}"
+
+        # 2. Guard against mutating subcommands anywhere in the command arguments
         for t in tokens[1:]:
             if t.lower() in _MUTATING_SUBCOMMANDS:
                 return f"Error: Mutating subcommand '{t}' is prohibited."
 
-        # Connection and identity overrides would send the caller's kubeconfig credentials to a
-        # server the model chooses or impersonate another user; Secret objects stay unreadable.
+        # 3. Connection/identity/target overrides, indirect manifest reads, and Secret reads.
+        # Catches exact denied flags and attached short flags (e.g. -s<url>, -f<path>, -k<dir>).
         for t in tokens[1:]:
             flag = t.split("=", 1)[0]
-            if flag in _DENIED_FLAGS:
+            if flag in _DENIED_FLAGS or (t.startswith(("-s", "-f", "-k")) and not t.startswith("--")):
                 return f"Error: Flag '{flag}' is prohibited."
             if any(part in _DENIED_RESOURCES for part in re.split(r"[,/.]", t.lower())):
                 return f"Error: Reading '{t}' is prohibited."
@@ -252,20 +271,34 @@ def kube_agents_solver(
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
+            token = os.environ.get("PLATFORM_AGENT_TOKEN") or os.environ.get("KUBE_AGENTS_TOKEN")
+            if token:
+                req.add_header("Authorization", f"Bearer {token}")
+
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    text = data.get("response") or data.get("output") or data.get("text") or str(data)
-                    state.output = ModelOutput.from_content(model="kube-agents", content=text)
-                    state.messages.append(ChatMessageAssistant(content=text))
-                    state.completed = True
-                    return state
-            except Exception as exc:
-                err_msg = f"Failed to reach kube-agents gateway at {url}: {exc}"
-                state.output = ModelOutput.from_content(model="kube-agents", content=err_msg)
-                state.messages.append(ChatMessageAssistant(content=err_msg))
+                resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=timeout)
+                data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, dict):
+                    out_items = data.get("output")
+                    if isinstance(out_items, list):
+                        texts = []
+                        for item in out_items:
+                            if isinstance(item, dict):
+                                for c in item.get("content", []):
+                                    if isinstance(c, dict) and c.get("type") == "output_text":
+                                        texts.append(c.get("text", ""))
+                        text = "\n".join(texts).strip()
+                    else:
+                        text = str(data.get("response") or data.get("output") or data.get("text") or "")
+                else:
+                    text = str(data)
+
+                state.output = ModelOutput.from_content(model="kube-agents", content=text)
+                state.messages.append(ChatMessageAssistant(content=text))
                 state.completed = True
                 return state
+            except Exception as exc:
+                raise RuntimeError(f"Failed to reach kube-agents gateway at {url}: {exc}") from exc
 
         if sys_prompt and ChatMessageSystem and ChatMessageSystem != Any:
             state.messages.insert(0, ChatMessageSystem(content=sys_prompt))
