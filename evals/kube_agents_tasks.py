@@ -17,8 +17,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
 from typing import Any
+import urllib.error
+import urllib.request
 
 CURRENT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = CURRENT_DIR / "datasets" / "kube_agents_eval_dataset.jsonl"
@@ -27,16 +32,57 @@ DEFAULT_MODEL = "google/gemini-3.5-flash-lite"
 try:
     from inspect_ai import Task, task
     from inspect_ai.dataset import MemoryDataset, Sample
-    from inspect_ai.solver import generate, system_message
+    from inspect_ai.model import ChatMessageAssistant, ChatMessageSystem, ModelOutput
+    from inspect_ai.solver import Generate, TaskState, generate, solver, system_message, use_tools
+    from inspect_ai.tool import Tool, tool
 except ImportError:
-    # Minimal fallback dummy decorator when inspect_ai is not installed
+    # Minimal fallback dummy decorators when inspect_ai is not installed
     def task(fn):
         return fn
-    Task = Any
-    MemoryDataset = Any
-    Sample = Any
-    generate = Any
-    system_message = Any
+
+    def tool(fn):
+        return fn
+
+    def solver(fn):
+        return fn
+
+    class Sample:
+        def __init__(self, input="", target="", id=0, metadata=None):
+            self.input = input
+            self.target = target
+            self.id = id
+            self.metadata = metadata or {}
+
+    class MemoryDataset(list):
+        def __init__(self, samples=None):
+            super().__init__(samples or [])
+
+    class Task:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class ModelOutput:
+        @classmethod
+        def from_content(cls, model="", content=""):
+            return cls(model=model, content=content)
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class ChatMessageAssistant:
+        def __init__(self, content="", **kwargs):
+            self.content = content
+
+    class ChatMessageSystem:
+        def __init__(self, content="", **kwargs):
+            self.content = content
+
+    generate = None
+    system_message = None
+    use_tools = None
+    Generate = Any
+    TaskState = Any
+    Tool = Any
 
 try:
     from .scorers import kube_agents_cx_scorer
@@ -86,6 +132,85 @@ def _load_samples_for_task(task_id: str) -> list[Sample]:
     return samples
 
 
+@tool
+def kubectl_inspect() -> Tool:
+    """Execute read-only kubectl commands against the target Kubernetes cluster.
+
+    Permitted read-only subcommands: get, describe, logs, version, cluster-info.
+    """
+    async def execute(command: str) -> str:
+        """Run a read-only kubectl command.
+
+        Args:
+            command: The kubectl command line to run, e.g. 'kubectl get pods -n kubeagents-system'.
+        """
+        tokens = shlex.split(command)
+        if not tokens or tokens[0] != "kubectl":
+            return "Error: Command must start with 'kubectl'."
+        allowed = {"get", "describe", "logs", "version", "cluster-info"}
+        subcmd = next((t for t in tokens[1:] if not t.startswith("-")), None)
+        if subcmd not in allowed:
+            return f"Error: Only read-only subcommands {sorted(allowed)} are permitted."
+        try:
+            res = subprocess.run(tokens, capture_output=True, text=True, timeout=30)
+            out = res.stdout
+            if res.stderr:
+                out += f"\nSTDERR: {res.stderr}"
+            return out or "(empty output)"
+        except Exception as e:
+            return f"Error executing kubectl command: {e}"
+
+    return execute
+
+
+@solver
+def kube_agents_solver(
+    sys_prompt: str | None = None,
+    endpoint: str | None = None,
+    timeout: float = 60.0,
+):
+    """Inspect AI solver that dispatches prompts to running kube-agents or executes inspection tools."""
+    tool_solver = use_tools([kubectl_inspect()]) if use_tools and use_tools != Any else None
+
+    async def solve(state: TaskState, gen: Generate) -> TaskState:
+        ep = endpoint or os.environ.get("KUBE_AGENTS_ENDPOINT") or os.environ.get("AGENT_API_URL")
+        if ep:
+            prompt = state.user_prompt.text
+            url = ep.rstrip("/")
+            if not url.endswith(("/v1/responses", "/api/chat")):
+                url = f"{url}/v1/responses"
+            payload = {
+                "model": os.environ.get("AGENT_MODEL_NAME", "model-default"),
+                "conversation": f"eval_{state.sample_id}",
+                "input": prompt,
+                "message": prompt,
+            }
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    text = data.get("response") or data.get("output") or data.get("text") or str(data)
+                    state.output = ModelOutput.from_content(model="kube-agents", content=text)
+                    state.messages.append(ChatMessageAssistant(content=text))
+                    state.completed = True
+                    return state
+            except Exception:
+                pass
+
+        if sys_prompt and ChatMessageSystem and ChatMessageSystem != Any:
+            state.messages.insert(0, ChatMessageSystem(content=sys_prompt))
+        if tool_solver:
+            state = await tool_solver(state, gen)
+        return await gen(state)
+
+    return solve
+
+
 @task
 def identity_and_role() -> Task:
     """Evaluates model identity, role description, and permission boundaries."""
@@ -98,7 +223,7 @@ def identity_and_role() -> Task:
         name="kubeagents/identity_and_role",
         model=_resolve_model(),
         dataset=MemoryDataset(_load_samples_for_task("kubeagents/identity_and_role")),
-        solver=[system_message(sys_prompt), generate()],
+        solver=[kube_agents_solver(sys_prompt=sys_prompt)],
         scorer=kube_agents_cx_scorer() if kube_agents_cx_scorer else None,
     )
 
@@ -114,7 +239,7 @@ def fleet_cloud_scope() -> Task:
         name="kubeagents/fleet_cloud_scope",
         model=_resolve_model(),
         dataset=MemoryDataset(_load_samples_for_task("kubeagents/fleet_cloud_scope")),
-        solver=[system_message(sys_prompt), generate()],
+        solver=[kube_agents_solver(sys_prompt=sys_prompt)],
         scorer=kube_agents_cx_scorer() if kube_agents_cx_scorer else None,
     )
 
@@ -126,7 +251,7 @@ def cluster_inspection() -> Task:
         name="kubeagents/cluster_inspection",
         model=_resolve_model(),
         dataset=MemoryDataset(_load_samples_for_task("kubeagents/cluster_inspection")),
-        solver=[generate()],
+        solver=[kube_agents_solver()],
         scorer=kube_agents_cx_scorer() if kube_agents_cx_scorer else None,
     )
 
@@ -138,7 +263,7 @@ def workload_inspection() -> Task:
         name="kubeagents/workload_inspection",
         model=_resolve_model(),
         dataset=MemoryDataset(_load_samples_for_task("kubeagents/workload_inspection")),
-        solver=[generate()],
+        solver=[kube_agents_solver()],
         scorer=kube_agents_cx_scorer() if kube_agents_cx_scorer else None,
     )
 
@@ -150,7 +275,7 @@ def diagnostics_and_logs() -> Task:
         name="kubeagents/diagnostics_and_logs",
         model=_resolve_model(),
         dataset=MemoryDataset(_load_samples_for_task("kubeagents/diagnostics_and_logs")),
-        solver=[generate()],
+        solver=[kube_agents_solver()],
         scorer=kube_agents_cx_scorer() if kube_agents_cx_scorer else None,
     )
 
@@ -168,6 +293,6 @@ def substrate_planning() -> Task:
         name="kubeagents/substrate_planning",
         model=_resolve_model(),
         dataset=MemoryDataset(_load_samples_for_task("kubeagents/substrate_planning")),
-        solver=[system_message(sys_prompt), generate()],
+        solver=[kube_agents_solver(sys_prompt=sys_prompt)],
         scorer=kube_agents_cx_scorer() if kube_agents_cx_scorer else None,
     )

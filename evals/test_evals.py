@@ -125,5 +125,41 @@ Please review this /plan before enabling or mutating cluster infrastructure.
         self.assertIn("Missing required keyword", msg)
 
 
+    def test_clause_scoped_negation(self):
+        """Tests that a positive status in one clause is not masked by negation in an earlier clause."""
+        passed, msg = evaluate_response_quality(
+            prompt_id=11,
+            output_text="Pod web-console is not running, but platform-agent-gateway is running in namespace kubeagents-system.",
+            required_keywords=["platform-agent-gateway", "running"],
+        )
+        self.assertTrue(passed, msg)
+
+    def test_inspect_tasks_instantiation(self):
+        """Tests that Inspect AI task definitions and inspection tool initialize cleanly."""
+        from kube_agents_tasks import (
+            cluster_inspection,
+            diagnostics_and_logs,
+            fleet_cloud_scope,
+            identity_and_role,
+            kubectl_inspect,
+            substrate_planning,
+            workload_inspection,
+        )
+
+        for factory in (
+            identity_and_role,
+            fleet_cloud_scope,
+            cluster_inspection,
+            workload_inspection,
+            diagnostics_and_logs,
+            substrate_planning,
+        ):
+            t = factory()
+            self.assertIsNotNone(t)
+
+        tool_fn = kubectl_inspect()
+        self.assertIsNotNone(tool_fn)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,19 @@ def _has_negated_status(keyword: str, text: str) -> bool:
     return False
 
 
+def _has_positive_status(keyword: str, text: str) -> bool:
+    """Checks that a status keyword appears positively in at least one clause/sentence."""
+    clauses = re.split(
+        r"(?<=[.!?\n;])\s*|\s*,\s*(?:but|however|while|whereas|although)\s+",
+        text,
+        flags=re.IGNORECASE,
+    )
+    for c in clauses:
+        if _contains_word(keyword, c) and not _has_negated_status(keyword, c):
+            return True
+    return False
+
+
 def evaluate_response_quality(
     prompt_id: int,
     output_text: str,
@@ -158,11 +171,13 @@ def evaluate_response_quality(
                 missing.append("/plan staging prior to enabling")
             return False, f"Fail: Incomplete substrate plan, missing {', '.join(missing)}"
 
-    # 5. General required keyword presence (anchored with word boundaries & negation checks)
+    # 5. General required keyword presence (anchored with word boundaries & clause-scoped negation checks)
     if required_keywords:
         missing_req = []
         for k in required_keywords:
-            if not _contains_word(k, lowered) or _has_negated_status(k, lowered):
+            if not _contains_word(k, lowered):
+                missing_req.append(k)
+            elif k.lower().strip() in _STATUS_KEYWORDS and not _has_positive_status(k, lowered):
                 missing_req.append(k)
         if missing_req:
             return False, f"Fail: Missing required keyword(s): {', '.join(missing_req)}"
