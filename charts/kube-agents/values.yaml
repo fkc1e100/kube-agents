@@ -1468,8 +1468,9 @@ webConsole:
   # GET /api/environment: versions, install and last-rollout dates, and
   # counts of nodes, namespaces, pods and controllers, for the console's
   # feedback reports. Needs a service account with list on those kinds and
-  # get on the PlatformAgent, which the chart creates. Counts only: the
-  # console discards the listed items and never returns a name.
+  # get on the PlatformAgent, which the chart creates. The console discards
+  # the listed items; the only names it returns are the kube-agents Helm
+  # release, its namespace and the owning Argo CD Application.
   environment:
     enabled: true
   # "Polish with Gemini" in the feedback form: POST /api/assist sends the
@@ -1504,6 +1505,16 @@ webConsole:
   # the release is autoUpgradeMinReleaseAge old, and, when
   # autoUpgradeWindow is set, until the window opens. The Upgrade button in
   # the console is not gated.
+  #
+  # The runner pod runs as ServiceAccount/kube-agents-upgrader, which this
+  # chart binds to the cluster-admin ClusterRole, and the console's own
+  # service account gets create on pods in the release namespace to launch
+  # it. Anyone who can reach the console (pods/portforward on the namespace)
+  # can therefore start a cluster-admin pod running upgrade.sh. The runner
+  # needs environment.enabled (its RBAC renders with the console's service
+  # account); with either toggle off the chart renders neither the binding
+  # nor the pod rule, and the console refuses POST /api/upgrade with a
+  # message saying the runner is off.
   upgradeRunner:
     enabled: true
     autoUpgrade: false

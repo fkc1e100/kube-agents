@@ -124,8 +124,8 @@ func TestUpgradeStartAndStatusLifecycle(t *testing.T) {
 	if st3.State != "succeeded" || !strings.Contains(st3.Phase, "Upgrade to 0.12.0 Complete!") {
 		t.Fatalf("unexpected succeeded status: %+v", st3)
 	}
-	if s.cfg.ImageTag != "0.12.0" || s.cfg.ChartVersion != "0.12.0" {
-		t.Fatalf("server version was not updated after upgrade: ImageTag=%q ChartVersion=%q", s.cfg.ImageTag, s.cfg.ChartVersion)
+	if s.cfg.ImageTag != "0.8.0" || s.cfg.ChartVersion != "0.8.0" {
+		t.Fatalf("a succeeded runner rewrote the startup config (read unlocked elsewhere): ImageTag=%q ChartVersion=%q", s.cfg.ImageTag, s.cfg.ChartVersion)
 	}
 }
 
@@ -630,4 +630,298 @@ func TestLoadAutoUpgradePolicy(t *testing.T) {
 			t.Errorf("window=%q age=%q: got window %v, age %s; want window %v, age %s", tc.window, tc.age, w != nil, age, tc.wantWindow, tc.wantAge)
 		}
 	}
+}
+
+// runnerAPI fakes the Kubernetes API calls the upgrade runner makes: the
+// PlatformAgent read, and get, create, delete and logs on the runner pod.
+type runnerAPI struct {
+	mu           sync.Mutex
+	paTag        string
+	podMeta      map[string]any
+	podStatus    map[string]any
+	logs         string
+	posts        int
+	deletes      int
+	postConflict bool
+}
+
+const (
+	runnerPodPath = "/api/v1/namespaces/kubeagents-system/pods/kube-agents-upgrade-runner"
+	runnerPAPath  = "/apis/kubeagents.x-k8s.io/v1alpha1/namespaces/kubeagents-system/platformagents/platform-agent"
+)
+
+func (f *runnerAPI) counts() (posts, deletes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.posts, f.deletes
+}
+
+func newRunnerAPIServer(t *testing.T, f *runnerAPI) *server {
+	t.Helper()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == runnerPAPath && f.paTag != "":
+			w.Header().Set("Content-Type", contentTypeJSON)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{"name": "platform-agent", "creationTimestamp": "2026-10-01T00:00:00Z"},
+				"spec":     map[string]any{"deployment": map[string]any{"tag": f.paTag}},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == runnerPodPath:
+			if f.podMeta == nil {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"message":"not found"}`)
+				return
+			}
+			w.Header().Set("Content-Type", contentTypeJSON)
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": f.podMeta, "status": f.podStatus})
+		case r.Method == http.MethodDelete && r.URL.Path == runnerPodPath:
+			f.deletes++
+			f.podMeta, f.podStatus = nil, nil
+			w.Header().Set("Content-Type", contentTypeJSON)
+			fmt.Fprint(w, `{}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/kubeagents-system/pods":
+			f.posts++
+			raw, _ := io.ReadAll(r.Body)
+			var pod map[string]any
+			_ = json.Unmarshal(raw, &pod)
+			f.podMeta, _ = pod["metadata"].(map[string]any)
+			if f.postConflict {
+				// The other tab's create won: the pod exists and runs.
+				f.podStatus = map[string]any{"phase": "Running"}
+				w.WriteHeader(http.StatusConflict)
+				fmt.Fprint(w, `{"reason":"AlreadyExists"}`)
+				return
+			}
+			f.podStatus = map[string]any{"phase": "Pending"}
+			w.Header().Set("Content-Type", contentTypeJSON)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write(raw)
+		case r.Method == http.MethodGet && r.URL.Path == runnerPodPath+"/log":
+			w.Header().Set("Content-Type", "text/plain")
+			fmt.Fprint(w, f.logs)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(api.Close)
+	_, s := setupServer(t)
+	s.cfg.PodNamespace = "kubeagents-system"
+	s.cfg.PlatformAgentName = "platform-agent"
+	s.cfg.ImageTag = "0.8.0"
+	s.cfg.ChartVersion = "0.8.0"
+	s.kube = &kubeClient{base: api.URL, token: "sa-token", client: api.Client()}
+	return s
+}
+
+func startUpgradeRequest(body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/upgrade", strings.NewReader(body))
+	req.Header.Set("Content-Type", contentTypeJSON)
+	req.Header.Set(consoleHeader, consoleHeaderValue)
+	return req
+}
+
+func TestUpgradeRunnerDisabledRefusesCleanly(t *testing.T) {
+	t.Setenv(envUpgradeRunnerEnabled, "false")
+	f := &runnerAPI{paTag: "0.8.0"}
+	s := newRunnerAPIServer(t, f)
+	h := s.routes()
+
+	rec := serve(h, startUpgradeRequest(`{"target":"0.12.0"}`))
+	if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "upgrade_unavailable") || !strings.Contains(rec.Body.String(), "webConsole.upgradeRunner.enabled=false") {
+		t.Fatalf("runner off: status %d body %s; want 501 upgrade_unavailable naming the chart value", rec.Code, rec.Body.String())
+	}
+	st := decode[upgradeStatusResponse](t, serve(h, httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/upgrade/status", nil)))
+	if st.RunnerEnabled || st.State != "idle" || st.Detail != upgradeRunnerOffMessage {
+		t.Fatalf("runner off: status %+v; want idle, runner_enabled=false and the off message", st)
+	}
+	if triggered, _ := s.maybeTriggerAutoUpgrade(t.Context()); triggered {
+		t.Fatalf("runner off: the automatic path launched")
+	}
+	autoReq := httptest.NewRequest(http.MethodPost, "http://localhost:8080/api/upgrade/auto", strings.NewReader(`{"enabled":true}`))
+	autoReq.Header.Set("Content-Type", contentTypeJSON)
+	autoReq.Header.Set(consoleHeader, consoleHeaderValue)
+	if rec := serve(h, autoReq); rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "upgrade_unavailable") {
+		t.Fatalf("runner off: enabling automatic upgrades answered %d %s; want 501 upgrade_unavailable", rec.Code, rec.Body.String())
+	}
+	if posts, _ := f.counts(); posts != 0 {
+		t.Fatalf("runner off: %d runner pod POSTs, want 0", posts)
+	}
+
+	t.Setenv(envUpgradeRunnerEnabled, "")
+	if st := decode[upgradeStatusResponse](t, serve(h, httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/upgrade/status", nil))); !st.RunnerEnabled {
+		t.Fatalf("%s unset: runner_enabled=false, want true", envUpgradeRunnerEnabled)
+	}
+}
+
+func TestUpgradeRunnerPodHasDeadlineAndLogFallback(t *testing.T) {
+	_, s := setupServer(t)
+	pod := s.buildUpgradeRunnerPod("kubeagents-system", "0.12.0", "cmd", "img", "sa")
+	spec := pod["spec"].(map[string]any)
+	if got := spec["activeDeadlineSeconds"]; got != int64(5400) {
+		t.Fatalf("activeDeadlineSeconds = %v, want 5400", got)
+	}
+	container := spec["containers"].([]map[string]any)[0]
+	if got := container["terminationMessagePolicy"]; got != "FallbackToLogsOnError" {
+		t.Fatalf("terminationMessagePolicy = %v, want FallbackToLogsOnError", got)
+	}
+}
+
+func TestUpgradeStalePendingRunnerIsReplaced(t *testing.T) {
+	f := &runnerAPI{
+		paTag:     "0.8.0",
+		podMeta:   map[string]any{"name": upgradeRunnerPodName, "creationTimestamp": "2026-10-18T00:00:00Z", "annotations": map[string]string{"kubeagents.x-k8s.io/target-version": "0.12.0"}},
+		podStatus: map[string]any{"phase": "Pending"},
+	}
+	s := newRunnerAPIServer(t, f)
+	h := s.routes()
+
+	// Inside the deadline a Pending pod is still a run in progress.
+	s.now = func() time.Time { return time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC) }
+	if st := s.readUpgradeStatus(t.Context()); st.State != "running" {
+		t.Fatalf("pending for 1h: state %q, want running", st.State)
+	}
+	// Past deadline plus grace it counts as failed, and a start replaces it.
+	s.now = func() time.Time { return time.Date(2026, 10, 18, 2, 0, 0, 0, time.UTC) }
+	if st := s.readUpgradeStatus(t.Context()); st.State != "failed" || !strings.Contains(st.Detail, "did not finish within 1h30m0s") {
+		t.Fatalf("pending for 2h: %+v, want failed with the deadline named", st)
+	}
+	rec := serve(h, startUpgradeRequest(`{"target":"0.12.0"}`))
+	posts, deletes := f.counts()
+	if rec.Code != http.StatusAccepted || deletes != 1 || posts != 1 {
+		t.Fatalf("restart over a stale pod: status %d, deletes %d, posts %d; want 202, 1, 1: %s", rec.Code, deletes, posts, rec.Body.String())
+	}
+
+	// A pod that reached a node is the kubelet's to time out: an old
+	// creation time alone does not make it replaceable.
+	f.mu.Lock()
+	f.podMeta["creationTimestamp"] = "2026-10-18T00:00:00Z"
+	f.podStatus = map[string]any{"phase": "Running", "startTime": "2026-10-18T01:00:00Z"}
+	f.mu.Unlock()
+	if st := s.readUpgradeStatus(t.Context()); st.State != "running" {
+		t.Fatalf("started pod created 2h ago: state %q, want running", st.State)
+	}
+}
+
+func TestUpgradeFailedRunnerReportsTheError(t *testing.T) {
+	f := &runnerAPI{
+		paTag:   "0.8.0",
+		podMeta: map[string]any{"name": upgradeRunnerPodName, "annotations": map[string]string{"kubeagents.x-k8s.io/target-version": "0.12.0"}},
+		podStatus: map[string]any{
+			"phase": "Failed",
+			"containerStatuses": []map[string]any{{
+				"name":  "upgrader",
+				"state": map[string]any{"terminated": map[string]any{"exitCode": 1, "message": "log tail", "finishedAt": "2026-10-18T01:00:00Z"}},
+			}},
+		},
+		logs: ">>>  4. Upgrading Kubernetes Operator (CRDs & Controller Manager)  <<<\n\x1b[1;31m  ✗ The target chart does not declare webConsole.upgradeRunner\x1b[0m\n",
+	}
+	s := newRunnerAPIServer(t, f)
+	st := s.readUpgradeStatus(t.Context())
+	if st.State != "failed" || st.Phase != "✗ The target chart does not declare webConsole.upgradeRunner" || st.Detail != "log tail" {
+		t.Fatalf("failed run: %+v; want the error line as phase and the terminated message as detail", st)
+	}
+
+	// Failed by activeDeadlineSeconds: no container message, the pod's reason.
+	f.mu.Lock()
+	f.logs = ""
+	f.podStatus = map[string]any{"phase": "Failed", "reason": "DeadlineExceeded", "message": "Pod was active on the node longer than the specified deadline"}
+	f.mu.Unlock()
+	if st := s.readUpgradeStatus(t.Context()); st.Detail != "DeadlineExceeded: Pod was active on the node longer than the specified deadline" {
+		t.Fatalf("deadline exceeded: detail %q", st.Detail)
+	}
+}
+
+func TestUpgradeStartConflictReportsTheRunningRun(t *testing.T) {
+	f := &runnerAPI{paTag: "0.8.0", postConflict: true}
+	s := newRunnerAPIServer(t, f)
+	rec := serve(s.routes(), startUpgradeRequest(`{"target":"0.12.0"}`))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("create lost the race: status %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	if st := decode[upgradeStatusResponse](t, rec); st.State != "running" || st.Target != "0.12.0" {
+		t.Fatalf("create lost the race: %+v, want the other start's running run", st)
+	}
+}
+
+func TestUpgradeStartRejectsInvalidTargets(t *testing.T) {
+	f := &runnerAPI{paTag: "0.8.0"}
+	s := newRunnerAPIServer(t, f)
+	h := s.routes()
+	for _, target := range []string{"../main", "0.12.0;id", "0.12.0-rc1", "main", "0.12"} {
+		rec := serve(h, startUpgradeRequest(fmt.Sprintf(`{"target":%q}`, target)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_target") {
+			t.Errorf("target %q: status %d body %s; want 400 invalid_target", target, rec.Code, rec.Body.String())
+		}
+	}
+	if posts, _ := f.counts(); posts != 0 {
+		t.Fatalf("invalid targets launched %d runner pods", posts)
+	}
+}
+
+func TestInstallVersionFollowsThePlatformAgentTag(t *testing.T) {
+	f := &runnerAPI{paTag: "0.12.0"}
+	s := newRunnerAPIServer(t, f)
+	s.cfg.ReleaseCheck = false
+
+	if tag, chart := s.liveInstallVersion(t.Context()); tag != "0.12.0" || chart != "0.12.0" {
+		t.Fatalf("liveInstallVersion = %q, %q; want the PlatformAgent's 0.12.0 over cfg's 0.8.0", tag, chart)
+	}
+	if rel := s.currentRelease(t.Context()); rel.Running != "0.12.0" {
+		t.Fatalf("currentRelease running %q, want 0.12.0 from the PlatformAgent", rel.Running)
+	}
+	env := s.readEnvironment(t.Context())
+	if env.Versions.ImageTag != "0.12.0" || env.Versions.ChartVersion != "0.12.0" || env.Versions.AppVersion != "v0.12.0" {
+		t.Fatalf("readEnvironment versions %+v, want 0.12.0 from the PlatformAgent", env.Versions)
+	}
+}
+
+func TestNoteUpgradedVersionDropsOnlyCachesReadBeforeTheFinish(t *testing.T) {
+	_, s := setupServer(t)
+	s.cfg.ImageTag, s.cfg.ChartVersion, s.cfg.AppVersion = "0.8.0", "0.8.0", "v0.8.0"
+	finished := time.Date(2026, 10, 18, 1, 0, 0, 0, time.UTC)
+
+	s.releaseInfo.value, s.releaseInfo.readAt = &releaseResponse{Running: "0.8.0"}, finished.Add(-time.Minute)
+	s.environment.value, s.environment.readAt = &environmentResponse{}, finished.Add(-time.Minute)
+	s.noteUpgradedVersion(finished.Format(time.RFC3339))
+	if s.releaseInfo.value != nil || s.environment.value != nil {
+		t.Fatalf("caches read before the runner finished were kept")
+	}
+
+	s.releaseInfo.value, s.releaseInfo.readAt = &releaseResponse{Running: "0.12.0"}, finished.Add(time.Minute)
+	s.environment.value, s.environment.readAt = &environmentResponse{}, finished.Add(time.Minute)
+	s.noteUpgradedVersion(finished.Format(time.RFC3339))
+	if s.releaseInfo.value == nil || s.environment.value == nil {
+		t.Fatalf("caches read after the runner finished were dropped; every status poll would re-read GitHub")
+	}
+	if s.cfg.ImageTag != "0.8.0" || s.cfg.ChartVersion != "0.8.0" || s.cfg.AppVersion != "v0.8.0" {
+		t.Fatalf("noteUpgradedVersion rewrote cfg: %q %q %q", s.cfg.ImageTag, s.cfg.ChartVersion, s.cfg.AppVersion)
+	}
+}
+
+// A status poll that sees a succeeded runner and an environment read run on
+// separate goroutines; under -race this fails if either writes what the
+// other reads without a lock.
+func TestSucceededStatusPollAndEnvironmentReadDoNotRace(t *testing.T) {
+	f := &runnerAPI{
+		paTag:   "0.12.0",
+		podMeta: map[string]any{"name": upgradeRunnerPodName, "annotations": map[string]string{"kubeagents.x-k8s.io/target-version": "0.12.0"}},
+		podStatus: map[string]any{
+			"phase": "Succeeded",
+			"containerStatuses": []map[string]any{{
+				"name":  "upgrader",
+				"state": map[string]any{"terminated": map[string]any{"exitCode": 0, "finishedAt": "2026-10-18T01:00:00Z"}},
+			}},
+		},
+	}
+	s := newRunnerAPIServer(t, f)
+	s.cfg.ReleaseCheck = false
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); _ = s.readUpgradeStatus(t.Context()) }()
+		go func() { defer wg.Done(); _ = s.readEnvironment(t.Context()); _ = s.currentRelease(t.Context()) }()
+	}
+	wg.Wait()
 }

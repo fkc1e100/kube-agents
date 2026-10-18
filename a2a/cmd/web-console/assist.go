@@ -48,6 +48,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -76,6 +77,11 @@ Reply with one JSON object and nothing else: {"title": string, "body": string, "
 	releaseTimeout     = 6 * time.Second
 	releaseWalkTimeout = 25 * time.Second
 	releaseCacheTTL    = time.Hour
+	// releaseFailureCacheTTL is how long an answer whose GitHub read failed
+	// (an anonymous rate limit, an egress blip, the walk's own deadline) is
+	// served before GitHub is asked again: long enough that every page load
+	// does not repeat a refused call, short enough not to pin the failure.
+	releaseFailureCacheTTL = time.Minute
 	// releaseListLimit is how many published releases a build from source
 	// is placed against, newest first; each costs one compare call per hour.
 	releaseListLimit = 10
@@ -88,6 +94,15 @@ Reply with one JSON object and nothing else: {"title": string, "body": string, "
 	gitHubAPIBase     = "https://api.github.com"
 	gitHubAccept      = "application/vnd.github+json"
 	gitHubUserAgent   = "kube-agents-web-console"
+	// The compare statuses GitHub reports for base...head.
+	gitHubCompareIdentical = "identical"
+	gitHubCompareAhead     = "ahead"
+	gitHubCompareBehind    = "behind"
+	gitHubCompareDiverged  = "diverged"
+
+	// errCodeDraftTooLong is the error code for a draft over assistMaxChars
+	// or over the request body limit.
+	errCodeDraftTooLong = "draft_too_long"
 )
 
 var (
@@ -121,6 +136,12 @@ func (s *server) handleAssist(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req assistRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// A body past the reader's limit is a draft too long, not bad JSON.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, errCodeDraftTooLong, fmt.Sprintf("The draft is over %d characters.", assistMaxChars))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_json", "Request body is not valid JSON.")
 		return
 	}
@@ -129,8 +150,9 @@ func (s *server) handleAssist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "empty_draft", "There is nothing to edit yet.")
 		return
 	}
-	if len(req.Title)+len(req.Body) > assistMaxChars {
-		writeError(w, http.StatusRequestEntityTooLarge, "draft_too_long", fmt.Sprintf("The draft is over %d characters.", assistMaxChars))
+	// The limit is in characters, as the message says, not UTF-8 bytes.
+	if utf8.RuneCountInString(req.Title)+utf8.RuneCountInString(req.Body) > assistMaxChars {
+		writeError(w, http.StatusRequestEntityTooLarge, errCodeDraftTooLong, fmt.Sprintf("The draft is over %d characters.", assistMaxChars))
 		return
 	}
 	switch req.Scope {
@@ -195,8 +217,10 @@ func (s *server) assist(ctx context.Context, req assistRequest) (assistResponse,
 	return out, nil
 }
 
-// errAssistRejected is a 4xx from the gateway on the first attempt, which
-// may be the model refusing response_format rather than the prompt.
+// errAssistRejected is a 400 from the gateway on the first attempt, which
+// may be the model refusing response_format rather than the prompt. Other
+// 4xx answers (an unknown model, an auth refusal, a rate limit) say nothing
+// about response_format and are not retried.
 var errAssistRejected = errors.New("the inference gateway rejected the request")
 
 type assistCompletionReply struct {
@@ -237,7 +261,7 @@ func (s *server) assistCompletion(ctx context.Context, model, user string, jsonM
 	defer drainAndClose(resp)
 	if resp.StatusCode != http.StatusOK {
 		detail := fmt.Errorf("inference gateway answered HTTP %d: %s", resp.StatusCode, upstreamErrorDetail(resp))
-		if jsonMode && resp.StatusCode >= http.StatusBadRequest && resp.StatusCode < http.StatusInternalServerError {
+		if jsonMode && resp.StatusCode == http.StatusBadRequest {
 			return completion, fmt.Errorf("%w: %v", errAssistRejected, detail)
 		}
 		return completion, detail
@@ -300,6 +324,30 @@ type releaseCache struct {
 	mu      sync.Mutex
 	value   *releaseResponse
 	readAt  time.Time
+	// imageTag and chartVersion are the live install version the cached
+	// answer was classified from. A request that reads a different live
+	// version (a PlatformAgent tag edited in place, an Argo sync) misses.
+	imageTag     string
+	chartVersion string
+	// failed marks an answer whose GitHub read failed; it is served for
+	// releaseFailureCacheTTL instead of releaseCacheTTL.
+	failed bool
+}
+
+// fresh returns the cached answer when it was classified from this live
+// version and is inside its TTL. The caller holds c.mu.
+func (c *releaseCache) fresh(imageTag, chartVersion string) (releaseResponse, bool) {
+	if c.value == nil || c.imageTag != imageTag || c.chartVersion != chartVersion {
+		return releaseResponse{}, false
+	}
+	ttl := releaseCacheTTL
+	if c.failed {
+		ttl = releaseFailureCacheTTL
+	}
+	if time.Since(c.readAt) >= ttl {
+		return releaseResponse{}, false
+	}
+	return *c.value, true
 }
 
 // gitHubRelease is the part of a GitHub release the check reads.
@@ -352,10 +400,15 @@ func runningVersion(imageTag, chartVersion string) (running, kind, chart string)
 	return "unknown", "unknown", chart
 }
 
+// currentRelease reads the live install version on every call and serves
+// the cached answer only when it was classified from that version, so a
+// tag changed outside the console shows on the next request. A failed
+// GitHub read is kept for releaseFailureCacheTTL, and one the caller
+// abandoned (a closed tab, an expired request) is not kept at all.
 func (s *server) currentRelease(ctx context.Context) releaseResponse {
+	imageTag, chartVersion := s.liveInstallVersion(ctx)
 	s.releaseInfo.mu.Lock()
-	if s.releaseInfo.value != nil && time.Since(s.releaseInfo.readAt) < releaseCacheTTL {
-		v := *s.releaseInfo.value
+	if v, ok := s.releaseInfo.fresh(imageTag, chartVersion); ok {
 		s.releaseInfo.mu.Unlock()
 		return v
 	}
@@ -363,22 +416,35 @@ func (s *server) currentRelease(ctx context.Context) releaseResponse {
 	s.releaseInfo.refresh.Lock()
 	defer s.releaseInfo.refresh.Unlock()
 	s.releaseInfo.mu.Lock()
-	if s.releaseInfo.value != nil && time.Since(s.releaseInfo.readAt) < releaseCacheTTL {
-		v := *s.releaseInfo.value
+	if v, ok := s.releaseInfo.fresh(imageTag, chartVersion); ok {
 		s.releaseInfo.mu.Unlock()
 		return v
 	}
 	s.releaseInfo.mu.Unlock()
-	v := s.readRelease(ctx)
+	v, err := s.classifyRelease(ctx, imageTag, chartVersion)
+	if err != nil && ctx.Err() != nil {
+		return v
+	}
 	s.releaseInfo.mu.Lock()
 	s.releaseInfo.value = &v
 	s.releaseInfo.readAt = time.Now()
+	s.releaseInfo.imageTag, s.releaseInfo.chartVersion = imageTag, chartVersion
+	s.releaseInfo.failed = err != nil
 	s.releaseInfo.mu.Unlock()
 	return v
 }
 
+// readRelease reads the live install version and classifies it, uncached.
 func (s *server) readRelease(ctx context.Context) releaseResponse {
 	imageTag, chartVersion := s.liveInstallVersion(ctx)
+	v, _ := s.classifyRelease(ctx, imageTag, chartVersion)
+	return v
+}
+
+// classifyRelease classifies the given live install version against
+// GitHub's release list. The error is non-nil when a GitHub read failed, in
+// which case the answer still carries the running version and the reason.
+func (s *server) classifyRelease(ctx context.Context, imageTag, chartVersion string) (releaseResponse, error) {
 	running, kind, chart := runningVersion(imageTag, chartVersion)
 	out := releaseResponse{Running: running, RunningKind: kind, ChartVersion: chart, Status: "unknown", RunningDisplay: running}
 	if kind == "commit" {
@@ -403,14 +469,14 @@ func (s *server) readRelease(ctx context.Context) releaseResponse {
 		if out.IsPatched {
 			out.Detail += fmt.Sprintf(" %d PR patch%s applied directly.", len(prs), plural(len(prs)))
 		}
-		return out
+		return out, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, releaseWalkTimeout)
 	defer cancel()
 	var releases []gitHubRelease
 	if err := s.github(ctx, fmt.Sprintf("/repos/%s/releases?per_page=%d", s.cfg.ReleaseRepo, releaseListLimit), &releases); err != nil {
 		out.Detail = "Could not read the releases from GitHub: " + err.Error()
-		return out
+		return out, err
 	}
 	published := releases[:0:0]
 	for _, r := range releases {
@@ -420,7 +486,7 @@ func (s *server) readRelease(ctx context.Context) releaseResponse {
 	}
 	if len(published) == 0 {
 		out.Detail = "GitHub lists no published release for " + s.cfg.ReleaseRepo + "."
-		return out
+		return out, nil
 	}
 	// GitHub lists releases newest-created first, which is not the highest
 	// version once a patch to an older line is published.
@@ -455,30 +521,36 @@ func (s *server) readRelease(ctx context.Context) releaseResponse {
 			}
 		}
 	case "commit":
-		s.resolveSourceBuild(ctx, &out, published, strings.TrimSpace(s.cfg.ImageTag))
+		// Place the tag this answer was classified from, not the startup
+		// environment's, which differs once the PlatformAgent tag moves.
+		return out, s.resolveSourceBuild(ctx, &out, published, strings.TrimSpace(imageTag))
 	default:
 		out.Detail = fmt.Sprintf("The image tag is neither a release tag nor a commit; latest release is %s.", out.Latest)
 	}
-	return out
+	return out, nil
 }
 
 // resolveSourceBuild names a build from source by the newest release it
 // contains, walking the published releases newest first and asking GitHub
 // how the build stands against each tag. A build contains a release when
-// it lacks at most the release's own stamp commit (releaseStampSlack). A
-// build that contains the latest release is ahead of it; one that contains
+// it lacks at most the release's own stamp commit (releaseStampSlack),
+// whether GitHub reports it diverged from the tag or, for the commit the
+// release was cut from, behind it. A build that contains the latest
+// release is ahead of it; one that contains
 // an older release runs that release and is behind the latest; one that
-// contains none is older than every release listed.
-func (s *server) resolveSourceBuild(ctx context.Context, out *releaseResponse, published []gitHubRelease, sha string) {
+// contains none is older than every release listed. The error is a failed
+// compare call.
+func (s *server) resolveSourceBuild(ctx context.Context, out *releaseResponse, published []gitHubRelease, sha string) error {
 	for _, rel := range published {
 		var cmp gitHubCompare
 		path := "/repos/" + s.cfg.ReleaseRepo + "/compare/" + url.PathEscape(rel.TagName) + "..." + url.PathEscape(sha)
 		if err := s.github(ctx, path, &cmp); err != nil {
 			out.Detail = fmt.Sprintf("A build from source; latest release is %s. Could not place the build against release %s: %s", out.Latest, strings.TrimPrefix(rel.TagName, "v"), err.Error())
-			return
+			return err
 		}
 		version := strings.TrimPrefix(rel.TagName, "v")
-		contains := cmp.Status == "identical" || cmp.Status == "ahead" || (cmp.Status == "diverged" && cmp.BehindBy <= releaseStampSlack)
+		lacksOnlyStamp := (cmp.Status == gitHubCompareDiverged || cmp.Status == gitHubCompareBehind) && cmp.BehindBy <= releaseStampSlack
+		contains := cmp.Status == gitHubCompareIdentical || cmp.Status == gitHubCompareAhead || lacksOnlyStamp
 		if !contains {
 			// The build is older than this release; try the next older one.
 			continue
@@ -497,11 +569,12 @@ func (s *server) resolveSourceBuild(ctx context.Context, out *releaseResponse, p
 		default:
 			out.Status, out.Detail = "behind", fmt.Sprintf("A build from source made after release %s (%d commits later); release %s is available.", version, cmp.AheadBy, out.Latest)
 		}
-		return
+		return nil
 	}
 	oldest := strings.TrimPrefix(published[len(published)-1].TagName, "v")
 	out.Running = "older than " + oldest
 	out.Status, out.Detail = "behind", fmt.Sprintf("A build from source older than every release checked (back to %s); release %s is available.", oldest, out.Latest)
+	return nil
 }
 
 func (s *server) github(ctx context.Context, path string, out any) error {

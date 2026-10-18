@@ -176,6 +176,14 @@ spec:
             - name: RELEASE_REPO
               value: {{ $releaseCheck.repo | default "gke-labs/kube-agents" | quote }}
             {{- $upgradeRunner := .Values.webConsole.upgradeRunner | default dict }}
+            {{- /*
+            The runner's RBAC and service account render only inside the
+            environment block below, so the console offers the runner only
+            when both toggles are on; otherwise POST /api/upgrade refuses
+            with a message naming them instead of an API-server 403.
+            */}}
+            - name: UPGRADE_RUNNER_ENABLED
+              value: {{ (and .Values.webConsole.environment.enabled ($upgradeRunner.enabled | default false)) | ternary "true" "false" | quote }}
             - name: AUTO_UPGRADE
               value: {{ ($upgradeRunner.autoUpgrade | default false) | ternary "true" "false" | quote }}
             {{- with $upgradeRunner.autoUpgradeWindow }}

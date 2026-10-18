@@ -533,7 +533,14 @@ selects the LiteLLM pods so the console can read each replica's token and spend
 counters. `webConsole.agentIdentity.gcpServiceAccount` and `.roles` record the
 agent's Google Cloud identity for the console's About panel; the Terraform
 composition fills them from the IAM module, and the console never reads IAM
-itself. The
+itself. With `webConsole.environment.enabled` (the default) the chart also
+renders the console's ServiceAccount, a ClusterRole that lists nodes,
+namespaces, pods and workloads, and a namespaced Role. With
+`webConsole.upgradeRunner.enabled` (also the default) that Role adds `create`
+on pods, and the chart renders `ServiceAccount/kube-agents-upgrader` bound to
+`cluster-admin`, which the console's in-cluster upgrade pod runs as; anyone who
+can port-forward to the console can start that pod. `values.yaml` describes
+each toggle. The
 [Web console page](https://gke-labs.github.io/kube-agents/deploy/web-console/)
 is canonical for what it does and how it is reached.
 

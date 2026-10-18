@@ -46,7 +46,7 @@ limitations under the License.
 // reply has been returned. The page polls GET /api/sessions/{id}/messages for
 // those, through a route limited to this console's own session IDs.
 //
-// Two read-only routes sit beside the chat. GET /api/insights (insights.go)
+// Three read routes sit beside the chat. GET /api/insights (insights.go)
 // returns the model, LiteLLM's token and spend counters, the agent's identity
 // as recorded at install, and the cluster. GET /api/sessions/{id}/transcript
 // (activity.go) returns the text of an event triage, scheduled check or
@@ -57,6 +57,15 @@ limitations under the License.
 // POST /api/chat/stream (stream.go) runs the same turn as POST /api/chat and
 // relays one status line per agent step as server-sent events, then the
 // reply. The page falls back to /api/chat when the route is missing.
+//
+// The console is not read-only. GET /api/environment (environment.go) and
+// GET /api/release (assist.go) read the cluster and the published releases;
+// POST /api/assist sends a feedback draft to the inference gateway; and
+// POST /api/upgrade (upgrade.go) creates a runner pod under the upgrader
+// ServiceAccount, which the chart binds to cluster-admin unless
+// webConsole.upgradeRunner.enabled is false. /api/repositories, /api/patches
+// and /api/models each have a POST form as well. Every POST route takes the
+// loopback Host check and the console request header.
 package main
 
 import (
@@ -200,6 +209,15 @@ var (
 	loopbackHosts = map[string]bool{"localhost": true, "127.0.0.1": true, "::1": true}
 
 	errSessionNotFound = errors.New("hermes session not found")
+
+	// browseSchemes are the repository URL schemes a browser opens as they
+	// are; any other scheme (ssh, git) is a clone remote to reduce.
+	browseSchemes = map[string]bool{"http": true, "https": true}
+	// scpRemotePattern is git's scp-like remote, [user@]host:path.
+	scpRemotePattern = regexp.MustCompile(`^(?:[^@/:]+@)?([^@/:]+):(.+)$`)
+	// portPathPattern is the "3000/owner/repo" tail of a schemeless
+	// host:port/path, which scpRemotePattern would otherwise take for scp.
+	portPathPattern = regexp.MustCompile(`^[0-9]+/`)
 )
 
 // config is what the console reads from its environment at startup.
@@ -345,14 +363,28 @@ func parseRepositories(raw string) []repositoryInfo {
 	return out
 }
 
-// repositoryURL is the browse URL for a repository the chart declared by
-// owner/name, or the value itself when it is already a URL.
+// repositoryURL is the browse URL for a repository the chart declared, in
+// each spelling values.yaml admits: an http(s) URL is returned as it is; an
+// ssh:// or git:// remote, an scp remote (git@host:owner/repo) and a
+// schemeless host/owner/repo are reduced to host and path and browsed over
+// https; owner/name goes on the declared host or the provider's default.
 func repositoryURL(r repositoryInfo) string {
 	repo := strings.TrimSuffix(r.Repository, ".git")
-	if strings.Contains(repo, "://") {
-		return repo
-	}
 	host := r.Host
+	if scheme, _, isURL := strings.Cut(repo, "://"); isURL {
+		if browseSchemes[strings.ToLower(scheme)] {
+			return repo
+		}
+		u, err := url.Parse(repo)
+		if err != nil || u.Hostname() == "" {
+			return ""
+		}
+		host, repo = u.Hostname(), u.Path
+	} else if m := scpRemotePattern.FindStringSubmatch(repo); m != nil && !portPathPattern.MatchString(m[2]) {
+		host, repo = m[1], m[2]
+	} else if first, rest, ok := strings.Cut(repo, "/"); ok && strings.Contains(first, ".") && strings.Contains(rest, "/") && (host == "" || first == host) {
+		host, repo = first, rest
+	}
 	scheme := "https"
 	if host == "" {
 		switch r.Provider {

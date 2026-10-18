@@ -19,6 +19,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -495,5 +496,42 @@ func TestParseRepositories(t *testing.T) {
 	}
 	if n := len(parseRepositories("not json")); n != 0 {
 		t.Errorf("malformed env yielded %d repositories, want 0", n)
+	}
+}
+
+// Every skill directory in the tree is in knownPlatformSkills, so a skill
+// named in prose or a tool argument gets a badge.
+func TestKnownPlatformSkillsCoverTheSkillsTree(t *testing.T) {
+	dirs, err := filepath.Glob(filepath.Join("..", "..", "..", "agents", "*", "skills", "*", "SKILL.md"))
+	if err != nil || len(dirs) == 0 {
+		t.Skipf("no skills tree beside the package (err=%v)", err)
+	}
+	known := map[string]bool{}
+	for _, sk := range knownPlatformSkills {
+		known[sk] = true
+	}
+	for _, d := range dirs {
+		if name := filepath.Base(filepath.Dir(d)); !known[name] {
+			t.Errorf("skill %s (%s) is missing from knownPlatformSkills", name, d)
+		}
+	}
+}
+
+// A skill name inside a longer skill name is not a mention of it.
+func TestSkillMatchingUsesWholeNames(t *testing.T) {
+	if got := findKnownSkillsInText("Ran gce-compute-fleet-audit and wrote fleet-audit-reports."); strings.Join(got, ",") != "fleet-audit-reports,gce-compute-fleet-audit" && strings.Join(got, ",") != "gce-compute-fleet-audit,fleet-audit-reports" {
+		t.Errorf("findKnownSkillsInText = %v, want gce-compute-fleet-audit and fleet-audit-reports only", got)
+	}
+	if got := findKnownSkillsInText("Use fleet-audit, then gke-workload-identity."); strings.Join(got, ",") != "gke-workload-identity,fleet-audit" && strings.Join(got, ",") != "fleet-audit,gke-workload-identity" {
+		t.Errorf("findKnownSkillsInText = %v, want fleet-audit and gke-workload-identity", got)
+	}
+	if got := detectSkillFromToolCall("terminal", `{"command":"run gce-compute-fleet-audit"}`); got != "gce-compute-fleet-audit" {
+		t.Errorf("detectSkillFromToolCall = %q, want gce-compute-fleet-audit", got)
+	}
+	if got := detectSkillFromToolCall("terminal", `{"command":"open fleet-audit-reports"}`); got != "fleet-audit-reports" {
+		t.Errorf("detectSkillFromToolCall = %q, want fleet-audit-reports", got)
+	}
+	if got := extractTextSkills(kindScheduled, "cron-platform-gce-compute-fleet-audit-20261009", "", nil); strings.Join(got, ",") != "gce-compute-fleet-audit" {
+		t.Errorf("scheduled slug skills = %v, want only gce-compute-fleet-audit", got)
 	}
 }

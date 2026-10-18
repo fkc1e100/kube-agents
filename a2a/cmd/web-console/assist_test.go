@@ -17,11 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -386,5 +389,171 @@ func TestReleaseLatestIsTheHighestVersionNotTheFirstListed(t *testing.T) {
 	got := releaseFor(t, releaseServer(t, gh, "0.9.0", "0.9.0"))
 	if got.Latest != "0.9.1" || got.Status != "behind" {
 		t.Errorf("latest = %q status = %q, want 0.9.1 behind", got.Latest, got.Status)
+	}
+}
+
+// A body past the request reader's limit is a draft too long (413), not
+// malformed JSON (400).
+func TestAssistReportsAnOverLimitBodyAsTooLong(t *testing.T) {
+	gw, _ := fakeGateway(t, http.StatusOK, `{}`)
+	_, s := setupServer(t)
+	s.cfg.LiteLLMURL = gw.URL
+	body, _ := json.Marshal(map[string]string{"title": "t", "body": strings.Repeat("a", maxRequestBodyBytes)})
+	rec := serve(s.routes(), assistReq(string(body)))
+	if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), errCodeDraftTooLong) {
+		t.Fatalf("want 413 %s, got %d %s", errCodeDraftTooLong, rec.Code, rec.Body.String())
+	}
+}
+
+// The draft limit counts characters: a non-ASCII draft under the limit in
+// characters but over it in UTF-8 bytes is edited, not refused.
+func TestAssistCountsCharactersNotBytes(t *testing.T) {
+	gw, _ := fakeGateway(t, http.StatusOK, `{"title":"t","body":"b","notes":[]}`)
+	_, s := setupServer(t)
+	s.cfg.LiteLLMURL = gw.URL
+	draft := strings.Repeat("界", assistMaxChars/2)
+	if len(draft) <= assistMaxChars {
+		t.Fatalf("fixture is not over the limit in bytes: %d", len(draft))
+	}
+	body, _ := json.Marshal(map[string]string{"title": "t", "body": draft})
+	if rec := serve(s.routes(), assistReq(string(body))); rec.Code != http.StatusOK {
+		t.Fatalf("want 200 for %d characters, got %d %s", assistMaxChars/2, rec.Code, rec.Body.String())
+	}
+}
+
+// Only a 400 can be a refusal of response_format; any other 4xx (an
+// unknown model, an auth refusal, a rate limit) is not sent a second time.
+func TestAssistDoesNotRetryANon400Rejection(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusNotFound, http.StatusTooManyRequests} {
+		var calls int32
+		gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			atomic.AddInt32(&calls, 1)
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":{"message":"refused"}}`))
+		}))
+		_, s := setupServer(t)
+		s.cfg.LiteLLMURL = gw.URL
+		rec := serve(s.routes(), assistReq(`{"title":"x","body":"y"}`))
+		gw.Close()
+		if rec.Code != http.StatusBadGateway || atomic.LoadInt32(&calls) != 1 {
+			t.Errorf("HTTP %d: want one gateway call and 502, got %d calls and %d", status, calls, rec.Code)
+		}
+	}
+}
+
+// GitHub answers compare/<tag>...<sha> for the commit a release was cut
+// from (the stamp commit's parent) as behind by one, ahead by none.
+func TestReleaseNamesTheCommitAReleaseWasCutFrom(t *testing.T) {
+	gh, _ := fakeGitHub(t, []string{"0.9.0", "0.8.0"}, map[string]map[string]any{
+		"0.9.0": {"status": "behind", "ahead_by": 0, "behind_by": 1},
+		"0.8.0": {"status": "diverged", "ahead_by": 40, "behind_by": 1},
+	})
+	out := releaseFor(t, releaseServer(t, gh, sourceSHA, chartPlaceholderVersion))
+	if out.Running != "0.9.0" || out.Status != "latest" || !strings.Contains(out.Detail, "the commit release 0.9.0 was cut from") {
+		t.Fatalf("want 0.9.0 latest, got %+v", out)
+	}
+}
+
+// A failed GitHub read is served for releaseFailureCacheTTL, not the hour a
+// good answer is, and a read the caller abandoned is not kept at all.
+func TestReleaseDoesNotPinAFailedRead(t *testing.T) {
+	var fail atomic.Bool
+	fail.Store(true)
+	good, _ := fakeGitHub(t, []string{"0.9.0"}, nil)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		good.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(gh.Close)
+	s := releaseServer(t, gh, "0.9.0", "0.9.0")
+	if out := releaseFor(t, s); out.Status != "unknown" || !strings.Contains(out.Detail, "HTTP 403") {
+		t.Fatalf("first read: %+v", out)
+	}
+	fail.Store(false)
+	if out := releaseFor(t, s); out.Status != "unknown" {
+		t.Fatalf("a failure inside releaseFailureCacheTTL should still be served: %+v", out)
+	}
+	s.releaseInfo.mu.Lock()
+	s.releaseInfo.readAt = s.releaseInfo.readAt.Add(-releaseFailureCacheTTL)
+	s.releaseInfo.mu.Unlock()
+	if out := releaseFor(t, s); out.Status != "latest" {
+		t.Fatalf("a failure older than releaseFailureCacheTTL was still served: %+v", out)
+	}
+	// A good answer the same age is still inside the hour.
+	s.releaseInfo.mu.Lock()
+	s.releaseInfo.readAt = s.releaseInfo.readAt.Add(-releaseFailureCacheTTL)
+	s.releaseInfo.mu.Unlock()
+	fail.Store(true)
+	if out := releaseFor(t, s); out.Status != "latest" {
+		t.Fatalf("a good answer was dropped before releaseCacheTTL: %+v", out)
+	}
+
+	abandoned := releaseServer(t, gh, "0.9.0", "0.9.0")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	abandoned.currentRelease(ctx)
+	if abandoned.releaseInfo.value != nil {
+		t.Fatalf("a read under a cancelled request was cached: %+v", *abandoned.releaseInfo.value)
+	}
+}
+
+// fakePlatformAgentAPI answers the PlatformAgent read with the tag a test
+// chooses and 404s everything else.
+func fakePlatformAgentAPI(t *testing.T, tag *atomic.Value) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != fmt.Sprintf(platformAgentsAPIPath, "kubeagents-system", "platform-agent") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", contentTypeJSON)
+		fmt.Fprintf(w, `{"spec":{"deployment":{"tag":%q}}}`, tag.Load().(string))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// /api/release classifies the live PlatformAgent tag, places a source build
+// by that tag (not KUBE_AGENTS_IMAGE_TAG), and a tag that moves outside the
+// console shows on the next request rather than after the hour.
+func TestReleaseFollowsTheLivePlatformAgentTag(t *testing.T) {
+	var heads []string
+	var mu sync.Mutex
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases"):
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"tag_name": "0.9.0"}, {"tag_name": "0.8.0"}})
+		case strings.Contains(r.URL.Path, "/compare/"):
+			mu.Lock()
+			heads = append(heads, r.URL.Path[strings.LastIndex(r.URL.Path, "...")+len("..."):])
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ahead", "ahead_by": 3})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(gh.Close)
+	var tag atomic.Value
+	tag.Store("0.9.0")
+	api := fakePlatformAgentAPI(t, &tag)
+	s := releaseServer(t, gh, "0.8.0", "0.8.0")
+	s.cfg.PodNamespace, s.cfg.PlatformAgentName = "kubeagents-system", "platform-agent"
+	s.kube = &kubeClient{base: api.URL, client: api.Client()}
+
+	if out := releaseFor(t, s); out.Running != "0.9.0" || out.Status != "latest" {
+		t.Fatalf("want the PlatformAgent's 0.9.0 over cfg's 0.8.0, got %+v", out)
+	}
+	tag.Store(sourceSHA)
+	out := releaseFor(t, s)
+	if out.RunningKind != "source" || out.Running != "0.9.0" || out.Status != "ahead" {
+		t.Fatalf("a tag edited in place was not picked up on the next request: %+v", out)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(heads) == 0 || heads[0] != sourceSHA {
+		t.Fatalf("compare placed %v, want the live tag %s", heads, sourceSHA)
 	}
 }

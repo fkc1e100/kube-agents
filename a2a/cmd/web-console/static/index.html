@@ -225,7 +225,9 @@
     .topbar {
       background: var(--bg-surface);
       border-bottom: 1px solid var(--border-color);
-      height: 52px;
+      /* Grows past 52px when the actions wrap onto a second row at
+         narrow widths, rather than clipping the last buttons. */
+      min-height: 52px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -234,7 +236,7 @@
       flex-shrink: 0;
     }
 
-    .view-head { min-width: 0; }
+    .view-head { min-width: 140px; }
     .view-title {
       font-size: 16px;
       font-weight: 700;
@@ -253,8 +255,12 @@
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
-      flex-shrink: 0;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 6px 10px;
+      padding: 6px 0;
+      min-width: 0;
+      flex-shrink: 1;
     }
 
     .badge {
@@ -2239,6 +2245,7 @@
         markKnown: !!t.markKnown,
         updated: typeof t.updated === "number" ? t.updated : nowSeconds(),
         unread: !!t.unread,
+        unreadFrom: typeof t.unreadFrom === "number" ? t.unreadFrom : 0,
         started: !!t.started
       };
     }
@@ -2273,15 +2280,38 @@
 
     // Another tab saved the list. Take it, keeping the higher mark of any
     // thread both tabs hold, so a tab never re-shows what it already showed.
+    // A thread both hold keeps its object here: a running turn holds that
+    // object and writes its mark and unread flag to it after the reply.
+    // A thread with a turn running here is kept even if the other tab
+    // dropped it; if the thread on screen was dropped, the pane moves to
+    // the new active thread rather than leaving the old transcript up.
     function mergeStoredThreads(raw) {
       const stored = parseThreads(raw);
-      stored.forEach(t => {
+      const wasOnScreen = view === "thread" ? activeId : "";
+      const merged = stored.map(t => {
         const mine = findThread(t.id);
-        if (mine && mine.mark > t.mark) { t.mark = mine.mark; t.markKnown = true; }
-        if (mine && onScreen(t.id)) t.unread = false;
+        if (!mine) return t;
+        if (t.mark > mine.mark) { mine.mark = t.mark; mine.markKnown = true; }
+        if (t.title) mine.title = t.title;
+        if (t.updated > mine.updated) mine.updated = t.updated;
+        if (t.started) mine.started = true;
+        mine.unread = onScreen(mine.id) ? false : t.unread;
+        if (mine.unread && !mine.unreadFrom) mine.unreadFrom = t.unreadFrom;
+        return mine;
       });
-      threads = stored;
-      if (activeId && !findThread(activeId) && !inflight[activeId]) activeId = threads[0] ? threads[0].id : "";
+      threads.forEach(mine => {
+        if (inflight[mine.id] && !merged.includes(mine)) merged.unshift(mine);
+      });
+      threads = merged;
+      if (activeId && !findThread(activeId)) {
+        activeId = threads[0] ? threads[0].id : "";
+        if (wasOnScreen) {
+          threadsChanged();
+          if (activeId) selectThread(activeId);
+          else selectChannel("alerts");
+          return;
+        }
+      }
       threadsChanged();
     }
 
@@ -2290,10 +2320,10 @@
     }
 
     // Drops the least recently used threads past MAX_THREADS, never one
-    // with a turn running or the one on screen.
+    // with a turn running, the one on screen, or a pinned one.
     function capThreads() {
       while (threads.length > MAX_THREADS) {
-        const idle = threads.filter(t => !inflight[t.id] && t.id !== activeId);
+        const idle = threads.filter(t => !inflight[t.id] && t.id !== activeId && !pinnedIds.has(t.id));
         if (idle.length === 0) break;
         const oldest = idle.reduce((a, b) => (a.updated <= b.updated ? a : b));
         threads = threads.filter(t => t !== oldest);
@@ -2343,6 +2373,9 @@
         appendMessage(author, text, tag, msg && msg.timestamp, msg && msg.card, meta, msg);
         refreshSkillsBars();
       } else {
+        // Remember where unread starts: the caller moves the mark past
+        // this message right after, so selectThread cannot use t.mark.
+        if (!t.unread && t.markKnown) t.unreadFrom = t.mark;
         t.unread = true;
         saveThreads();
       }
@@ -2461,7 +2494,10 @@
     // Puts a thread on screen from its transcript: clears its dot, renders
     // its messages, and moves its mark to the newest message so the poll
     // does not repeat any of them.
-    function activateThread(t, transcript) {
+    // prevMark is the mark the thread had when it first went unread
+    // (t.unreadFrom); the first message past it gets a "New messages"
+    // divider.
+    function activateThread(t, transcript, prevMark) {
       activeId = t.id;
       view = "thread";
       t.unread = false;
@@ -2472,7 +2508,12 @@
         if (first) t.title = threadTitle(first.content);
       }
       messages.forEach(m => { m._sid = t.id; noteMessageActivity(t.id, m); });
+      let sepShown = false;
       messages.forEach(m => {
+        if (!sepShown && prevMark > 0 && typeof m.id === "number" && m.id > prevMark) {
+          $("chat-stream").appendChild(unreadSepRow());
+          sepShown = true;
+        }
         const role = m.author || (m.role === "user" ? "user" : "agent");
         appendMessage(role, m.content, "", m.timestamp, m.card, null, m);
       });
@@ -2523,7 +2564,7 @@
           state: step.state || "running",
           skill: step.skill || ""
         });
-        if (step.skill) { noteSkills(id, [step.skill]); refreshSkillsBars(); }
+        if (step.skill) { noteSkills(id, [step.skill], `step:${turn.startedAt}:${step.id}`); refreshSkillsBars(); }
       }
       turn.lastEventAt = nowSeconds();
       statusChanged(id);
@@ -2708,7 +2749,12 @@
       html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
       html = html.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
       html = html.replace(/(^|\s)(@[a-zA-Z0-9_.-]+)/g, '$1<span class="mention-pill">$2</span>');
-      html = html.replace(/(^|\s)\$([a-z0-9][a-z0-9_-]{2,63})/g, (m0, pre, name) => `${pre}<button type="button" class="skill-pill cat-${escapeHtml(skillInfo(name).cat)}" data-skill="${escapeHtml(name)}">&#9889; ${escapeHtml(name)}</button>`);
+      // A $name becomes a skill pill only when it names a catalog skill or
+      // one the agent reported in this tab, so "$120/month" or a shell
+      // variable like "$pod_name" stays text.
+      html = html.replace(/(^|\s)\$([a-z][a-z0-9_-]{2,63})/g, (m0, pre, name) => (SKILL_BY_NAME[name] || skillUsage.has(name))
+        ? `${pre}<button type="button" class="skill-pill cat-${escapeHtml(skillInfo(name).cat)}" data-skill="${escapeHtml(name)}">&#9889; ${escapeHtml(name)}</button>`
+        : m0);
       return html.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join("");
     }
 
@@ -2716,17 +2762,27 @@
     let artifactSeq = 0;
     const artifactStore = {};
 
+    // Re-rendering the same message reuses its entry instead of adding one.
+    const artifactIdByKey = new Map();
+
     function registerArtifact(title, rawText, isCode, lang) {
+      const key = JSON.stringify([title, rawText, !!isCode, lang || ""]);
+      const known = artifactIdByKey.get(key);
+      if (known && artifactStore[known]) return known;
       const id = `art_${++artifactSeq}`;
       artifactStore[id] = { id, title, rawText, isCode: !!isCode, lang: lang || "" };
+      artifactIdByKey.set(key, id);
       return id;
     }
 
     // Splits on ``` fences first, so code keeps its blank lines and is never
     // run through the inline rules; the info string after the opening fence
-    // (```yaml) is used as the code block header label.
-    function renderMarkdown(text) {
+    // (```yaml) is used as the code block header label. opts.live renders a
+    // reply still streaming: its partial code blocks are not registered as
+    // artifacts, so the final row registers each block once.
+    function renderMarkdown(text, opts) {
       if (!text) return "";
+      const live = !!(opts && opts.live);
       const parts = text.split(/```/);
       let html = "";
       parts.forEach((part, i) => {
@@ -2734,14 +2790,15 @@
           const firstNl = part.indexOf("\n");
           const lang = firstNl >= 0 ? part.slice(0, firstNl).trim() : "";
           const body = (firstNl >= 0 ? part.slice(firstNl + 1) : part).replace(/\n$/, "");
-          const artId = registerArtifact(lang ? `Code snippet (${lang})` : "Code snippet", body, true, lang);
+          const artId = live ? "" : registerArtifact(lang ? `Code snippet (${lang})` : "Code snippet", body, true, lang);
+          const actions = live ? "" : `
+                <button type="button" class="btn-code-act" data-copy-art="${artId}">Copy</button>
+                <button type="button" class="btn-code-act" data-open-art="${artId}" title="Expand in modal">&#10530; Expand</button>
+              `;
           html += `<div class="code-wrap">
             <div class="code-bar">
               <span>${escapeHtml(lang || "code")}</span>
-              <div class="code-bar-actions">
-                <button type="button" class="btn-code-act" data-copy-art="${artId}">Copy</button>
-                <button type="button" class="btn-code-act" data-open-art="${artId}" title="Expand in modal">&#10530; Expand</button>
-              </div>
+              <div class="code-bar-actions">${actions}</div>
             </div>
             <pre><code>${escapeHtml(body)}</code></pre>
           </div>`;
@@ -2882,16 +2939,26 @@
 
     function appendTo(container, role, text, tag, at, card, meta, msg) {
       if (card) recordSpecialistFromCard(card);
-      if (container === $("chat-stream") && typeof at === "number" && at > 0) {
-        const dl = dayLabel(at);
+      const centre = container === $("chat-stream");
+      // Rows a turn adds locally (the typed message, the working row, the
+      // reply) carry no timestamp; they are labelled as now, so a day
+      // divider never lands between two messages of the same hour. A server
+      // message without a timestamp is old, not now, and gets no label.
+      const local = !(msg && typeof msg.id === "number");
+      const stamp = typeof at === "number" && at > 0 ? at : (local ? nowSeconds() : 0);
+      if (centre && tag !== "loading" && stamp) {
+        const dl = dayLabel(stamp);
         if (dl && dl !== centreLastDay) {
           container.appendChild(daySepRow(dl));
           centreLastDay = dl;
         }
       }
+      // The centre transcript follows new rows only when the reader is at
+      // the bottom (NEAR_BOTTOM_PX) or the row is their own message.
+      const follow = !centre || role === "user" || nearBottom(container);
       const row = messageRow(role, text, tag, at, card, meta, msg);
       container.appendChild(row);
-      container.scrollTop = container.scrollHeight;
+      if (follow) container.scrollTop = container.scrollHeight;
       return row;
     }
 
@@ -2968,7 +3035,7 @@
         if (delta !== p.lastDelta) {
           p.lastDelta = delta;
           p.streamEl.hidden = !delta;
-          p.streamEl.innerHTML = renderMarkdown(delta);
+          p.streamEl.innerHTML = renderMarkdown(delta, { live: true });
         }
       });
     }
@@ -3048,10 +3115,16 @@
       return el;
     }
 
+    // A specialist's count is its distinct cards (by task id), so redrawing
+    // a card row does not count it again.
     function recordSpecialistFromCard(card) {
       if (!card || !card.assignee) return;
-      const prev = seenSpecialists.get(card.assignee) || { count: 0, lastTask: "", lastStatus: "" };
-      prev.count++;
+      const prev = seenSpecialists.get(card.assignee) || { count: 0, lastTask: "", lastStatus: "", tasks: new Set() };
+      const taskKey = card.task_id || "";
+      if (!prev.tasks.has(taskKey)) {
+        prev.tasks.add(taskKey);
+        prev.count = prev.tasks.size;
+      }
       if (card.task_id) prev.lastTask = card.task_id;
       if (card.status) prev.lastStatus = card.status;
       seenSpecialists.set(card.assignee, prev);
@@ -3273,7 +3346,7 @@
           delete channelErrors[name];
           const visible = view === name && !document.hidden;
           const { fresh, unreadIds } = updateChannel(name, result.posts, visible, pane.mode === "post" ? pane.id : "");
-          result.posts.forEach(p => { if (p.summary && p.summary.skills) noteSkills(p.id, p.summary.skills); });
+          result.posts.forEach(p => { if (p.summary && p.summary.skills) noteSkills(p.id, p.summary.skills, "summary"); });
           if (view === name) unreadIds.forEach(id => feedNew.add(id));
           if (name === "alerts") {
             notifyNewAlerts(fresh);
@@ -3538,48 +3611,35 @@
         },
         {
           handle: clusterHandle,
+          untracked: true,
           name: `Cluster Agent (${c})`,
           role: "In-cluster Kubernetes & workload diagnostics specialist",
           defaultAgent: false,
           busy: false,
-          statusText: `Active · Connected to ${c}`,
+          // The console does not track cluster-agent registration; the
+          // card names the install cluster and claims no live state.
+          statusText: `Install cluster ${c} · presence not tracked by the console`,
           prompt: `${clusterHandle} Inspect failing pods and recent warning events on ${c}`
         },
         {
           handle: "@event-watcher",
+          untracked: true,
           name: "Kubernetes Event Watcher",
           role: `Streams Warning events into # alerts (${channelPosts.alerts.length} triaged)`,
           defaultAgent: false,
           busy: false,
-          statusText: `Watching cluster events · ${channelPosts.alerts.length} posts in # alerts`,
+          statusText: `${channelPosts.alerts.length} posts in # alerts`,
           prompt: "@event-watcher Summarise the most recent Kubernetes warning events"
         },
         {
           handle: "@scheduler",
+          untracked: true,
           name: "Cron & Policy Scheduler",
           role: `Runs scheduled fleet & policy checks (${channelPosts.scheduled.length} runs)`,
           defaultAgent: false,
           busy: false,
-          statusText: `Active · ${channelPosts.scheduled.length} posts in # scheduled`,
+          statusText: `${channelPosts.scheduled.length} posts in # scheduled`,
           prompt: "@scheduler Summarise the latest scheduled check results"
-        },
-        {
-          handle: "@secops",
-          name: "Security & RBAC Specialist",
-          role: "Audits pod security, service accounts, and IAM least privilege",
-          defaultAgent: false,
-          busy: false,
-          statusText: "Ready · On-demand specialist profile",
-          prompt: "@secops Review cluster security posture, RBAC, and workload isolation"
-        },
-        {
-          handle: "@gitops",
-          name: "GitOps & Drift Specialist",
-          role: "Checks live Kubernetes state against Git manifests & PRs",
-          defaultAgent: false,
-          busy: false,
-          statusText: "Ready · On-demand specialist profile",
-          prompt: "@gitops Check GitOps configuration drift against live workloads"
         }
       ];
       seenSpecialists.forEach((info, name) => {
@@ -3607,9 +3667,9 @@
         <div class="roster-card">
           <div class="roster-card-head">
             <span class="roster-handle">${escapeHtml(a.handle)}</span>
-            <span class="badge ${a.busy ? "badge-amber" : "badge-green"}" style="font-size:10.5px;padding:2px 8px;">
+            ${a.untracked ? "" : `<span class="badge ${a.busy ? "badge-amber" : "badge-green"}" style="font-size:10.5px;padding:2px 8px;">
               <span class="badge-dot"></span>${a.busy ? "Working" : "Ready"}
-            </span>
+            </span>`}
           </div>
           <div class="roster-role">${escapeHtml(a.role)}</div>
           <div class="roster-status">${escapeHtml(a.statusText)}</div>
@@ -3659,7 +3719,10 @@
       if (!t) return;
       const token = ++switchToken;
       const wasUnread = t.unread;
-      const prevMark = t.markKnown ? t.mark : 0;
+      // The mark already sits past the unread messages (showUpdates moves
+      // it as it delivers), so the divider goes after where unread began.
+      const prevMark = t.unreadFrom || 0;
+      t.unreadFrom = 0;
       activeId = id;
       view = "thread";
       sessionStorage.setItem(ACTIVE_KEY, id);
@@ -3813,6 +3876,7 @@
           appendMessage("agent", outcome.error, "error");
         } else {
           (notices[t.id] = notices[t.id] || []).push(outcome.error);
+          if (!t.unread && t.markKnown) t.unreadFrom = t.mark;
           t.unread = true;
           saveThreads();
         }
@@ -3963,9 +4027,10 @@
 
     const SKILL_CATALOG = [
       { name: "gke-workload-troubleshooting", cat: "troubleshoot", desc: "Systematic pod and controller triage: CrashLoopBackOff, ImagePullBackOff, OOMKilled, probe and config failures." },
-      { name: "gke-stall-detection", cat: "troubleshoot", desc: "Finds controllers that stopped making progress without erroring (Available=False, stuck rollouts)." },
+      { name: "gke-stall-detection", cat: "troubleshoot", agent: "cluster", desc: "Finds controllers that stopped making progress without erroring (Available=False, stuck rollouts)." },
       { name: "gke-reliability", cat: "troubleshoot", desc: "Probes, PDBs, replica spread and other reliability checks for production workloads." },
       { name: "gke-observability", cat: "troubleshoot", desc: "Logs, metrics and traces through Cloud Logging and Monitoring; what to query for a symptom." },
+      { name: "gke-alert-configuration", cat: "troubleshoot", desc: "Alerting policies in Terraform with PromQL: SLO burn-rate, latency, error-rate and saturation alerts." },
       { name: "kube-agents-observability", cat: "troubleshoot", desc: "Health of the kube-agents install itself: gateway, Session KV, LiteLLM, event watcher." },
       { name: "gke-basics", cat: "troubleshoot", desc: "Baseline GKE concepts and kubectl recipes the other skills build on." },
       { name: "fleet-audit", cat: "fleet", desc: "Runs a named audit across every registered cluster and writes a scored report." },
@@ -3992,6 +4057,7 @@
       { name: "gke-service-networking", cat: "scaling", desc: "Service mesh, multi-cluster Services and internal load balancing." },
       { name: "gke-platform-security", cat: "security", desc: "Cluster hardening: private clusters, Workload Identity, Binary Authorization, audit logs." },
       { name: "gke-workload-security", cat: "security", desc: "Pod security standards, RBAC least privilege, admission policy." },
+      { name: "gke-workload-identity", cat: "security", desc: "Diagnoses Workload Identity Federation failures: 403 on getAccessToken, missing default credentials, KSA-to-IAM bindings." },
       { name: "gke-multitenancy", cat: "security", desc: "Namespace isolation, quotas and network policy for shared clusters." },
       { name: "gke-backup-dr", cat: "security", desc: "Backup for GKE plans, restores and disaster-recovery drills." },
       { name: "gke-inference", cat: "ai", desc: "Serving LLMs on GKE: GPU/TPU node pools, inference gateways, autoscaling on queue depth." },
@@ -4011,7 +4077,12 @@
     ];
 
     const SKILL_BY_NAME = Object.fromEntries(SKILL_CATALOG.map(s => [s.name, s]));
-    const SKILLS_DOC_BASE = "https://github.com/gke-labs/kube-agents/tree/main/agents/platform/skills/";
+    const SKILLS_DOC_BASE = "https://github.com/gke-labs/kube-agents/tree/main/";
+    // A catalog entry with agent: "cluster" lives under the Cluster Agent's
+    // skills; every other entry under the Platform Agent's.
+    function skillDir(info) {
+      return info && info.agent === "cluster" ? "agents/cluster/skills/" : "agents/platform/skills/";
+    }
     const FEEDBACK_REPO = "gke-labs/kube-agents";
     // Placeholder address for private feedback until a real alias exists.
     const FEEDBACK_EMAIL = "kube-agents-feedback@google.com";
@@ -4034,12 +4105,21 @@
       return SKILL_BY_NAME[name] || { name, cat: "lifecycle", desc: "Skill reported by the agent; not in the console's catalog." };
     }
 
-    function noteSkills(sessionId, names) {
+    // Each (session, source, skill) is counted once, so polls and redraws
+    // that re-note a message or post already seen leave the counts alone.
+    const countedSkillKeys = new Set();
+
+    // source names where the skills came from (a message id, a step id, a
+    // post summary); a call without one counts once per session.
+    function noteSkills(sessionId, names, source) {
       if (!Array.isArray(names) || names.length === 0) return;
       const set = sessionSkills[sessionId] || (sessionSkills[sessionId] = new Set());
       names.forEach(n => {
         if (!n) return;
         set.add(n);
+        const key = JSON.stringify([sessionId, source === undefined ? "" : String(source), n]);
+        if (countedSkillKeys.has(key)) return;
+        countedSkillKeys.add(key);
         const u = skillUsage.get(n) || { count: 0, lastSeen: 0, sessions: new Set() };
         u.count++;
         u.lastSeen = nowSeconds();
@@ -4113,13 +4193,28 @@
       });
     }
 
+    // A kanban wake head's status is free text after the task id:
+    // "completed", "gave up (retries exhausted)", "blocked; needs
+    // attention", "crashed (worker exited); dispatcher will retry". It is
+    // classified on its leading words; crashed and timed-out cards stay
+    // running because the dispatcher retries them.
+    const CARD_DONE_STATUS = /^(completed|done|failed|cancelled|canceled|gave[ _]up)\b/;
+    const CARD_BLOCKED_STATUS = /^blocked\b/;
+
+    function cardOutcomeState(status) {
+      const st = (status || "").trim().toLowerCase();
+      if (CARD_DONE_STATUS.test(st)) return "done";
+      if (CARD_BLOCKED_STATUS.test(st)) return "blocked";
+      return "running";
+    }
+
     function noteCardOutcome(sessionId, card) {
       if (!card || !card.task_id) return;
       const bucket = bgWork[sessionId] || (bgWork[sessionId] = {});
       const prev = bucket[card.task_id] || { taskId: card.task_id, title: card.title || "", assignee: "", since: nowSeconds() };
       const st = (card.status || "").toLowerCase();
       prev.title = prev.title || card.title || "";
-      prev.state = (st === "completed" || st === "done" || st === "failed" || st === "cancelled") ? "done" : (st === "blocked" ? "blocked" : "running");
+      prev.state = cardOutcomeState(st);
       prev.lastStatus = st;
       bucket[card.task_id] = prev;
     }
@@ -4127,7 +4222,7 @@
     // A message's skills and delegation steps, as the server sent them.
     function noteMessageActivity(sessionId, m) {
       if (!m) return;
-      noteSkills(sessionId, m.skills || (m.card && m.card.skills) || []);
+      noteSkills(sessionId, m.skills || (m.card && m.card.skills) || [], typeof m.id === "number" ? `m${m.id}` : undefined);
       noteDelegations(sessionId, m.steps);
       if (m.author === "kanban" && m.card) noteCardOutcome(sessionId, m.card);
     }
@@ -4192,7 +4287,7 @@
         <div class="skill-card-actions">
           <button type="button" class="btn-msg-act" data-skill="${escapeHtml(info.name)}">Inspect</button>
           <button type="button" class="btn-msg-act" data-use-skill="${escapeHtml(info.name)}">Use in chat</button>
-          <a class="btn-msg-act" href="${escapeHtml(SKILLS_DOC_BASE + info.name)}" target="_blank" rel="noopener">SKILL.md &nearr;</a>
+          <a class="btn-msg-act" href="${escapeHtml(SKILLS_DOC_BASE + skillDir(info) + info.name)}" target="_blank" rel="noopener">SKILL.md &nearr;</a>
         </div>
       </div>`;
     }
@@ -4241,7 +4336,7 @@
         <dl class="skill-modal-grid">
           <dt>Category</dt><dd>${escapeHtml(SKILL_CATEGORIES[info.cat] || info.cat)}</dd>
           <dt>Used in this tab</dt><dd>${u ? `${u.count}&times;, last ${escapeHtml(relativeTime(u.lastSeen))}` : "not yet"}</dd>
-          <dt>Lives at</dt><dd><code>agents/platform/skills/${escapeHtml(name)}/SKILL.md</code> &middot; <a href="${escapeHtml(SKILLS_DOC_BASE + name)}" target="_blank" rel="noopener">open on GitHub &nearr;</a></dd>
+          <dt>Lives at</dt><dd><code>${escapeHtml(skillDir(info))}${escapeHtml(name)}/SKILL.md</code> &middot; <a href="${escapeHtml(SKILLS_DOC_BASE + skillDir(info) + name)}" target="_blank" rel="noopener">open on GitHub &nearr;</a></dd>
           <dt>How the agent loads it</dt><dd>The planner or a card worker calls <code>skill_view</code> with this name; scripts under the skill run inside the sandbox through <code>terminal</code>. Tool arguments and outputs stay in the agent; the console sees only names and short previews.</dd>
         </dl>
         ${sessions.length ? `<p style="margin-bottom:4px;"><b>Seen in</b></p><ul style="margin:0 0 8px 18px;padding:0;font-size:12.5px;">${where}</ul>` : ""}
@@ -5288,13 +5383,17 @@
 
     // ---- Upgrade: the paths an install can take to the latest release ----
     //
-    // The console never upgrades anything itself: its service account reads,
-    // and a page reachable over port-forward must not hold cluster-write
-    // rights. It offers the three documented paths, pre-filled, and picks the
+    // The page offers the three documented paths, pre-filled, and picks the
     // first by how the install is owned (PlatformAgent labels): an Argo CD
     // Application or a registered GitOps repository means a pull request the
     // agent opens; a Helm release means the release-pinned upgrade.sh or a
-    // helm upgrade from the release's chart.
+    // helm upgrade from the release's chart. When the chart sets
+    // webConsole.upgradeRunner.enabled, a fourth path exists: POST
+    // /api/upgrade (loopback Host plus the console header) makes the console
+    // create a runner pod under ServiceAccount/kube-agents-upgrader, which
+    // the chart binds to cluster-admin. That pod runs upgrade.sh in operator
+    // and harness modes only; Terraform-owned resources still need the full
+    // run from a workstation.
     const UPGRADE_SCRIPT_URL = "https://raw.githubusercontent.com/gke-labs/kube-agents/{version}/upgrade.sh";
     const UPGRADE_CHART_URL = "https://github.com/gke-labs/kube-agents/releases/download/{version}/kube-agents-{version}.tgz";
 
@@ -5308,7 +5407,7 @@
         (c.location ? ` --gcp-region="${c.location}"` : "");
       const rel = inst.helm_release || "kube-agents";
       const ns = inst.release_namespace || "kubeagents-system";
-      const helm = `helm upgrade ${rel} ${UPGRADE_CHART_URL.replaceAll("{version}", v)} \\\n  --namespace ${ns} --reuse-values`;
+      const helm = `helm upgrade ${rel} ${UPGRADE_CHART_URL.replaceAll("{version}", v)} \\\n  --namespace ${ns} --reset-then-reuse-values`;
       return { script, helm };
     }
 
@@ -5320,6 +5419,22 @@
     // Set once this tab has seen a run in progress. A succeeded runner pod
     // left from an earlier run is reported as history, not as this run's end.
     let upgradeSeenRunning = false;
+    const UPGRADE_POLL_MS = 2000;
+    // After this many failed status reads in a row during a run, the panel
+    // says the console itself is likely restarting: the upgrade rolls the
+    // console Deployment, which ends the port-forward this page came through.
+    const UPGRADE_POLL_MAX_FAILURES = 5;
+    let upgradePollFailures = 0;
+
+    function upgradePollLost() {
+      upgradePollFailures++;
+      if (!upgradeSeenRunning || upgradePollFailures < UPGRADE_POLL_MAX_FAILURES) return;
+      const badge = $("upgrade-live-state");
+      const phaseEl = $("upgrade-live-phase");
+      if (badge) { badge.innerText = "Lost contact with the console"; badge.style.color = "#e37400"; }
+      if (phaseEl) phaseEl.innerText = "The upgrade restarts the console pod, which ends a kubectl port-forward. Re-run the port-forward and reload this page to see the result.";
+      if (upgradePollTimer) { clearInterval(upgradePollTimer); upgradePollTimer = null; }
+    }
 
     async function pollUpgradeStatus() {
       const panel = $("upgrade-live-panel");
@@ -5327,7 +5442,22 @@
       try {
         const resp = await fetch("/api/upgrade/status");
         const data = await readBody(resp);
-        if (!resp.ok || !data || data.state === "idle") return;
+        if (!resp.ok) { upgradePollLost(); return; }
+        upgradePollFailures = 0;
+        if (data && data.runner_enabled === false) {
+          // The chart turned the runner off; POST /api/upgrade and turning
+          // automatic updates on would refuse, so hide the button, its
+          // caption and the automatic-updates card.
+          const offBtn = $("upgrade-run-btn");
+          if (offBtn) {
+            offBtn.hidden = true; offBtn.disabled = true;
+            if (offBtn.parentElement) offBtn.parentElement.hidden = true;
+          }
+          const offAuto = $("upgrade-auto-toggle");
+          const autoCardEl = offAuto && typeof offAuto.closest === "function" ? offAuto.closest(".skill-card") : null;
+          if (autoCardEl) autoCardEl.hidden = true;
+        }
+        if (!data || data.state === "idle") return;
         panel.hidden = false;
         const badge = $("upgrade-live-state");
         const phaseEl = $("upgrade-live-phase");
@@ -5340,6 +5470,9 @@
         }
         if (data.state === "running") {
           upgradeSeenRunning = true;
+          // Reopening the dialog (or reloading) mid-run polls once from
+          // renderUpgradeModal; keep polling until a terminal state.
+          if (!upgradePollTimer) upgradePollTimer = setInterval(pollUpgradeStatus, UPGRADE_POLL_MS);
           if (badge) { badge.innerText = "Running in cluster…"; badge.style.color = "#1a73e8"; }
           if (btn) { btn.disabled = true; btn.innerText = "Upgrading in cluster…"; }
         } else if (data.state === "succeeded" && !upgradeSeenRunning) {
@@ -5355,7 +5488,9 @@
           if (btn) { btn.disabled = false; btn.innerText = "Retry upgrade in cluster →"; }
           if (upgradePollTimer) { clearInterval(upgradePollTimer); upgradePollTimer = null; }
         }
-      } catch (e) {}
+      } catch (e) {
+        upgradePollLost();
+      }
     }
 
     async function triggerInClusterUpgrade(targetVersion) {
@@ -5378,8 +5513,9 @@
           return;
         }
         upgradeSeenRunning = true;
+        upgradePollFailures = 0;
         await pollUpgradeStatus();
-        if (!upgradePollTimer) upgradePollTimer = setInterval(pollUpgradeStatus, 2000);
+        if (!upgradePollTimer) upgradePollTimer = setInterval(pollUpgradeStatus, UPGRADE_POLL_MS);
       } catch (e) {
         if (phaseEl) phaseEl.innerText = `Network error: ${e.message}`;
         if (btn) { btn.disabled = false; btn.innerText = "Run upgrade in cluster →"; }
@@ -5404,7 +5540,7 @@
           renderEnvironment();
           renderUpgradeModal();
           if (data.state === "running") {
-            if (!upgradePollTimer) upgradePollTimer = setInterval(pollUpgradeStatus, 2000);
+            if (!upgradePollTimer) upgradePollTimer = setInterval(pollUpgradeStatus, UPGRADE_POLL_MS);
           }
           return;
         }
@@ -5584,7 +5720,7 @@
           <div class="code-wrap" style="margin-top:6px;"><div class="code-bar"><span>bash</span><div class="code-bar-actions"><button type="button" class="btn-code-act" data-copy-text="script">Copy</button></div></div><pre style="white-space:pre-wrap;word-break:break-all;"><code>${escapeHtml(cmds.script)}</code></pre></div>
           <div class="skill-row" style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             <button type="button" class="btn-send" id="upgrade-run-btn">&#9654; ${r.status === "latest" ? `Re-run upgrade in cluster (${escapeHtml(r.latest)})` : `Run upgrade in cluster (${escapeHtml(r.latest)})`} &rarr;</button>
-            <span class="step-detail">Starts an ephemeral container in <code>kubeagents-system</code> to execute the upgrade script, monitors progress, and refreshes the browser on completion.</span>
+            <span class="step-detail">Starts an ephemeral container in <code>kubeagents-system</code> that runs the upgrade script in operator and harness modes (CRDs and chart), monitors progress, and refreshes the browser on completion. It does not apply the Terraform part of a full upgrade; run the command above from a workstation for that.</span>
           </div>
           <div id="upgrade-live-panel" hidden style="margin-top:10px;border:1px solid #dadce0;border-radius:6px;background:#f8f9fa;padding:8px 10px;">
             <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-bottom:6px;">
@@ -5615,7 +5751,9 @@
       const ask = $("upgrade-ask-btn");
       if (ask) ask.addEventListener("click", () => {
         closeUpgrade();
-        if (view !== "thread") newChat();
+        // A thread with a turn running would drop the request at
+        // submitMessage's inflight guard, so it gets a fresh chat instead.
+        if (view !== "thread" || inflight[activeId]) newChat();
         submitMessage(upgradePrompt(r));
       });
       const runBtn = $("upgrade-run-btn");
@@ -5681,7 +5819,10 @@
 
     function browserFamily() {
       const ua = navigator.userAgent;
-      const m = ua.match(/(Edg|Chrome|Firefox|Safari)\/(\d+)/);
+      // Edge's user agent also carries Chrome/ and Safari/ before Edg/, so
+      // Edg/ is looked for on its own first.
+      const edge = ua.match(/Edg\/(\d+)/);
+      const m = edge ? ["", "Edg", edge[1]] : ua.match(/(Chrome|Firefox|Safari)\/(\d+)/);
       const os = /CrOS/.test(ua) ? "ChromeOS" : /Macintosh/.test(ua) ? "macOS" : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "other";
       return m ? `${m[1] === "Edg" ? "Edge" : m[1]} ${m[2]} on ${os}` : os;
     }
@@ -5787,22 +5928,22 @@
         lines.push("");
         lines.push(`## Latest usage report (usage-report job, ${lastUsageReport.date})`);
         lines.push("");
-        lines.push(`_Counts below were computed by the job from Hermes, kanban and the forge; topics are model-classified. Full report: \`${USAGE_REPORT_PATH_HINT}\` in the GitOps repository._`);
+        lines.push("_The text below is that job's last reply in # scheduled, attached as posted._");
         lines.push("");
         lines.push(lastUsageReport.text.trim());
-      } else {
+      } else if (usageReportLookup.state === "error") {
         lines.push("");
-        lines.push(`- Usage report job: ${usageReportLookup.state === "none" ? "no run found yet in # scheduled (ask the agent: run the usage-report cron job now)" : usageReportLookup.state === "error" ? `could not read the last run (${usageReportLookup.detail})` : "not read yet"}`);
+        lines.push(`- Usage report job: could not read the last run (${usageReportLookup.detail})`);
       }
       return lines.join("\n");
     }
 
-    // The usage-report governance job posts its headline to # scheduled as
-    // a cron session; the full Markdown goes to the GitOps repository under
-    // reports/. The usage email attaches that headline, so the numbers in
-    // it were counted by the job, not by this page.
+    // This release ships no usage-report job. An install that adds a cron
+    // job whose session id matches USAGE_REPORT_SESSION_PATTERN gets its
+    // latest headline attached to the usage email, so those numbers were
+    // counted by that job, not by this page. With no such session the email
+    // says nothing about it.
     const USAGE_REPORT_SESSION_PATTERN = /^cron-(?:platform[-_])?usage-report-\d{8}$/;
-    const USAGE_REPORT_PATH_HINT = "reports/kube-agents-usage-YYYY-MM.md";
     const USAGE_REPORT_MAX_CHARS = 6000;
     let lastUsageReport = null;
     let usageReportLookup = { state: "unread", detail: "" };
@@ -5821,7 +5962,7 @@
         id: post.id,
         lastActive: post.last_active,
         date: when && !isNaN(when) ? when.toISOString().slice(0, 10) : "date unknown",
-        text: report.content.length > USAGE_REPORT_MAX_CHARS ? report.content.slice(0, USAGE_REPORT_MAX_CHARS) + "\n\n_(trimmed; the full report is in the GitOps repository)_" : report.content
+        text: report.content.length > USAGE_REPORT_MAX_CHARS ? report.content.slice(0, USAGE_REPORT_MAX_CHARS) + "\n\n_(trimmed)_" : report.content
       };
       usageReportLookup = { state: "ok", detail: "" };
       return lastUsageReport;
@@ -5944,8 +6085,20 @@
       mailBtn.style.opacity = href ? "1" : "0.55";
     }
 
+    function isFeedbackKind(kind) {
+      return typeof kind === "string" && Object.prototype.hasOwnProperty.call(FEEDBACK_KINDS, kind);
+    }
+
+    // "/feedback form [kind] [title]": the second word is the kind only when
+    // it is one of FEEDBACK_KINDS; otherwise it is the title's first word.
+    function feedbackFormArgs(words) {
+      const second = (words[1] || "").toLowerCase();
+      if (isFeedbackKind(second)) return [second, words.slice(2).join(" ")];
+      return ["bug", words.slice(1).join(" ")];
+    }
+
     function openFeedback(kind, title) {
-      if (kind && FEEDBACK_KINDS[kind]) feedbackKind = kind;
+      if (isFeedbackKind(kind)) feedbackKind = kind;
       $("feedback-body").dataset.template = "1";
       $("feedback-body").value = "";
       $("feedback-title").value = title || "";
@@ -6084,6 +6237,10 @@
 
     // ---- Scion Native Chat Interactive Features ----
 
+    // Local commands whose output is a row in #chat-stream (the /help card,
+    // the /feedback usage card), as opposed to ones that open a pane or modal.
+    const PALETTE_STREAM_COMMANDS = new Set(["help", "feedback"]);
+
     const SLASH_COMMANDS = [
       { token: "/status", desc: "Summarise cluster health and active incidents", prompt: "Audit cluster health and identify any failing pods or active warnings" },
       { token: "/warnings", desc: "Summarise recent Kubernetes Warning events", prompt: "Summarise the recent Kubernetes warning events on this cluster" },
@@ -6129,7 +6286,8 @@
         const kindKey = first.startsWith("feat") ? "feature" : first.startsWith("bug") ? "bug" : first.startsWith("q") ? "question"
           : (first.startsWith("use") || first.startsWith("usage") || first.startsWith("stat") || first.startsWith("gen")) ? "usage" : "";
         if (first === "form" || first === "github") {
-          openFeedback(words[1] && FEEDBACK_KINDS[words[1]] ? words[1] : "bug", words.slice(2).join(" "));
+          const [formKind, formTitle] = feedbackFormArgs(words);
+          openFeedback(formKind, formTitle);
           return true;
         }
         if (!kindKey) {
@@ -6160,7 +6318,7 @@
       }
       if (def.local === "help") {
         const helpMd = "**Native Chat Shortcuts & Commands**\n\n" +
-          "- `@platform`, `@cluster-...`, `@event-watcher`, `@scheduler`, `@secops`, `@gitops` — Mention an agent in any message.\n" +
+          "- `@platform`, `@cluster-...`, `@event-watcher`, `@scheduler` — Mention an agent in any message.\n" +
           "- `/status`, `/warnings`, `/drift`, `/rbac` — Run a structured operational prompt.\n" +
           "- `/agents` — Open the Agents & Presence drawer.\n" +
           "- `/skills` — Open the Skills pane (used here + catalog); `$skill-name` mentions a skill in a message.\n" +
@@ -6299,6 +6457,9 @@
           }
           if (e.key === "Escape") {
             e.preventDefault();
+            // The document-level Escape closes the side pane; dismissing
+            // the popup must not also take the pane (and the draft) away.
+            e.stopPropagation();
             closeAc();
             return;
           }
@@ -6532,7 +6693,15 @@
             label: `${c.token} — ${c.desc}`,
             sub: c.local ? "Action" : "Prompt",
             run: () => {
-              if (!c.local) selectThread(activeId || (threads[0] && threads[0].id));
+              // Prompts and the commands that write into #chat-stream need
+              // the thread view on screen first, or their output lands in a
+              // hidden pane. With no thread to show, start a chat.
+              if (!c.local) {
+                const target = findThread(activeId) ? activeId : (threads[0] && threads[0].id);
+                if (target) selectThread(target); else newChat();
+              } else if (PALETTE_STREAM_COMMANDS.has(c.local) && view !== "thread") {
+                newChat();
+              }
               handleSlashCommand(c.token, "centre");
             }
           });
@@ -6682,10 +6851,10 @@
     $("feedback-modal").addEventListener("click", e => { if (e.target === $("feedback-modal")) closeFeedback(); });
     $("feedback-kind-bar").addEventListener("click", e => {
       const b = e.target.closest("[data-feedback-kind]");
-      if (!b) return;
+      if (!b || !isFeedbackKind(b.dataset.feedbackKind)) return;
+      // renderFeedbackPreview swaps a still-template body for the new
+      // kind's template and leaves a body the operator typed alone.
       feedbackKind = b.dataset.feedbackKind;
-      $("feedback-body").dataset.template = "1";
-      $("feedback-body").value = "";
       renderFeedbackPreview();
     });
     $("feedback-title").addEventListener("input", renderFeedbackPreview);

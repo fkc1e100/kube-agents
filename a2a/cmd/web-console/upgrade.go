@@ -34,6 +34,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -59,11 +60,45 @@ const (
 	autoUpgradeCheckInterval        = 15 * time.Minute
 	maxUpgradeLogBytes              = 64 << 10
 
+	// triggeredByAuto is the triggered-by value of the automatic path.
+	triggeredByAuto = "auto"
+
 	// kanbanBoardPath is the Hermes kanban board read (columns of cards by
 	// status) the automatic upgrade checks for running cards before it
 	// restarts the gateway.
 	kanbanBoardPath = "/api/plugins/kanban/board"
+
+	// envUpgradeRunnerEnabled is set by the chart from
+	// webConsole.upgradeRunner.enabled (and false when
+	// webConsole.environment.enabled is false, since the runner needs the
+	// console's service account). Unset means enabled, for a binary run
+	// outside the chart.
+	envUpgradeRunnerEnabled = "UPGRADE_RUNNER_ENABLED"
+	upgradeRunnerOffMessage = "The in-cluster upgrade runner is turned off for this install (webConsole.upgradeRunner.enabled=false, or webConsole.environment.enabled=false). Run the upgrade command from a workstation instead."
+
+	// upgradeRunnerDeadline is the runner pod's activeDeadlineSeconds: the
+	// kubelet fails a pod still running after it (two upgrade.sh runs,
+	// each of which may wait up to 25 minutes on a rollout, plus tool
+	// installs). upgradeRunnerStaleGrace is how much longer the console
+	// waits before it treats a pod that never reached a node (and so has
+	// no kubelet to enforce the deadline) as failed and replaceable.
+	upgradeRunnerDeadline   = 90 * time.Minute
+	upgradeRunnerStaleGrace = 5 * time.Minute
+	upgradeRunnerStalePhase = "Upgrade container did not finish within %s; it can be replaced by starting the upgrade again."
+
+	// FallbackToLogsOnError makes the kubelet copy the log tail into the
+	// terminated state's message when the container exits non-zero, which
+	// is where the failed state's Detail comes from.
+	upgradeRunnerTerminationPolicy = "FallbackToLogsOnError"
+
+	// upgradeErrorPrefix is what upgrade.sh's print_error puts before an
+	// error line.
+	upgradeErrorPrefix = "✗"
 )
+
+// ansiEscapePattern matches the colour escapes upgrade.sh writes around
+// its error lines.
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 type upgradeStartRequest struct {
 	Target string `json:"target"`
@@ -85,6 +120,9 @@ type upgradeStatusResponse struct {
 	Detail      string `json:"detail,omitempty"`
 	AutoUpgrade bool   `json:"auto_upgrade"`
 	TriggeredBy string `json:"triggered_by,omitempty"`
+	// RunnerEnabled is false when the chart turned the runner off; the
+	// page can hide the run button on it.
+	RunnerEnabled bool `json:"runner_enabled"`
 }
 
 type kubePodResource struct {
@@ -96,6 +134,8 @@ type kubePodResource struct {
 	} `json:"metadata"`
 	Status struct {
 		Phase             string `json:"phase"`
+		Reason            string `json:"reason"`
+		Message           string `json:"message"`
 		StartTime         string `json:"startTime"`
 		ContainerStatuses []struct {
 			Name  string `json:"name"`
@@ -192,6 +232,10 @@ func (s *server) upgradeCommandString(target string) string {
 }
 
 func (s *server) handleUpgradeStart(w http.ResponseWriter, r *http.Request) {
+	if !upgradeRunnerEnabled() {
+		writeError(w, http.StatusNotImplemented, "upgrade_unavailable", upgradeRunnerOffMessage)
+		return
+	}
 	if s.kube == nil || s.cfg.PodNamespace == "" {
 		writeError(w, http.StatusNotImplemented, "upgrade_unavailable", "This console has no Kubernetes API credentials to launch an upgrade container.")
 		return
@@ -223,7 +267,16 @@ func (s *server) handleUpgradeStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, st)
 }
 
+// upgradeRunnerEnabled reports whether the chart left the runner on: its
+// RBAC and service account render only then.
+func upgradeRunnerEnabled() bool {
+	return envBool(envUpgradeRunnerEnabled, true)
+}
+
 func (s *server) startUpgradeRunner(ctx context.Context, target, triggeredBy string) (upgradeStatusResponse, int, error) {
+	if !upgradeRunnerEnabled() {
+		return upgradeStatusResponse{}, http.StatusNotImplemented, fmt.Errorf("%s", upgradeRunnerOffMessage)
+	}
 	if s.kube == nil || s.cfg.PodNamespace == "" {
 		return upgradeStatusResponse{}, http.StatusNotImplemented, fmt.Errorf("Kubernetes API client is not configured")
 	}
@@ -257,19 +310,30 @@ func (s *server) startUpgradeRunner(ctx context.Context, target, triggeredBy str
 		}
 	}
 	var created kubePodResource
-	if _, err := s.kube.doJSON(ctx, http.MethodPost, fmt.Sprintf("/api/v1/namespaces/%s/pods", ns), podSpec, &created); err != nil {
+	if code, err := s.kube.doJSON(ctx, http.MethodPost, fmt.Sprintf("/api/v1/namespaces/%s/pods", ns), podSpec, &created); err != nil {
+		// Another start (a second tab, or the automatic path) created the
+		// pod between the status read and this create: report that run.
+		// A conflict with a pod that is not running is the previous runner
+		// still being deleted.
+		if code == http.StatusConflict {
+			if st := s.readUpgradeStatus(ctx); st.State == "running" {
+				return st, http.StatusAccepted, nil
+			}
+			return upgradeStatusResponse{}, http.StatusConflict, err
+		}
 		return upgradeStatusResponse{}, http.StatusBadGateway, err
 	}
 
 	return upgradeStatusResponse{
-		State:       "running",
-		Target:      target,
-		Phase:       "Starting upgrade container in " + ns + "…",
-		Command:     cmdDisplay,
-		PodName:     upgradeRunnerPodName,
-		StartedAt:   created.Metadata.CreationTimestamp,
-		AutoUpgrade: s.isAutoUpgradeEnabled(ctx),
-		TriggeredBy: triggeredBy,
+		State:         "running",
+		Target:        target,
+		Phase:         "Starting upgrade container in " + ns + "…",
+		Command:       cmdDisplay,
+		PodName:       upgradeRunnerPodName,
+		StartedAt:     created.Metadata.CreationTimestamp,
+		AutoUpgrade:   s.isAutoUpgradeEnabled(ctx),
+		TriggeredBy:   triggeredBy,
+		RunnerEnabled: true,
 	}, http.StatusAccepted, nil
 }
 
@@ -279,6 +343,7 @@ echo "==========================================================================
 echo "🚀 Launching In-Cluster Upgrade Container for kube-agents ${TARGET_VERSION}"
 echo "==========================================================================="
 echo "Command: ${UPGRADE_DISPLAY_CMD}"
+echo "Run here as --upgrade-mode=operator, then --upgrade-mode=harness; the Terraform part of a full upgrade is not applied."
 echo ""
 
 if command -v apk >/dev/null 2>&1; then
@@ -409,15 +474,17 @@ echo ">>> 🎉 Upgrade to ${TARGET_VERSION} Complete! <<<"
 			"serviceAccountName":           saName,
 			"automountServiceAccountToken": true,
 			"restartPolicy":                "Never",
+			"activeDeadlineSeconds":        int64(upgradeRunnerDeadline / time.Second),
 			"securityContext": map[string]any{
 				"seccompProfile": map[string]string{"type": "RuntimeDefault"},
 			},
 			"containers": []map[string]any{
 				{
-					"name":            "upgrader",
-					"image":           image,
-					"imagePullPolicy": "Always",
-					"command":         []string{"/bin/bash", "-c", script},
+					"name":                     "upgrader",
+					"image":                    image,
+					"imagePullPolicy":          "Always",
+					"terminationMessagePolicy": upgradeRunnerTerminationPolicy,
+					"command":                  []string{"/bin/bash", "-c", script},
 					"env": []map[string]string{
 						{"name": "TARGET_VERSION", "value": target},
 						{"name": "RELEASE_REPO", "value": s.cfg.ReleaseRepo},
@@ -455,6 +522,7 @@ func (s *server) handleUpgradeStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) readUpgradeStatus(ctx context.Context) upgradeStatusResponse {
 	st := s.readRunnerStatus(ctx)
+	st.RunnerEnabled = upgradeRunnerEnabled()
 	if st.AutoUpgrade && st.State != "running" && st.Detail == "" {
 		s.mu.Lock()
 		st.Detail = s.autoUpgradeHold
@@ -466,6 +534,9 @@ func (s *server) readUpgradeStatus(ctx context.Context) upgradeStatusResponse {
 // readRunnerStatus reports the runner pod's state, phase, and log tail.
 func (s *server) readRunnerStatus(ctx context.Context) upgradeStatusResponse {
 	auto := s.isAutoUpgradeEnabled(ctx)
+	if !upgradeRunnerEnabled() {
+		return upgradeStatusResponse{State: "idle", Detail: upgradeRunnerOffMessage, AutoUpgrade: auto}
+	}
 	if s.kube == nil || s.cfg.PodNamespace == "" {
 		return upgradeStatusResponse{State: "idle", Detail: "Kubernetes API client is not configured.", AutoUpgrade: auto}
 	}
@@ -514,12 +585,17 @@ func (s *server) readRunnerStatus(ctx context.Context) upgradeStatusResponse {
 			}
 		}
 		if target != "" {
-			s.noteUpgradedVersion(target)
+			s.noteUpgradedVersion(out.FinishedAt)
 		}
 	case "Failed":
 		out.State = "failed"
 		if out.Phase == "" {
 			out.Phase = "Upgrade container exited with an error."
+		}
+		// The step banner names the step that was running; the error line
+		// upgrade.sh printed says why it stopped.
+		if line := latestUpgradeError(out.Logs); line != "" {
+			out.Phase = line
 		}
 		for _, cs := range pod.Status.ContainerStatuses {
 			if cs.State.Terminated != nil {
@@ -527,6 +603,14 @@ func (s *server) readRunnerStatus(ctx context.Context) upgradeStatusResponse {
 				if cs.State.Terminated.Message != "" {
 					out.Detail = cs.State.Terminated.Message
 				}
+			}
+		}
+		// A pod failed by its activeDeadlineSeconds has no terminated
+		// container message; the pod's own reason says what happened.
+		if out.Detail == "" && pod.Status.Message != "" {
+			out.Detail = pod.Status.Message
+			if pod.Status.Reason != "" {
+				out.Detail = pod.Status.Reason + ": " + pod.Status.Message
 			}
 		}
 	default:
@@ -539,8 +623,29 @@ func (s *server) readRunnerStatus(ctx context.Context) upgradeStatusResponse {
 				}
 			}
 		}
+		// A pod that never reached a node (no startTime) has no kubelet to
+		// enforce activeDeadlineSeconds. Past the deadline it counts as
+		// failed, so the next start replaces it instead of reporting it
+		// forever. A started pod is left to the kubelet's deadline.
+		if created, err := time.Parse(time.RFC3339, pod.Metadata.CreationTimestamp); err == nil && pod.Status.StartTime == "" && s.clock().Sub(created) > upgradeRunnerDeadline+upgradeRunnerStaleGrace {
+			out.State = "failed"
+			out.Detail = fmt.Sprintf(upgradeRunnerStalePhase, upgradeRunnerDeadline)
+		}
 	}
 	return out
+}
+
+// latestUpgradeError returns the last error line upgrade.sh printed, with
+// its colour escapes removed, or "".
+func latestUpgradeError(logs string) string {
+	lines := strings.Split(logs, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(ansiEscapePattern.ReplaceAllString(lines[i], ""))
+		if strings.HasPrefix(line, upgradeErrorPrefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 func latestUpgradeBanner(logs string) string {
@@ -561,9 +666,9 @@ func latestUpgradeBanner(logs string) string {
 }
 
 func (s *server) liveInstallVersion(ctx context.Context) (string, string) {
-	s.mu.Lock()
+	// The upgrade path does not rewrite s.cfg's version fields; the live
+	// version comes from the PlatformAgent.
 	imageTag, chartVersion := s.cfg.ImageTag, s.cfg.ChartVersion
-	s.mu.Unlock()
 	if s.kube != nil && s.cfg.PodNamespace != "" {
 		var pa struct {
 			Spec struct {
@@ -584,21 +689,28 @@ func (s *server) liveInstallVersion(ctx context.Context) (string, string) {
 	return imageTag, chartVersion
 }
 
-func (s *server) noteUpgradedVersion(target string) {
-	s.mu.Lock()
-	changed := s.cfg.ImageTag != target
-	s.cfg.ImageTag = target
-	s.cfg.ChartVersion = target
-	s.cfg.AppVersion = "v" + target
-	s.mu.Unlock()
-	if changed {
-		s.releaseInfo.mu.Lock()
-		s.releaseInfo.value = nil
-		s.releaseInfo.mu.Unlock()
-		s.environment.mu.Lock()
-		s.environment.value = nil
-		s.environment.mu.Unlock()
+// noteUpgradedVersion drops the release and environment answers cached
+// before the runner finished, so the next read takes the version from the
+// upgraded PlatformAgent (liveInstallVersion, readEnvironment). It leaves
+// s.cfg's version fields alone, since the handlers that read them take no
+// lock. Answers cached after the finish already reflect the upgrade, which
+// keeps the 2 s status poll of a succeeded pod from re-reading GitHub on
+// every tick.
+func (s *server) noteUpgradedVersion(finishedAt string) {
+	finished, err := time.Parse(time.RFC3339, strings.TrimSpace(finishedAt))
+	if err != nil {
+		return
 	}
+	s.releaseInfo.mu.Lock()
+	if s.releaseInfo.value != nil && s.releaseInfo.readAt.Before(finished) {
+		s.releaseInfo.value = nil
+	}
+	s.releaseInfo.mu.Unlock()
+	s.environment.mu.Lock()
+	if s.environment.value != nil && s.environment.readAt.Before(finished) {
+		s.environment.value = nil
+	}
+	s.environment.mu.Unlock()
 }
 
 func (s *server) isAutoUpgradeEnabled(ctx context.Context) bool {
@@ -631,7 +743,6 @@ func (s *server) setAutoUpgrade(ctx context.Context, enabled bool) error {
 	s.mu.Lock()
 	s.autoUpgradeSet = true
 	s.autoUpgradeEnabled = enabled
-	s.cfg.AutoUpgrade = enabled
 	if enabled {
 		s.lastAutoUpgradeTarget = ""
 	} else {
@@ -674,6 +785,10 @@ func (s *server) handleUpgradeAutoSet(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), releaseWalkTimeout+upgradeTimeout)
 	defer cancel()
 
+	if req.Enabled && !upgradeRunnerEnabled() {
+		writeError(w, http.StatusNotImplemented, "upgrade_unavailable", upgradeRunnerOffMessage)
+		return
+	}
 	_ = s.setAutoUpgrade(ctx, req.Enabled)
 	if req.Enabled {
 		_, st := s.maybeTriggerAutoUpgrade(ctx)
@@ -707,6 +822,9 @@ func (s *server) handleUpgradeAutoSet(w http.ResponseWriter, r *http.Request) {
 // TODO(#3407): this policy belongs in the operator, which owns the gateway
 // rollout; the console should only request an upgrade.
 func (s *server) maybeTriggerAutoUpgrade(ctx context.Context) (bool, upgradeStatusResponse) {
+	if !upgradeRunnerEnabled() {
+		return false, s.readUpgradeStatus(ctx)
+	}
 	if !s.isAutoUpgradeEnabled(ctx) {
 		s.noteAutoUpgradeHold("")
 		return false, s.readUpgradeStatus(ctx)
@@ -737,10 +855,15 @@ func (s *server) maybeTriggerAutoUpgrade(ctx context.Context) (bool, upgradeStat
 	s.lastAutoUpgradeTarget = target
 	s.mu.Unlock()
 
-	st, code, err := s.startUpgradeRunner(ctx, target, "auto")
+	st, code, err := s.startUpgradeRunner(ctx, target, triggeredByAuto)
 	if err != nil || (code != http.StatusAccepted && code != http.StatusOK) {
 		log.Printf(logPrefix+"auto-upgrade to %s failed to start: %v", target, err)
 		return false, s.readUpgradeStatus(ctx)
+	}
+	if st.TriggeredBy != "" && st.TriggeredBy != triggeredByAuto {
+		// A lost create race: the run in progress is someone else's.
+		log.Printf(logPrefix+"auto-upgrade to %s skipped: a %s upgrade is already running", target, st.TriggeredBy)
+		return false, st
 	}
 	log.Printf(logPrefix+"auto-upgrade triggered for release %s", target)
 	return true, st

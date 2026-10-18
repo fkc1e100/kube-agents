@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -168,5 +169,111 @@ func TestKubeClientRereadsTheRotatedToken(t *testing.T) {
 	}
 	if got := k.bearer(); got != "startup" {
 		t.Errorf("bearer with the file gone = %q, want the startup token", got)
+	}
+}
+
+// An install whose PlatformAgent and Helm release carry non-default names:
+// the live spec.deployment.tag and the ownership metadata are read through
+// the route, and the rollout date comes from this install's Deployments,
+// not ones named after the defaults.
+func TestEnvironmentReadsTheLiveTagAndThisInstallsDeployments(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentTypeJSON)
+		switch r.URL.Path {
+		case fmt.Sprintf(platformAgentsAPIPath, "ops", "ops-agent"):
+			fmt.Fprint(w, `{"metadata":{"creationTimestamp":"2026-10-06T19:07:47Z",
+				"labels":{"app.kubernetes.io/managed-by":"Helm"},
+				"annotations":{"meta.helm.sh/release-name":"ka-prod","meta.helm.sh/release-namespace":"ops"}},
+				"spec":{"deployment":{"tag":"0.12.0"}}}`)
+		case fmt.Sprintf(replicaSetsAPIPath, "ops"):
+			fmt.Fprint(w, `{"items":[
+				{"metadata":{"creationTimestamp":"2026-10-07T10:00:00Z","ownerReferences":[{"kind":"Deployment","name":"ops-agent-gateway"}]}},
+				{"metadata":{"creationTimestamp":"2026-10-08T10:00:00Z","ownerReferences":[{"kind":"Deployment","name":"ka-prod-controller-manager"}]}},
+				{"metadata":{"creationTimestamp":"2026-10-09T10:00:00Z","ownerReferences":[{"kind":"Deployment","name":"platform-agent-gateway"}]}},
+				{"metadata":{"creationTimestamp":"2026-10-09T11:00:00Z","ownerReferences":[{"kind":"Deployment","name":"kube-agents-controller-manager"}]}}]}`)
+		default:
+			fmt.Fprint(w, `{"metadata":{},"items":[]}`)
+		}
+	}))
+	defer api.Close()
+	_, s := setupServer(t)
+	s.cfg.ImageTag, s.cfg.ChartVersion = "06e1ca65", "0.1.0"
+	s.cfg.PodNamespace, s.cfg.PlatformAgentName = "ops", "ops-agent"
+	s.kube = &kubeClient{base: api.URL, client: api.Client()}
+	rec := serve(s.routes(), httptest.NewRequest(http.MethodGet, "http://localhost:8080/api/environment", nil))
+	got := decode[environmentResponse](t, rec)
+	if got.Versions.ImageTag != "0.12.0" {
+		t.Errorf("image tag = %q, want the PlatformAgent's 0.12.0 over cfg's 06e1ca65", got.Versions.ImageTag)
+	}
+	if got.Install.ManagedBy != "helm" || got.Install.HelmRelease != "ka-prod" || got.Install.ReleaseNamespace != "ops" {
+		t.Errorf("ownership = %+v", got.Install)
+	}
+	if got.Install.LastRolloutAt != "2026-10-08T10:00:00Z" {
+		t.Errorf("last rollout = %q, want ka-prod-controller-manager's, not a default-named Deployment's", got.Install.LastRolloutAt)
+	}
+}
+
+// A list walk that fails after its first page is reported unavailable, not
+// as a partial count flagged as a floor.
+func TestEnvironmentReportsAFailedWalkAsUnavailable(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentTypeJSON)
+		if r.URL.Path != "/api/v1/nodes" {
+			fmt.Fprint(w, `{"metadata":{},"items":[]}`)
+			return
+		}
+		switch {
+		case r.URL.Query().Get("limit") == "1":
+			fmt.Fprint(w, `{"metadata":{"continue":"p1"},"items":[{}]}`)
+		case r.URL.Query().Get("continue") == "":
+			fmt.Fprint(w, `{"metadata":{"continue":"p2"},"items":[{},{},{}]}`)
+		default:
+			w.WriteHeader(http.StatusGone)
+		}
+	}))
+	defer api.Close()
+	_, s := setupServer(t)
+	s.kube = &kubeClient{base: api.URL, client: api.Client()}
+	got := s.readEnvironment(t.Context())
+	if _, counted := got.Counts["nodes"]; counted || !strings.Contains(got.Unavailable["nodes"], "HTTP 410") {
+		t.Errorf("counts=%v unavailable=%v, want nodes unavailable with the 410", got.Counts, got.Unavailable)
+	}
+	for _, k := range got.Floor {
+		if k == "nodes" {
+			t.Errorf("a failed walk was flagged as a floor: %v", got.Floor)
+		}
+	}
+}
+
+// A refresh whose request was cancelled is not cached for the next caller.
+func TestEnvironmentDoesNotCacheACancelledRefresh(t *testing.T) {
+	api := fakeKubeAPI(t)
+	defer api.Close()
+	_, s := setupServer(t)
+	s.cfg.PodNamespace = "kubeagents-system"
+	s.kube = &kubeClient{base: api.URL, token: "sa-token", client: api.Client()}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s.currentEnvironment(ctx)
+	if s.environment.value != nil {
+		t.Fatalf("a cancelled refresh was cached: %+v", *s.environment.value)
+	}
+	if got := s.currentEnvironment(t.Context()); got.Counts["pods"] != 42 || s.environment.value == nil {
+		t.Fatalf("the next refresh did not read the API: %+v", got)
+	}
+}
+
+func TestRolloutDeploymentsFollowTheInstallNames(t *testing.T) {
+	got := rolloutDeployments("ops-agent", "ka-prod")
+	for _, name := range []string{"ka-prod-controller-manager", "ops-agent-gateway", "ops-agent-credential-proxy", "litellm"} {
+		if !got[name] {
+			t.Errorf("%s missing from %v", name, got)
+		}
+	}
+	if got["platform-agent-gateway"] || got["kube-agents-controller-manager"] {
+		t.Errorf("default names kept for a renamed install: %v", got)
+	}
+	if def := rolloutDeployments("", ""); !def["kube-agents-controller-manager"] || !def["platform-agent-gateway"] {
+		t.Errorf("defaults = %v", def)
 	}
 }

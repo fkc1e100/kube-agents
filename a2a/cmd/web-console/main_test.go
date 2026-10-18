@@ -20,6 +20,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -749,6 +752,79 @@ func TestNonLoopbackHostIsRefused(t *testing.T) {
 	}
 }
 
+// registeredRoutes reads the method and pattern of every route routes() in
+// main.go registers, so the guard tests below cover routes added later
+// without anyone updating a list here.
+func registeredRoutes(t *testing.T) [][2]string {
+	t.Helper()
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Any registration counts: a route with another method, or none, fails
+	// here rather than being skipped by the guard checks.
+	pattern := regexp.MustCompile(`mux\.Handle(?:Func)?\("(?:([A-Z]+) )?([^"]+)"`)
+	var routes [][2]string
+	for _, m := range pattern.FindAllStringSubmatch(string(src), -1) {
+		if m[1] != http.MethodGet && m[1] != http.MethodPost {
+			t.Errorf("route %q registers method %q; the guard checks cover GET and POST only", m[2], m[1])
+			continue
+		}
+		routes = append(routes, [2]string{m[1], m[2]})
+	}
+	if len(routes) < 10 {
+		t.Fatalf("found %d routes in main.go; the pattern no longer matches routes()", len(routes))
+	}
+	return routes
+}
+
+// routePath fills a route pattern's {wildcards} with a value each guard
+// runs before the handler sees.
+func routePath(pattern string) string {
+	return regexp.MustCompile(`\{[^}]+\}`).ReplaceAllString(pattern, "x")
+}
+
+// Every route but /healthz refuses a foreign Host, and every POST route
+// also refuses a request without the console header, a non-JSON body, or a
+// foreign Origin. The lists come from main.go, so a route that drops
+// requireLocalHost or requireConsoleRequest fails here.
+func TestEveryRouteHasItsGuards(t *testing.T) {
+	_, h := setup(t)
+	for _, r := range registeredRoutes(t) {
+		method, path := r[0], routePath(r[1])
+		if path == "/healthz" {
+			continue
+		}
+		foreign := httptest.NewRequest(method, "http://rebind.attacker.example:8080"+path, strings.NewReader(`{}`))
+		foreign.Header.Set("Content-Type", "application/json")
+		foreign.Header.Set(consoleHeader, consoleHeaderValue)
+		if rec := serve(h, foreign); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s via a foreign Host: status %d, want 403", method, path, rec.Code)
+		}
+		if method != http.MethodPost {
+			continue
+		}
+		noHeader := httptest.NewRequest(method, "http://localhost:8080"+path, strings.NewReader(`{}`))
+		noHeader.Header.Set("Content-Type", "application/json")
+		if rec := serve(h, noHeader); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s without the console header: status %d, want 403", method, path, rec.Code)
+		}
+		plain := httptest.NewRequest(method, "http://localhost:8080"+path, strings.NewReader(`{}`))
+		plain.Header.Set("Content-Type", "text/plain")
+		plain.Header.Set(consoleHeader, consoleHeaderValue)
+		if rec := serve(h, plain); rec.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("%s %s with a text/plain body: status %d, want 415", method, path, rec.Code)
+		}
+		crossOrigin := httptest.NewRequest(method, "http://localhost:8080"+path, strings.NewReader(`{}`))
+		crossOrigin.Header.Set("Content-Type", "application/json")
+		crossOrigin.Header.Set(consoleHeader, consoleHeaderValue)
+		crossOrigin.Header.Set("Origin", "https://evil.example")
+		if rec := serve(h, crossOrigin); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s from a foreign Origin: status %d, want 403", method, path, rec.Code)
+		}
+	}
+}
+
 func TestHealthzAnswersAnyHost(t *testing.T) {
 	_, h := setup(t)
 	req := httptest.NewRequest(http.MethodGet, "http://10.0.0.5:8080/healthz", nil)
@@ -1157,4 +1233,403 @@ func TestRunTurnAwaitsDelegatedKanbanCardResult(t *testing.T) {
 			t.Errorf("reply = %q, want %q", got.Reply, want)
 		}
 	})
+}
+
+// ---- Page behaviour, run under Node ----
+//
+// The page's script is one inline <script>. pageJS pulls named top-level
+// functions and single-line declarations out of it, and runPageJS runs them
+// with stubs under node, so a test exercises the shipped code rather than a
+// copy. Tests skip when node is not on PATH.
+
+func pageSource(t *testing.T) string {
+	t.Helper()
+	page, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(page)
+}
+
+// pageJS returns the source of each named top-level function (four-space
+// indent, ending at the first closing brace at that indent) or one-line
+// const/let declaration.
+func pageJS(t *testing.T, names ...string) string {
+	t.Helper()
+	page := pageSource(t)
+	var out strings.Builder
+	for _, name := range names {
+		found := false
+		for _, head := range []string{"\n    function " + name + "(", "\n    async function " + name + "("} {
+			start := strings.Index(page, head)
+			if start < 0 {
+				continue
+			}
+			end := strings.Index(page[start+1:], "\n    }\n")
+			if end < 0 {
+				t.Fatalf("function %s has no closing brace", name)
+			}
+			out.WriteString(page[start+1 : start+1+end+len("\n    }\n")])
+			found = true
+			break
+		}
+		if found {
+			continue
+		}
+		for _, head := range []string{"\n    const " + name + " = ", "\n    let " + name + " = "} {
+			start := strings.Index(page, head)
+			if start < 0 {
+				continue
+			}
+			end := strings.Index(page[start+1:], "\n")
+			out.WriteString(page[start+1:start+1+end] + "\n")
+			found = true
+			break
+		}
+		if !found {
+			t.Fatalf("index.html has no top-level %s", name)
+		}
+	}
+	return out.String()
+}
+
+// runPageJS runs script under node and returns its trimmed stdout.
+func runPageJS(t *testing.T, script string) string {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is not on PATH")
+	}
+	out, err := exec.Command(node, "-e", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// pageSnippet returns page text from the first occurrence of start up to
+// and including the first end after it.
+func pageSnippet(t *testing.T, start, end string) string {
+	t.Helper()
+	page := pageSource(t)
+	i := strings.Index(page, start)
+	if i < 0 {
+		t.Fatalf("index.html has no %q", start)
+	}
+	j := strings.Index(page[i:], end)
+	if j < 0 {
+		t.Fatalf("index.html has no %q after %q", end, start)
+	}
+	return page[i : i+j+len(end)]
+}
+
+func TestPageSkillPillsNeedAKnownSkill(t *testing.T) {
+	script := `const SKILL_BY_NAME = { "gke-cost-analysis": { name: "gke-cost-analysis", cat: "fleet", desc: "" } };
+const skillUsage = new Map([["custom-skill", {}]]);
+` + pageJS(t, "escapeHtml", "skillInfo", "renderInline") + `
+const pills = s => (renderInline(s).match(/class="skill-pill/g) || []).length;
+console.log(JSON.stringify([pills("costs $120/month"), pills("set $pod_name first"), pills("use $gke-cost-analysis now"), pills("ran $custom-skill")]));`
+	if got, want := runPageJS(t, script), "[0,0,1,1]"; got != want {
+		t.Errorf("skill pills for [dollar amount, shell variable, catalog skill, reported skill] = %s, want %s", got, want)
+	}
+}
+
+func TestPageCountsEachSkillAndCardOnce(t *testing.T) {
+	script := `const sessionSkills = {}; const skillUsage = new Map(); const seenSpecialists = new Map();
+const nowSeconds = () => 1;
+` + pageJS(t, "countedSkillKeys", "noteSkills", "recordSpecialistFromCard") + `
+noteSkills("s1", ["a"], "m1"); noteSkills("s1", ["a"], "m1"); noteSkills("s1", ["a"], "summary"); noteSkills("s1", ["a"], "summary");
+noteSkills("s1", ["a"], "m2");
+const card = { assignee: "Cluster agent (x)", task_id: "t_1", status: "completed" };
+recordSpecialistFromCard(card); recordSpecialistFromCard(card);
+recordSpecialistFromCard({ assignee: "Cluster agent (x)", task_id: "t_2" });
+console.log(JSON.stringify([skillUsage.get("a").count, seenSpecialists.get("Cluster agent (x)").count]));`
+	if got, want := runPageJS(t, script), "[3,2]"; got != want {
+		t.Errorf("[skill count, specialist count] after repeated notes = %s, want %s", got, want)
+	}
+}
+
+// Step ids restart at skill_view#1 on every turn (stream.go numbers them per
+// turn), so the same skill read on two turns of one thread counts twice,
+// while a repeated event for one step counts once.
+func TestPageSkillStepsCountOncePerTurn(t *testing.T) {
+	script := `const sessionSkills = {}; const skillUsage = new Map(); const inflight = {};
+let clock = 100; const nowSeconds = () => clock;
+const refreshSkillsBars = () => {}; const statusChanged = () => {};
+` + pageJS(t, "countedSkillKeys", "noteSkills", "startInflight", "addStep") + `
+const STATUS_SENDING = "sending";
+startInflight("s1", "first");
+addStep("s1", { id: "skill_view#1", skill: "a" }); addStep("s1", { id: "skill_view#1", skill: "a", state: "done" });
+delete inflight.s1; clock = 200;
+startInflight("s1", "second");
+addStep("s1", { id: "skill_view#1", skill: "a" });
+console.log(skillUsage.get("a").count);`
+	if got, want := runPageJS(t, script), "2"; got != want {
+		t.Errorf("skill count after one read on each of two turns = %s, want %s", got, want)
+	}
+}
+
+func TestPageFeedbackFormKeepsTheTitle(t *testing.T) {
+	script := `const FEEDBACK_KINDS = { bug: {}, feature: {}, usage: {}, question: {} };
+` + pageJS(t, "isFeedbackKind", "feedbackFormArgs") + `
+console.log(JSON.stringify([
+  feedbackFormArgs(["form", "Login", "button", "is", "dead"]),
+  feedbackFormArgs(["form", "Feature", "Dark", "mode"]),
+  feedbackFormArgs(["form", "constructor"]),
+  feedbackFormArgs(["form"])]));`
+	want := `[["bug","Login button is dead"],["feature","Dark mode"],["bug","constructor"],["bug",""]]`
+	if got := runPageJS(t, script); got != want {
+		t.Errorf("feedbackFormArgs = %s, want %s", got, want)
+	}
+	// Switching the kind keeps a body the operator typed:
+	// renderFeedbackPreview replaces only a template body.
+	handler := pageSnippet(t, `$("feedback-kind-bar").addEventListener("click"`, "\n    });\n")
+	if strings.Contains(handler, `.value = ""`) || strings.Contains(handler, `template = "1"`) {
+		t.Errorf("the feedback kind bar resets the Details body:\n%s", handler)
+	}
+}
+
+func TestPageMergeOfStoredThreadsKeepsTheLiveObjects(t *testing.T) {
+	script := `let threads = [], activeId = "", view = "alerts"; const inflight = {}; const calls = [];
+const parseThreads = raw => JSON.parse(raw);
+const onScreen = id => view === "thread" && activeId === id;
+const threadsChanged = () => {}; const selectThread = id => calls.push("select:" + id); const selectChannel = n => calls.push("channel:" + n);
+` + pageJS(t, "findThread", "mergeStoredThreads") + `
+const x = { id: "x", title: "", mark: 5, markKnown: true, updated: 1, unread: false, started: true };
+threads = [x];
+mergeStoredThreads(JSON.stringify([{ id: "x", title: "T", mark: 7, markKnown: true, updated: 2, unread: false, started: true }]));
+const kept = threads[0] === x && x.mark === 7 && x.title === "T";
+const busy = { id: "b", mark: 0, updated: 1 };
+threads = [busy, x]; inflight.b = {};
+mergeStoredThreads(JSON.stringify([{ id: "x", mark: 7, updated: 2 }]));
+const busyKept = threads.includes(busy);
+delete inflight.b; threads = [x]; activeId = "x"; view = "thread";
+mergeStoredThreads(JSON.stringify([{ id: "y", mark: 0, updated: 3 }]));
+console.log(JSON.stringify([kept, busyKept, activeId, calls]));`
+	if got, want := runPageJS(t, script), `[true,true,"y",["select:y"]]`; got != want {
+		t.Errorf("[same object kept, running thread kept, activeId, pane calls] = %s, want %s", got, want)
+	}
+}
+
+func TestPageCapThreadsKeepsPinnedThreads(t *testing.T) {
+	script := `const MAX_THREADS = 2; const inflight = {}; let activeId = ""; let pinnedIds = new Set(["old"]);
+let threads = [{ id: "a", updated: 3 }, { id: "b", updated: 2 }, { id: "old", updated: 1 }];
+` + pageJS(t, "capThreads") + `
+capThreads();
+console.log(threads.map(t => t.id).join(","));`
+	if got, want := runPageJS(t, script), "a,old"; got != want {
+		t.Errorf("threads after capThreads = %s, want %s", got, want)
+	}
+}
+
+func TestPageOpeningAnUnreadThreadMarksNewMessages(t *testing.T) {
+	script := `let activeId = "", view = ""; const shown = [];
+const stream = { appendChild: el => shown.push(el) };
+const $ = () => stream; const unreadSepRow = () => "SEP";
+const clearStream = () => {}; const threadTitle = s => s; const noteMessageActivity = () => {};
+const appendMessage = (role, text) => shown.push(text); const refreshSkillsBars = () => {};
+const advanceMark = () => {}; const saveThreads = () => {}; const threadsChanged = () => {};
+` + pageJS(t, "activateThread") + `
+const t = { id: "s", title: "x" };
+const transcript = { latest_id: 3, messages: [1, 2, 3].map(id => ({ id, role: "assistant", content: "m" + id })) };
+activateThread(t, transcript, 1);
+const withMark = shown.join(",");
+shown.length = 0;
+activateThread(t, transcript, 0);
+console.log(withMark + "|" + shown.join(","));`
+	if got, want := runPageJS(t, script), "m1,SEP,m2,m3|m1,m2,m3"; got != want {
+		t.Errorf("rows shown = %s, want %s", got, want)
+	}
+}
+
+// The poll delivers an off-screen message and moves the mark past it in the
+// same pass, so the divider has to come from where unread began, not from
+// the mark at the time the thread is opened.
+func TestPageUnreadStartSurvivesThePollMovingTheMark(t *testing.T) {
+	script := `const onScreen = () => false; const noteMessageActivity = () => {};
+const saveThreads = () => {}; const nowSeconds = () => 1; const refreshDelegationPills = () => {};
+` + pageJS(t, "advanceMark", "deliver", "showUpdates") + `
+const t = { id: "s", mark: 1, markKnown: true, unread: false };
+showUpdates(t, [2, 3].map(id => ({ id, role: "assistant", content: "m" + id })));
+console.log(JSON.stringify([t.unread, t.mark, t.unreadFrom]));`
+	if got, want := runPageJS(t, script), "[true,3,1]"; got != want {
+		t.Errorf("[unread, mark, unreadFrom] after an off-screen poll = %s, want %s", got, want)
+	}
+	sel := pageSnippet(t, "async function selectThread(id) {", "activeId = id;")
+	if !strings.Contains(sel, "const prevMark = t.unreadFrom || 0;") {
+		t.Errorf("selectThread does not open the divider from t.unreadFrom:\n%s", sel)
+	}
+}
+
+func TestPageTranscriptFollowsOnlyFromTheBottomAndLabelsLocalRows(t *testing.T) {
+	script := `const rows = [];
+const stream = { scrollTop: 100, scrollHeight: 1000, clientHeight: 200, appendChild: el => rows.push(el) };
+const $ = () => stream; let centreLastDay = "";
+const recordSpecialistFromCard = () => {}; const nowSeconds = () => 86400;
+const dayLabel = s => "day" + Math.floor(s / 86400); const daySepRow = l => "sep:" + l;
+const messageRow = (role, text) => role + ":" + text;
+` + pageJS(t, "NEAR_BOTTOM_PX", "nearBottom", "appendTo") + `
+appendTo(stream, "agent", "report");
+const stayed = stream.scrollTop;
+appendTo(stream, "user", "mine");
+centreLastDay = "";
+appendTo(stream, "agent", "old", "", undefined, null, null, { id: 7 });
+console.log(JSON.stringify([stayed, stream.scrollTop, rows]));`
+	if got, want := runPageJS(t, script), `[100,1000,["sep:day1","agent:report","user:mine","agent:old"]]`; got != want {
+		t.Errorf("[scrollTop after agent row, after own row, rows] = %s, want %s", got, want)
+	}
+}
+
+func TestPageCardOutcomeReadsMultiWordWakeHeads(t *testing.T) {
+	script := pageJS(t, "CARD_DONE_STATUS", "CARD_BLOCKED_STATUS", "cardOutcomeState") + `
+console.log(["completed", "gave up (retries exhausted)", "blocked; needs attention", "crashed (worker exited); dispatcher will retry", "timed out; dispatcher will retry", "in_progress"].map(cardOutcomeState).join(","));`
+	if got, want := runPageJS(t, script), "done,done,blocked,running,running,running"; got != want {
+		t.Errorf("card states = %s, want %s", got, want)
+	}
+}
+
+func TestPageBrowserFamilyReportsEdge(t *testing.T) {
+	fn := pageJS(t, "browserFamily")
+	script := `const family = ua => (function () { const navigator = { userAgent: ua }; ` + fn + ` return browserFamily(); })();
+console.log([
+  family("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.2210.91"),
+  family("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")].join("|"));`
+	if got, want := runPageJS(t, script), "Edge 120 on Windows|Chrome 120 on Linux"; got != want {
+		t.Errorf("browserFamily = %s, want %s", got, want)
+	}
+}
+
+func TestPageUpgradeStatusKeepsPollingAndReportsALostConsole(t *testing.T) {
+	script := `const els = {}; const $ = id => els[id] || (els[id] = { hidden: true, innerText: "", style: {} });
+let intervals = 0; const setInterval = () => ++intervals; const clearInterval = () => {};
+const readBody = async r => r.body; let respond;
+const fetch = async () => respond();
+let upgradePollTimer = null; let upgradeSeenRunning = false;
+` + pageJS(t, "UPGRADE_POLL_MS", "UPGRADE_POLL_MAX_FAILURES", "upgradePollFailures", "upgradePollLost", "pollUpgradeStatus") + `
+(async () => {
+  respond = () => ({ ok: true, body: { state: "running", phase: "operator" } });
+  await pollUpgradeStatus();
+  const resumed = upgradePollTimer !== null;
+  respond = () => { throw new Error("connection refused"); };
+  for (let i = 0; i < UPGRADE_POLL_MAX_FAILURES; i++) await pollUpgradeStatus();
+  console.log(JSON.stringify([resumed, intervals, $("upgrade-live-state").innerText, upgradePollTimer]));
+})();`
+	if got, want := runPageJS(t, script), `[true,1,"Lost contact with the console",null]`; got != want {
+		t.Errorf("[timer started on a running read, intervals, badge, timer] = %s, want %s", got, want)
+	}
+}
+
+func TestPageUpgradeStatusHidesTheRunButtonWhenTheRunnerIsOff(t *testing.T) {
+	script := `const els = {}; const $ = id => els[id] || (els[id] = { hidden: false, disabled: false, innerText: "", style: {} });
+let intervals = 0; const setInterval = () => ++intervals; const clearInterval = () => {};
+const readBody = async r => r.body; let respond;
+const fetch = async () => respond();
+let upgradePollTimer = null; let upgradeSeenRunning = false;
+` + pageJS(t, "UPGRADE_POLL_MS", "UPGRADE_POLL_MAX_FAILURES", "upgradePollFailures", "upgradePollLost", "pollUpgradeStatus") + `
+(async () => {
+  respond = () => ({ ok: true, body: { state: "idle", runner_enabled: true } });
+  await pollUpgradeStatus();
+  const shownWhenOn = !$("upgrade-run-btn").hidden;
+  respond = () => ({ ok: true, body: { state: "idle", runner_enabled: false } });
+  await pollUpgradeStatus();
+  console.log(JSON.stringify([shownWhenOn, $("upgrade-run-btn").hidden, $("upgrade-run-btn").disabled]));
+})();`
+	if got, want := runPageJS(t, script), `[true,true,true]`; got != want {
+		t.Errorf("[button shown with the runner on, hidden with it off, disabled with it off] = %s, want %s", got, want)
+	}
+}
+
+func TestPageStreamedRepliesDoNotPileUpArtifacts(t *testing.T) {
+	script := `const SKILL_BY_NAME = {}; const skillUsage = new Map();
+` + pageJS(t, "escapeHtml", "skillInfo", "renderInline", "artifactSeq", "artifactStore", "artifactIdByKey", "registerArtifact", "renderMarkdown") + "\n" +
+		"const fence = \"```yaml\\na: 1\\n```\";\n" + `
+const live = renderMarkdown(fence, { live: true });
+const afterLive = Object.keys(artifactStore).length;
+renderMarkdown(fence); renderMarkdown(fence);
+console.log(JSON.stringify([live.includes("data-copy-art"), afterLive, Object.keys(artifactStore).length]));`
+	if got, want := runPageJS(t, script), "[false,0,1]"; got != want {
+		t.Errorf("[live render has artifact buttons, artifacts after live, after two final renders] = %s, want %s", got, want)
+	}
+}
+
+func TestPageUpgradeHelmCommandResetsChartDefaults(t *testing.T) {
+	fn := pageJS(t, "upgradeCommands")
+	if !strings.Contains(fn, "--reset-then-reuse-values") || strings.Contains(fn, " --reuse-values") {
+		t.Errorf("upgradeCommands does not use --reset-then-reuse-values:\n%s", fn)
+	}
+}
+
+// Entry points that send into or write to the centre stream must make it
+// visible and must not hand a request to a thread that has a turn running.
+func TestPageEntryPointsReachAVisibleIdleThread(t *testing.T) {
+	ask := pageSnippet(t, `if (ask) ask.addEventListener("click"`, "\n      });\n")
+	if !strings.Contains(ask, `if (view !== "thread" || inflight[activeId]) newChat();`) {
+		t.Errorf("Ask the agent can send into a busy thread:\n%s", ask)
+	}
+	palette := pageSnippet(t, `sub: c.local ? "Action" : "Prompt",`, "handleSlashCommand(c.token, \"centre\");")
+	for _, want := range []string{"else newChat();", `PALETTE_STREAM_COMMANDS.has(c.local) && view !== "thread"`} {
+		if !strings.Contains(palette, want) {
+			t.Errorf("palette command run is missing %q:\n%s", want, palette)
+		}
+	}
+	escape := pageSnippet(t, "function wireAutocomplete(", `if (e.key === "Escape") {`)
+	escapeArm := pageSnippet(t, escape[len(escape)-len(`if (e.key === "Escape") {`):], "return;")
+	if !strings.Contains(escapeArm, "e.stopPropagation();") {
+		t.Errorf("Escape in the autocomplete popup reaches the document handler:\n%s", escapeArm)
+	}
+}
+
+func TestPageTopbarActionsWrapInsteadOfClipping(t *testing.T) {
+	page := pageSource(t)
+	actions := cssBlock(t, page, ".header-actions")
+	for _, rule := range []string{"flex-wrap: wrap;", "min-width: 0;", "flex-shrink: 1;"} {
+		if !strings.Contains(actions, rule) {
+			t.Errorf(".header-actions is missing %q", rule)
+		}
+	}
+	topbar := cssBlock(t, page, ".topbar")
+	if regexp.MustCompile(`(?m)^\s*height:`).MatchString(topbar) || !strings.Contains(topbar, "min-height: 52px;") {
+		t.Errorf(".topbar must grow with wrapped actions:\n%s", topbar)
+	}
+}
+
+func TestPageUsageEmailDoesNotAskForAMissingJob(t *testing.T) {
+	page := pageSource(t)
+	for _, text := range []string{"run the usage-report cron job", "reports/kube-agents-usage-"} {
+		if strings.Contains(page, text) {
+			t.Errorf("index.html still mentions %q, which this release does not ship", text)
+		}
+	}
+}
+
+// Every catalog entry's SKILL.md link and "Lives at" line must point at a
+// file in the tree.
+func TestSkillCatalogPointsAtSkillsInTheTree(t *testing.T) {
+	entry := regexp.MustCompile(`\{ name: "([a-z0-9-]+)", cat: "[a-z]+", (agent: "cluster", )?desc:`)
+	matches := entry.FindAllStringSubmatch(pageSource(t), -1)
+	if len(matches) < 40 {
+		t.Fatalf("found %d SKILL_CATALOG entries; the pattern no longer matches the catalog", len(matches))
+	}
+	for _, m := range matches {
+		dir := "platform"
+		if m[2] != "" {
+			dir = "cluster"
+		}
+		path := "../../../agents/" + dir + "/skills/" + m[1] + "/SKILL.md"
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("catalog skill %s: %v", m[1], err)
+		}
+	}
+}
+
+// Opening the Upgrade dialog before About or Feedback must still fetch the
+// environment, or the ownership line reads "owned by not readable from this
+// console".
+func TestPageUpgradeDialogFetchesTheEnvironment(t *testing.T) {
+	open := pageJS(t, "openUpgrade")
+	for _, want := range []string{"if (!lastEnvironment)", "fetchEnvironment().then(", "renderUpgradeModal();"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("openUpgrade is missing %q:\n%s", want, open)
+		}
+	}
 }

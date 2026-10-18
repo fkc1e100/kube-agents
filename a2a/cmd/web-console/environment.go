@@ -20,8 +20,11 @@ limitations under the License.
 // in without naming the customer's resources. So this route returns
 // versions (Kubernetes, kube-agents chart and images, Hermes), dates (when
 // kube-agents was installed, when it last rolled out), and counts (nodes,
-// namespaces, workloads, pods). It never returns a name: not the cluster's,
-// not a namespace's, not a workload's, not the project's. Counts come from
+// namespaces, workloads, pods). It never returns the name of the customer's
+// cluster, project, namespaces or workloads. The one exception is the
+// install block's ownership fields: the kube-agents Helm release, the
+// namespace it was installed into, and the Argo CD Application that owns it,
+// which the upgrade dialog needs to print a command that works. Counts come from
 // list calls whose items are discarded here, read with the console's own
 // service account, which the chart grants list on those kinds and get on the
 // PlatformAgent. Where a read is refused the field is left empty and the
@@ -75,6 +78,18 @@ const (
 	// label; its value is "<app>:<group>/<kind>:<namespace>/<name>".
 	argoCDTrackingAnnotation = "argocd.argoproj.io/tracking-id"
 	replicaSetsAPIPath       = "/apis/apps/v1/namespaces/%s/replicasets"
+
+	// The kube-agents Deployments whose newest ReplicaSet dates the last
+	// upgrade, by how the chart and operator name them: the operator is
+	// "<release>-controller-manager" (operator-deployment.yaml), the
+	// gateway and credential proxy are "<agent>-gateway" and
+	// "<agent>-credential-proxy" (the operator's manifests), and LiteLLM's
+	// name is fixed (litellm.yaml).
+	defaultHelmReleaseName          = "kube-agents"
+	controllerManagerSuffix         = "-controller-manager"
+	gatewayDeploymentSuffix         = "-gateway"
+	credentialProxyDeploymentSuffix = "-credential-proxy"
+	litellmDeploymentName           = "litellm"
 )
 
 // countedKinds are the list calls behind the workload counts. The install
@@ -93,13 +108,22 @@ var countedKinds = []struct {
 }
 
 // rolloutDeployments are the kube-agents Deployments whose newest ReplicaSet
-// dates the last upgrade. The console and any front proxy are left out: a
-// console-only redeploy is not an upgrade of the agent.
-var rolloutDeployments = map[string]bool{
-	"kube-agents-controller-manager":  true,
-	"platform-agent-gateway":          true,
-	"platform-agent-credential-proxy": true,
-	"litellm":                         true,
+// dates the last upgrade, named from this install's PlatformAgent and Helm
+// release rather than the defaults. The console and any front proxy are
+// left out: a console-only redeploy is not an upgrade of the agent.
+func rolloutDeployments(agentName, helmRelease string) map[string]bool {
+	if agentName == "" {
+		agentName = defaultPlatformAgentName
+	}
+	if helmRelease == "" {
+		helmRelease = defaultHelmReleaseName
+	}
+	return map[string]bool{
+		helmRelease + controllerManagerSuffix:       true,
+		agentName + gatewayDeploymentSuffix:         true,
+		agentName + credentialProxyDeploymentSuffix: true,
+		litellmDeploymentName:                       true,
+	}
 }
 
 type environmentVersions struct {
@@ -294,6 +318,11 @@ func (s *server) currentEnvironment(ctx context.Context) environmentResponse {
 	}
 	s.environment.mu.Unlock()
 	v := s.readEnvironment(ctx)
+	if ctx.Err() != nil {
+		// The caller left or the refresh ran out of time: the reads that
+		// failed say nothing about the install, so the answer is not kept.
+		return v
+	}
 	s.environment.mu.Lock()
 	s.environment.value = &v
 	s.environment.readAt = time.Now()
@@ -345,7 +374,9 @@ func (s *server) readEnvironment(ctx context.Context) environmentResponse {
 	}
 	for _, kind := range countedKinds {
 		n, floor, err := k.count(ctx, kind.path)
-		if err != nil && n == 0 {
+		if err != nil {
+			// A walk that failed part-way is not a floor; report the
+			// failure rather than a partial count.
 			out.Unavailable[kind.key] = err.Error()
 			continue
 		}
@@ -408,9 +439,10 @@ func (s *server) readEnvironment(ctx context.Context) environmentResponse {
 		out.Unavailable["last_rollout"] = "replicasets: " + err.Error()
 	} else {
 		var stamps []string
+		rollouts := rolloutDeployments(s.cfg.PlatformAgentName, out.Install.HelmRelease)
 		for _, item := range rs.Items {
 			for _, o := range item.Metadata.OwnerReferences {
-				if o.Kind == "Deployment" && rolloutDeployments[o.Name] {
+				if o.Kind == "Deployment" && rollouts[o.Name] {
 					stamps = append(stamps, item.Metadata.CreationTimestamp)
 				}
 			}

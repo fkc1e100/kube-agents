@@ -617,9 +617,12 @@ func (s *server) lookupSession(ctx context.Context, sid string) (hermesSession, 
 // knownPlatformSkills lists the built-in Kube-Agents platform and cluster
 // skills so references in tool calls, scheduled audit IDs, and kanban task
 // bodies or results can be surfaced as structured skill badges.
+// TestKnownPlatformSkillsCoverTheSkillsTree fails when a directory under
+// agents/*/skills/ is missing here.
 var knownPlatformSkills = []string{
 	"gke-workload-troubleshooting",
 	"gke-stall-detection",
+	"gke-load-bearing-change",
 	"gke-compute-classes",
 	"gke-cluster-autoscaler",
 	"gke-workload-scaling",
@@ -629,7 +632,9 @@ var knownPlatformSkills = []string{
 	"gke-service-networking",
 	"gke-platform-security",
 	"gke-workload-security",
+	"gke-workload-identity",
 	"gke-observability",
+	"gke-alert-configuration",
 	"gke-cost-analysis",
 	"gke-cost-optimization",
 	"gke-upgrades",
@@ -801,7 +806,7 @@ func detectSkillFromToolCall(toolName, previewOrArgs string) string {
 			return m[1]
 		}
 		for _, sk := range knownPlatformSkills {
-			if strings.Contains(previewOrArgs, sk) {
+			if mentionsSkill(previewOrArgs, sk) {
 				return sk
 			}
 		}
@@ -810,11 +815,56 @@ func detectSkillFromToolCall(toolName, previewOrArgs string) string {
 		return m[1]
 	}
 	for _, sk := range knownPlatformSkills {
-		if strings.Contains(previewOrArgs, sk) {
+		if mentionsSkill(previewOrArgs, sk) {
 			return sk
 		}
 	}
 	return ""
+}
+
+// mentionsSkill reports whether text names skill as a whole name: the bytes
+// on either side of the match cannot be part of a skill name, so
+// "fleet-audit" is not found inside "gce-compute-fleet-audit" or
+// "fleet-audit-reports".
+func mentionsSkill(text, skill string) bool {
+	for start := 0; start < len(text); {
+		i := strings.Index(text[start:], skill)
+		if i < 0 {
+			return false
+		}
+		i += start
+		end := i + len(skill)
+		if (i == 0 || !isSkillNameByte(text[i-1])) && (end == len(text) || !isSkillNameByte(text[end])) {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
+// isSkillNameByte reports whether b can appear in a skill directory name.
+func isSkillNameByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '-' || b == '_'
+}
+
+// longestSkillMatches drops every skill that is part of another skill in
+// the list, so a slug holding "gce-compute-fleet-audit" yields that skill
+// and not also "fleet-audit".
+func longestSkillMatches(skills []string) []string {
+	var out []string
+	for _, sk := range skills {
+		inside := false
+		for _, other := range skills {
+			if other != sk && strings.Contains(other, sk) {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			out = append(out, sk)
+		}
+	}
+	return out
 }
 
 func findKnownSkillsInText(text string) []string {
@@ -829,7 +879,7 @@ func findKnownSkillsInText(text string) []string {
 	}
 	lower := strings.ToLower(text)
 	for _, sk := range knownPlatformSkills {
-		if strings.Contains(lower, sk) {
+		if mentionsSkill(lower, sk) {
 			out = mergeSkills(out, sk)
 		}
 	}
@@ -840,11 +890,13 @@ func extractTextSkills(kind, sid, text string, card *messageCard) []string {
 	var out []string
 	if m := cronSkillSlugPat.FindStringSubmatch(sid); m != nil {
 		slug := strings.ReplaceAll(m[1], "_", "-")
+		var slugSkills []string
 		for _, sk := range knownPlatformSkills {
-			if slug == sk || strings.Contains(slug, sk) {
-				out = mergeSkills(out, sk)
+			if strings.Contains(slug, sk) {
+				slugSkills = append(slugSkills, sk)
 			}
 		}
+		out = mergeSkills(out, longestSkillMatches(slugSkills)...)
 		if sk, ok := cronJobSkillAliases[slug]; ok {
 			out = mergeSkills(out, sk)
 		}
