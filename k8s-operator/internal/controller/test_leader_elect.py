@@ -13,6 +13,7 @@ sys.modules['kubernetes.config'] = mock_kubernetes.config
 # Now we can import leader_elect safely
 import leader_elect
 from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 
 class TestLeaderElectLogic(unittest.TestCase):
     def setUp(self):
@@ -204,69 +205,273 @@ class TestGatewayProfile(unittest.TestCase):
         popen.assert_called_once_with(["hermes", "--profile", "platform", "gateway", "run"])
 
 
-class TestSupervisorShutdown(unittest.TestCase):
-    """The shutdown drain and cleanup budget supervised by leader_elect.py.
+class _Clock:
+    """time.monotonic for the drain: advances only when Hermes is waited on."""
 
-    On SIGTERM or when yielding leadership, leader_elect.py terminates Hermes and
-    must wait up to GATEWAY_SHUTDOWN_TIMEOUT_SECONDS (50s) to allow Hermes to
-    complete in-flight cron drains (agent.cron_drain_timeout, default 30s) and its
-    cleanup reserve (10s) before escalating to process.kill().
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+
+class _Hermes:
+    """A Hermes child that exits `exit_after` seconds after SIGTERM, or only on
+    SIGKILL when `exit_after` is None. Waiting on it moves the clock."""
+
+    def __init__(self, clock, events, exit_after):
+        self.clock, self.events, self.exit_after = clock, events, exit_after
+        self.exit_at = None
+        self.returncode = None
+        self.terminate = MagicMock(side_effect=self._terminate)
+        self.kill = MagicMock(side_effect=self._kill)
+
+    def _terminate(self):
+        self.events.append(("sigterm", self.clock.now))
+        if self.exit_at is None and self.exit_after is not None:
+            self.exit_at = self.clock.now + self.exit_after
+
+    def _kill(self):
+        if self.returncode is None:
+            self.returncode = -9
+            self.events.append(("exit", self.clock.now))
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.returncode is not None:
+            return self.returncode
+        if timeout is None:
+            raise AssertionError("unbounded wait on a running Hermes")
+        if self.exit_at is not None and self.clock.now + timeout >= self.exit_at:
+            self.clock.now = max(self.clock.now, self.exit_at)
+            self.returncode = 0
+            self.events.append(("exit", self.clock.now))
+            return 0
+        self.clock.now += timeout
+        raise leader_elect.subprocess.TimeoutExpired("hermes", timeout)
+
+
+class _Leases:
+    """The coordination API, holding one Lease. `taken_at` hands it to pod-2 at
+    that time; `unreachable_from` makes every call from that time on time out,
+    spending its whole _request_timeout first; `call_seconds` is what every
+    other call spends."""
+
+    def __init__(self, clock, events, holder="pod-1", taken_at=None, unreachable_from=None, call_seconds=0):
+        self.clock, self.events, self.holder = clock, events, holder
+        self.taken_at, self.unreachable_from = taken_at, unreachable_from
+        self.call_seconds = call_seconds
+        self.request_timeouts = []
+
+    def _check(self, kwargs):
+        timeout = kwargs.get("_request_timeout")
+        self.request_timeouts.append(timeout)
+        if self.unreachable_from is not None and self.clock.now >= self.unreachable_from:
+            self.clock.now += timeout if timeout is not None else 3600
+            raise RuntimeError("apiserver unreachable")
+        self.clock.now += self.call_seconds
+        if self.taken_at is not None and self.clock.now >= self.taken_at:
+            self.holder = "pod-2"
+
+    def read_namespaced_lease(self, name, namespace, **kwargs):
+        self._check(kwargs)
+        spec = SimpleNamespace(holder_identity=self.holder, renew_time=datetime.now(timezone.utc),
+                               lease_duration_seconds=leader_elect.LEASE_DURATION_SECONDS,
+                               acquire_time=None, lease_transitions=0)
+        return SimpleNamespace(spec=spec)
+
+    def replace_namespaced_lease(self, name, namespace, body, **kwargs):
+        self._check(kwargs)
+        self.holder = body.spec.holder_identity
+        self.events.append(("renew" if self.holder == "pod-1" else "release", self.clock.now))
+
+
+class _Pods:
+    def __init__(self, clock, events, call_seconds=0):
+        self.clock, self.events, self.call_seconds = clock, events, call_seconds
+        self.request_timeouts = []
+
+    def patch_namespaced_pod(self, name, namespace, body, **kwargs):
+        self.request_timeouts.append(kwargs.get("_request_timeout"))
+        self.clock.now += self.call_seconds
+        self.events.append(("label", body["metadata"]["labels"]["kubeagents.io/is-leader"], self.clock.now))
+
+
+class TestDrainHoldsLease(unittest.TestCase):
+    """While Hermes drains after SIGTERM, leader_elect.py keeps renewing the lease,
+    and only after Hermes has exited does it clear the leader label and release the
+    lease. A standby takes an unrenewed lease after LEASE_DURATION_SECONDS and starts
+    its own Hermes at once, so a drain longer than that without renewal would run two
+    gateways against one home. Hermes is SIGKILLed rather than waited on when the
+    budget runs out or the lease can no longer be confirmed as this pod's.
     """
+
+    # SIGTERM lands just before the main loop's next renewal: the last one was a
+    # full poll interval plus jitter ago.
+    LAST_RENEWAL = -(leader_elect.LEASE_POLL_INTERVAL_SECONDS + leader_elect.LEASE_POLL_JITTER_SECONDS)
+    # The gateway pod's terminationGracePeriodSeconds (gatewayTerminationGracePeriodSeconds).
+    POD_GRACE_SECONDS = 60
+    # Clock skew between nodes the margin before a standby's takeover must absorb.
+    CLOCK_SKEW_SECONDS = 1
 
     def setUp(self):
         leader_elect.lease_name = "test-lease"
         leader_elect.namespace = "test-ns"
         leader_elect.pod_name = "pod-1"
-        leader_elect.process = None
         leader_elect.is_shutting_down = False
+        self.clock = _Clock()
+        self.events = []
+        leader_elect.lease_renewed_at = self.LAST_RENEWAL
+        self.pods = _Pods(self.clock, self.events)
+        mock_kubernetes.client.CoreV1Api.return_value = self.pods
+        self.exited_at = []
+        exit_mock = MagicMock(side_effect=lambda code: self.exited_at.append(self.clock.now))
+        for target, value in (("leader_elect.time.monotonic", self.clock.monotonic),
+                              ("leader_elect.sys.exit", exit_mock)):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self):
         leader_elect.process = None
         leader_elect.is_shutting_down = False
+        leader_elect.lease_renewed_at = None
 
-    @patch("leader_elect.sys.exit")
-    def test_release_lease_waits_for_drain_budget(self, mock_exit):
-        mock_process = MagicMock()
-        mock_process.wait.return_value = 0
-        leader_elect.process = mock_process
-
-        mock_coordination = MagicMock()
-        mock_kubernetes.client.CoordinationV1Api.return_value = mock_coordination
-        mock_kubernetes.client.CoreV1Api.return_value = MagicMock()
-        lease = MagicMock()
-        lease.spec.holder_identity = "pod-1"
-        mock_coordination.read_namespaced_lease.return_value = lease
-
+    def _shut_down(self, exit_after, pod_call_seconds=0, **lease_kwargs):
+        self.pods.call_seconds = pod_call_seconds
+        self.leases = _Leases(self.clock, self.events, **lease_kwargs)
+        mock_kubernetes.client.CoordinationV1Api.return_value = self.leases
+        self.hermes = _Hermes(self.clock, self.events, exit_after)
+        leader_elect.process = self.hermes
         leader_elect.release_lease_and_exit(15, None)
+        leader_elect.sys.exit.assert_called_once_with(0)
 
-        mock_process.terminate.assert_called_once()
-        mock_process.wait.assert_called_once_with(timeout=leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
+    def _time_of(self, kind):
+        return next(event[-1] for event in self.events if event[0] == kind)
+
+    def test_lease_is_renewed_through_a_drain_longer_than_the_lease(self):
+        drain = 40
+        self.assertGreater(drain, leader_elect.LEASE_DURATION_SECONDS)
+        self._shut_down(exit_after=drain)
+
+        self.hermes.kill.assert_not_called()
+        self.assertEqual(self._time_of("exit"), drain)
+        renewals = [self.LAST_RENEWAL] + [event[-1] for event in self.events if event[0] == "renew"]
+        self.assertGreaterEqual(len(renewals) - 1, drain // leader_elect.LEASE_POLL_INTERVAL_SECONDS)
+        # No moment from the last loop renewal to Hermes' exit is further than a
+        # lease duration from a renewal before it, so no standby can take over.
+        gaps = [b - a for a, b in zip(renewals, renewals[1:] + [drain])]
+        self.assertLess(max(gaps), leader_elect.LEASE_DURATION_SECONDS, gaps)
+        # Every call is bounded, on a client with retries off, so a hung API
+        # cannot stall the drain or the release.
+        self.assertTrue(all(timeout == leader_elect.LEASE_API_TIMEOUT_SECONDS
+                            for timeout in self.leases.request_timeouts + self.pods.request_timeouts),
+                        (self.leases.request_timeouts, self.pods.request_timeouts))
+        self.assertEqual(mock_kubernetes.client.Configuration.get_default_copy.return_value.retries, 0)
+
+    def test_lease_is_released_and_label_cleared_after_hermes_exits(self):
+        self._shut_down(exit_after=30)
+
+        kinds = [event[0] for event in self.events]
+        exit_index = kinds.index("exit")
+        self.assertEqual(kinds[exit_index + 1:], ["label", "release"])
+        self.assertEqual(self.events[exit_index + 1][1], None)
+        self.assertIsNone(self.leases.holder)
+
+    def test_nothing_is_released_while_hermes_is_still_running(self):
+        # A Hermes that never finishes draining: the lease stays held for the
+        # whole budget, Hermes is killed, and only then is anything handed back.
+        self._shut_down(exit_after=None)
+
+        self.hermes.kill.assert_called_once()
+        exited = self._time_of("exit")
+        self.assertEqual(exited, leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
+        before_exit = [event for event in self.events if event[-1] < exited]
+        self.assertTrue(before_exit)
+        self.assertEqual({event[0] for event in before_exit}, {"sigterm", "renew"})
+        kinds = [event[0] for event in self.events]
+        self.assertEqual(kinds[kinds.index("exit") + 1:], ["label", "release"])
+
+    def test_hermes_is_killed_when_another_pod_holds_the_lease(self):
+        taken_at = 12
+        self._shut_down(exit_after=None, taken_at=taken_at)
+
+        self.hermes.kill.assert_called_once()
+        self.assertLessEqual(self._time_of("exit"), taken_at + leader_elect.LEASE_POLL_INTERVAL_SECONDS)
+        # The other pod's lease is left alone; this pod's label still goes.
+        self.assertEqual(self.leases.holder, "pod-2")
+        self.assertNotIn("release", [event[0] for event in self.events])
+        self.assertIn(("label", None), [event[:2] for event in self.events])
+
+    def test_hermes_is_killed_when_renewal_goes_unconfirmed_for_a_lease_duration(self):
+        self._shut_down(exit_after=None, unreachable_from=3)
+
+        self.hermes.kill.assert_called_once()
+        last_renewal = max(event[-1] for event in self.events if event[0] == "renew")
+        self.assertLessEqual(self._time_of("exit"), last_renewal + leader_elect.LEASE_RENEW_DEADLINE_SECONDS)
+        self.assertIn(("label", None), [event[:2] for event in self.events])
+
+    def test_a_hung_api_cannot_hold_hermes_past_the_lease(self):
+        # The API stops answering mid-drain and every call then burns its whole
+        # timeout. Hermes must still be dead before a standby may take the lease,
+        # with room left for clock skew between the two nodes.
+        self._shut_down(exit_after=None, unreachable_from=3)
+
+        last_renewal = max(event[-1] for event in self.events if event[0] == "renew")
+        self.assertLessEqual(self._time_of("exit") + self.CLOCK_SKEW_SECONDS,
+                             last_renewal + leader_elect.LEASE_DURATION_SECONDS)
+
+    def test_shutdown_finishes_inside_the_pod_grace_period(self):
+        # Hermes never drains and every call takes its full timeout: the kill,
+        # label clear and lease release still finish before the kubelet's SIGKILL.
+        self._shut_down(exit_after=None, call_seconds=leader_elect.LEASE_API_TIMEOUT_SECONDS,
+                        pod_call_seconds=leader_elect.LEASE_API_TIMEOUT_SECONDS)
+
+        self.hermes.kill.assert_called_once()
+        self.assertEqual([event[0] for event in self.events][-2:], ["label", "release"])
+        self.assertLess(self.exited_at[-1], self.POD_GRACE_SECONDS)
+
+    @patch("leader_elect.subprocess.Popen")
+    @patch("leader_elect.time.sleep")
+    def test_lost_leadership_kills_hermes_without_waiting_out_the_drain(self, mock_sleep, mock_popen):
+        """Another pod already leads, so a drain here would be two gateways at
+        once: the loop stops Hermes through the same path, which sees the other
+        holder on its first renewal and kills it, then the label is cleared."""
+        self.leases = _Leases(self.clock, self.events, holder="pod-2")
+        mock_kubernetes.client.CoordinationV1Api.return_value = self.leases
+        self.hermes = _Hermes(self.clock, self.events, exit_after=None)
+        leader_elect.process = self.hermes
+        leader_elect.label_state = True
+        mock_sleep.side_effect = Exception("StopLoop")
+
+        with self.assertRaisesRegex(Exception, "StopLoop"):
+            leader_elect.main()
+
+        self.hermes.terminate.assert_called_once()
+        self.hermes.kill.assert_called_once()
+        self.assertEqual(self._time_of("exit"), 0)
+        self.assertIsNone(leader_elect.process)
+        mock_popen.assert_not_called()
+        self.assertEqual(self.leases.holder, "pod-2")
+        self.assertNotIn("renew", [event[0] for event in self.events])
+        self.assertEqual(self.events[-1][:2], ("label", None))
+
+    def test_budgets_nest(self):
+        # Hermes' stop path (30s cron drain + 10s cleanup) fits inside the
+        # supervisor's budget; the budget plus the label clear and lease release
+        # fits inside the pod's grace; a renewal in flight at the renew deadline
+        # still ends before a standby may take the lease; and the steady-state
+        # loop renews inside the renew deadline, so a drain starts with a lease
+        # it can still renew.
         self.assertGreaterEqual(leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS, 40)
-        mock_process.kill.assert_not_called()
-        mock_exit.assert_called_once_with(0)
-
-    @patch("leader_elect.sys.exit")
-    def test_release_lease_kills_process_after_timeout(self, mock_exit):
-        mock_process = MagicMock()
-        mock_process.wait.side_effect = [
-            leader_elect.subprocess.TimeoutExpired(cmd="hermes", timeout=leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS),
-            0,
-        ]
-        leader_elect.process = mock_process
-
-        mock_coordination = MagicMock()
-        mock_kubernetes.client.CoordinationV1Api.return_value = mock_coordination
-        mock_kubernetes.client.CoreV1Api.return_value = MagicMock()
-        lease = MagicMock()
-        lease.spec.holder_identity = "pod-1"
-        mock_coordination.read_namespaced_lease.return_value = lease
-
-        leader_elect.release_lease_and_exit(15, None)
-
-        mock_process.terminate.assert_called_once()
-        self.assertEqual(mock_process.wait.call_count, 2)
-        mock_process.kill.assert_called_once()
-        mock_exit.assert_called_once_with(0)
+        self.assertLess(leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS + 3 * leader_elect.LEASE_API_TIMEOUT_SECONDS,
+                        self.POD_GRACE_SECONDS)
+        self.assertLessEqual(leader_elect.LEASE_RENEW_DEADLINE_SECONDS + leader_elect.LEASE_RENEWAL_MAX_SECONDS
+                             + self.CLOCK_SKEW_SECONDS, leader_elect.LEASE_DURATION_SECONDS)
+        self.assertLess(leader_elect.LEASE_POLL_INTERVAL_SECONDS + leader_elect.LEASE_POLL_JITTER_SECONDS,
+                        leader_elect.LEASE_RENEW_DEADLINE_SECONDS)
 
 
 if __name__ == '__main__':

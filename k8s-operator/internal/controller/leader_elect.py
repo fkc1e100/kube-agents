@@ -16,6 +16,10 @@ process = None
 # clears it before anything selects on it.
 label_state = None
 is_shutting_down = False
+# lease_renewed_at is the time.monotonic() reading taken before the last write
+# that confirmed this pod holds the lease, or None before the first. A draining
+# Hermes is killed once LEASE_RENEW_DEADLINE_SECONDS pass from it with no newer one.
+lease_renewed_at = None
 # The label means "this pod holds the lease and its Hermes answers": the
 # Service routes on it, and the operator's usage poller and the chart's chat
 # PodMonitoring read the chat listener from the pod that carries it. Hermes
@@ -47,26 +51,61 @@ HERMES_PROBE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}
 _gateway_profile = (os.environ.get("HERMES_GATEWAY_PROFILE") or "").strip()
 HERMES_COMMAND = ["hermes"] + (["--profile", _gateway_profile] if _gateway_profile else []) + ["gateway", "run"]
 
-# How long the supervisor waits between process.terminate() (SIGTERM) and
-# process.kill() (SIGKILL) when shutting down or yielding leadership. Kubernetes
-# gives the gateway pod terminationGracePeriodSeconds (60s), during which Hermes
-# drains in-flight cron runs (agent.cron_drain_timeout, default 30s) and keeps a
-# 10s cleanup reserve (40s total). Sizing this at 50s gives Hermes its full 40s
-# stop budget with a 10s margin before leader_elect.py forces termination, and
-# leaves another 10s before the kubelet SIGKILLs the container.
-GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = int(os.environ.get("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS", "50"))
+# The most the supervisor waits between process.terminate() (SIGTERM) and
+# process.kill() (SIGKILL) while this pod still holds the lease; it kills sooner
+# when another pod holds the lease, which on a lost-leadership pass means at
+# once, or when no renewal is confirmed for LEASE_RENEW_DEADLINE_SECONDS (see
+# stop_hermes_holding_lease). Kubernetes gives the gateway pod
+# terminationGracePeriodSeconds (60s), during which Hermes drains in-flight cron
+# runs (agent.cron_drain_timeout, default 30s) and keeps a 10s cleanup reserve
+# (40s total). Sizing this at 50s gives Hermes its full 40s stop budget with a
+# 10s margin before leader_elect.py forces termination. Of the 10s left before
+# the kubelet SIGKILLs the container, clearing the label and releasing the lease
+# take at most three LEASE_API_TIMEOUT_SECONDS calls. A plain constant,
+# not an environment read: the operator never sets such a variable, so an
+# AgentPlugin's spec.env would be its only writer, and a value that failed to
+# parse would stop every replica at import.
+GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = 50
+
+# The lease. A standby takes it once renew_time is LEASE_DURATION_SECONDS old,
+# and starts Hermes in the same loop. The leader renews it every loop, which
+# sleeps LEASE_POLL_INTERVAL_SECONDS plus up to LEASE_POLL_JITTER_SECONDS.
+LEASE_DURATION_SECONDS = 15
+LEASE_POLL_INTERVAL_SECONDS = 5
+LEASE_POLL_JITTER_SECONDS = 2
+# Per-request timeout on the API calls made while Hermes drains and at the
+# release after it, on clients built with retries off so that one call is one
+# attempt (urllib3 otherwise retries three times, each with a fresh timeout).
+# Without it a hung call would block the drain loop past the lease's expiry, and
+# Hermes would still be running when a standby starts its own.
+LEASE_API_TIMEOUT_SECONDS = 2
+# A renewal is a read and then a replace.
+LEASE_RENEWAL_MAX_SECONDS = 2 * LEASE_API_TIMEOUT_SECONDS
+# While Hermes drains, it is SIGKILLed once this long passes with no confirmed
+# renewal. The LEASE_DURATION_SECONDS - LEASE_RENEW_DEADLINE_SECONDS left before
+# a standby may take the lease covers a renewal already in flight
+# (LEASE_RENEWAL_MAX_SECONDS) and a second of clock skew between nodes, the same
+# split client-go makes between its renew deadline and lease duration.
+LEASE_RENEW_DEADLINE_SECONDS = 10
 
 # Tradeoff documented explicitly per review:
 # This active/passive failover blackholes traffic during leader transition.
 # The Service selector requires 'kubeagents.io/is-leader=true', which is only carried by the active leader.
 # During failover, there is a window with zero ready endpoints until the new leader acquires the lease and labels itself.
 # This introduces a single point of failure during failovers, rather than request-continuous HA.
+# On SIGTERM the leader keeps renewing the lease until its Hermes exits, then releases it. The
+# hand-off waits for the drain, so a slow drain delays the standby by up to
+# GATEWAY_SHUTDOWN_TIMEOUT_SECONDS, and a standby cannot take the lease while Hermes drains,
+# short of clock skew between nodes larger than the margin LEASE_RENEW_DEADLINE_SECONDS leaves.
+# The steady-state loop's own lease calls carry no timeout, so a hung call there can still
+# outlast the lease while Hermes runs; only the drain and release are bounded.
 
-def update_pod_label(v1, is_leader):
+def update_pod_label(v1, is_leader, request_timeout=None):
     """Stamp or clear the leader label on this pod; True when the API accepted it."""
     try:
         body = {"metadata": {"labels": {"kubeagents.io/is-leader": "true" if is_leader else None}}}
-        v1.patch_namespaced_pod(name=pod_name, namespace=namespace, body=body)
+        bound = {} if request_timeout is None else {"_request_timeout": request_timeout}
+        v1.patch_namespaced_pod(name=pod_name, namespace=namespace, body=body, **bound)
         return True
     except ApiException as e:
         print(f"[LeaderElect] Error patching pod label: {e}", file=sys.stderr, flush=True)
@@ -113,40 +152,120 @@ def reconcile_label(v1, desired, state):
         return desired
     return state
 
+def bounded_api_clients():
+    """Coordination and core clients for the drain and the release, with retries
+    off, so each call's _request_timeout bounds the whole call."""
+    configuration = client.Configuration.get_default_copy()
+    configuration.retries = 0
+    api_client = client.ApiClient(configuration)
+    return client.CoordinationV1Api(api_client), client.CoreV1Api(api_client)
+
+
+def renew_held_lease(coordination_v1):
+    """Renew the lease if this pod still holds it: True when the API accepted
+    the renewal, False when another pod holds it (or nobody does), None when
+    the API could not say. The replace carries the resourceVersion the read
+    returned, so it cannot overwrite a standby that took the lease in between."""
+    try:
+        lease = coordination_v1.read_namespaced_lease(
+            name=lease_name, namespace=namespace, _request_timeout=LEASE_API_TIMEOUT_SECONDS)
+        if lease.spec.holder_identity != pod_name:
+            return False
+        lease.spec.renew_time = datetime.now(timezone.utc)
+        coordination_v1.replace_namespaced_lease(
+            name=lease_name, namespace=namespace, body=lease, _request_timeout=LEASE_API_TIMEOUT_SECONDS)
+        return True
+    except Exception as e:  # noqa: BLE001 -- refused, timed out, unreachable: unconfirmed, and the drain decides
+        print(f"[LeaderElect] Error renewing lease while Hermes drains: {e}", file=sys.stderr, flush=True)
+        return None
+
+
+def stop_hermes_holding_lease(coordination_v1):
+    """SIGTERM Hermes and wait for it to exit, renewing the lease every
+    LEASE_POLL_INTERVAL_SECONDS meanwhile, so no standby starts a second gateway
+    while this one drains. The wait stays on the main thread and the main loop
+    does not run during it, so this is the only renewal there is.
+
+    Hermes is SIGKILLed instead of waited on when the shutdown budget runs out,
+    when the lease no longer names this pod, or when LEASE_RENEW_DEADLINE_SECONDS
+    pass with no confirmed renewal, before a standby may take the lease. In
+    each case two gateways would otherwise run against the same home.
+
+    `coordination_v1` should come from bounded_api_clients()."""
+    global lease_renewed_at
+    process.terminate()
+    deadline = time.monotonic() + GATEWAY_SHUTDOWN_TIMEOUT_SECONDS
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
+            break
+        if lease_renewed_at is None or now >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS:
+            print(f"[{pod_name}] Lease renewal unconfirmed past its deadline, killing Hermes...", flush=True)
+            break
+        # A renewal starts only if it can finish inside the budget, so the kill
+        # and the release after it stay inside the pod's grace period.
+        if now + LEASE_RENEWAL_MAX_SECONDS <= deadline:
+            renewed = renew_held_lease(coordination_v1)
+            if renewed is False:
+                print(f"[{pod_name}] This pod no longer holds the lease, killing Hermes...", flush=True)
+                break
+            if renewed:
+                lease_renewed_at = now
+        # Wake for the next renewal, the budget, or the renew deadline,
+        # whichever comes first; a timeout of 0 still sees an exit.
+        wake_at = min(now + LEASE_POLL_INTERVAL_SECONDS, deadline, lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS)
+        try:
+            process.wait(timeout=max(wake_at - time.monotonic(), 0))
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    process.kill()
+    process.wait()
+
+
 def release_lease_and_exit(signum, frame):
-    global is_shutting_down, process
+    global is_shutting_down
     if is_shutting_down:
         return
     is_shutting_down = True
     print(f"[{pod_name}] Received signal {signum}, shutting down...", flush=True)
-    
-    if process is not None:
-        process.terminate()
-        try:
-            process.wait(timeout=GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
-            process.kill()
-            process.wait()
-    
+
+    coordination_v1 = v1 = None
     try:
         config.load_incluster_config()
-        coordination_v1 = client.CoordinationV1Api()
-        v1 = client.CoreV1Api()
-        
-        lease = coordination_v1.read_namespaced_lease(name=lease_name, namespace=namespace)
+        coordination_v1, v1 = bounded_api_clients()
+    except Exception as e:  # noqa: BLE001 -- Hermes still has to be stopped; the drain treats the lease as unconfirmed
+        print(f"[LeaderElect] Error building API clients: {e}", file=sys.stderr, flush=True)
+
+    # This pod keeps the lease and the leader label until Hermes has exited, so
+    # a standby cannot start a second gateway while this one drains.
+    if process is not None:
+        stop_hermes_holding_lease(coordination_v1)
+
+    # Hermes is gone: clear the label, then hand the lease back so a standby
+    # takes it on its next loop rather than after LEASE_DURATION_SECONDS. The
+    # label goes whoever holds the lease, since it means this pod's Hermes
+    # answers.
+    try:
+        update_pod_label(v1, False, request_timeout=LEASE_API_TIMEOUT_SECONDS)
+    except Exception as e:  # noqa: BLE001 -- the lease release below must still run
+        print(f"[LeaderElect] Error clearing pod label: {e}", file=sys.stderr, flush=True)
+    try:
+        lease = coordination_v1.read_namespaced_lease(
+            name=lease_name, namespace=namespace, _request_timeout=LEASE_API_TIMEOUT_SECONDS)
         if lease.spec.holder_identity == pod_name:
             print(f"[{pod_name}] Releasing lease...", flush=True)
             lease.spec.holder_identity = None
-            coordination_v1.replace_namespaced_lease(name=lease_name, namespace=namespace, body=lease)
-            update_pod_label(v1, False)
+            coordination_v1.replace_namespaced_lease(
+                name=lease_name, namespace=namespace, body=lease, _request_timeout=LEASE_API_TIMEOUT_SECONDS)
     except Exception as e:
         print(f"[LeaderElect] Error releasing lease: {e}", file=sys.stderr, flush=True)
-            
+
     sys.exit(0)
 
 def main():
-    global process, is_shutting_down, label_state
+    global process, is_shutting_down, label_state, lease_renewed_at
 
     # Every replica > 1 deployment reaches Hermes through this file instead of
     # agent-entrypoint: the operator sets a container `command`, which overrides
@@ -166,12 +285,11 @@ def main():
     config.load_incluster_config()
     coordination_v1 = client.CoordinationV1Api()
     v1 = client.CoreV1Api()
-    
-    lease_duration_seconds = 15
-    base_poll_interval = 5
+    drain_coordination_v1, _ = bounded_api_clients()
     
     while not is_shutting_down:
         now = datetime.now(timezone.utc)
+        loop_started = time.monotonic()
         holder = None
         
         try:
@@ -186,7 +304,7 @@ def main():
                     holder = None
             else:
                 renew_time = lease.spec.renew_time
-                duration = lease.spec.lease_duration_seconds or lease_duration_seconds
+                duration = lease.spec.lease_duration_seconds or LEASE_DURATION_SECONDS
                 
                 is_expired = False
                 if renew_time:
@@ -217,7 +335,7 @@ def main():
                     metadata=client.V1ObjectMeta(name=lease_name, namespace=namespace),
                     spec=client.V1LeaseSpec(
                         holder_identity=pod_name,
-                        lease_duration_seconds=lease_duration_seconds,
+                        lease_duration_seconds=LEASE_DURATION_SECONDS,
                         acquire_time=now,
                         renew_time=now,
                         lease_transitions=0
@@ -232,6 +350,10 @@ def main():
                 print(f"[LeaderElect] Error reading lease: {e}", file=sys.stderr, flush=True)
 
         if holder == pod_name:
+            # Every path that sets holder to this pod went through an accepted
+            # write, so the lease is good until LEASE_DURATION_SECONDS after the
+            # loop began; a drain counts from here.
+            lease_renewed_at = loop_started
             if process is None:
                 print(f"[{pod_name}] Acquired leadership! Starting Hermes...", flush=True)
                 process = subprocess.Popen(HERMES_COMMAND)
@@ -241,13 +363,7 @@ def main():
         else:
             if process is not None:
                 print(f"[{pod_name}] Lost leadership! Stopping Hermes...", flush=True)
-                process.terminate()
-                try:
-                    process.wait(timeout=GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
-                except subprocess.TimeoutExpired:
-                    print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
-                    process.kill()
-                    process.wait()
+                stop_hermes_holding_lease(drain_coordination_v1)
                 process = None
 
         # The label, every loop: set once this pod leads and its Hermes answers,
@@ -255,8 +371,8 @@ def main():
         running = process is not None and process.poll() is None
         label_state = reconcile_label(v1, desired_label(holder, running, running and hermes_answers()), label_state)
 
-        # Jitter to avoid flapping: sleep for base + 0 to 2 seconds
-        time.sleep(base_poll_interval + random.uniform(0, 2))
+        # Jitter to avoid flapping: sleep for the interval plus up to the jitter
+        time.sleep(LEASE_POLL_INTERVAL_SECONDS + random.uniform(0, LEASE_POLL_JITTER_SECONDS))
 
 if __name__ == "__main__":
     main()

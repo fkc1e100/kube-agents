@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"regexp"
+	"strconv"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +35,32 @@ const (
 	hermesDefaultCronDrainSeconds     = 30
 	hermesCronDrainCleanupReserveSecs = 10
 )
+
+// supervisorShutdownTimeoutPattern reads the drain budget leader_elect.py gives
+// Hermes above one replica, and supervisorAPITimeoutPattern the timeout on each
+// of the calls that clear the label and release the lease after it, from the
+// copy embedded in the operator.
+var (
+	supervisorShutdownTimeoutPattern = regexp.MustCompile(`(?m)^GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = (\d+)$`)
+	supervisorAPITimeoutPattern      = regexp.MustCompile(`(?m)^LEASE_API_TIMEOUT_SECONDS = (\d+)$`)
+)
+
+// supervisorReleaseCalls is how many API calls follow the drain: the label
+// clear, then the lease read and replace.
+const supervisorReleaseCalls = 3
+
+func supervisorConstant(t *testing.T, pattern *regexp.Regexp, name string) int64 {
+	t.Helper()
+	m := pattern.FindStringSubmatch(leaderElectScript)
+	if m == nil {
+		t.Fatalf("leader_elect.py no longer declares %s as an integer constant", name)
+	}
+	value, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		t.Fatalf("%s = %q: %v", name, m[1], err)
+	}
+	return value
+}
 
 func TestGatewayTerminationGracePeriodCoversStopPath(t *testing.T) {
 	if gatewayTerminationGracePeriodSeconds < hermesDefaultCronDrainSeconds+hermesCronDrainCleanupReserveSecs {
@@ -61,5 +89,23 @@ func TestGatewayPodTemplateSetsTerminationGracePeriod(t *testing.T) {
 	got = sts.Spec.Template.Spec.TerminationGracePeriodSeconds
 	if got == nil || *got != gatewayTerminationGracePeriodSeconds {
 		t.Errorf("StatefulSet terminationGracePeriodSeconds = %v, want %d", got, gatewayTerminationGracePeriodSeconds)
+	}
+}
+
+// Above one replica leader_elect.py supervises Hermes and SIGKILLs it after
+// its own budget. That budget has to cover Hermes' stop path, and the budget
+// plus the calls that clear the leader label and release the lease have to end
+// before the kubelet's grace does, or the supervisor is killed before the
+// release and a standby waits out the lease.
+func TestSupervisorShutdownBudgetNestsInsideGracePeriod(t *testing.T) {
+	budget := supervisorConstant(t, supervisorShutdownTimeoutPattern, "GATEWAY_SHUTDOWN_TIMEOUT_SECONDS")
+	apiTimeout := supervisorConstant(t, supervisorAPITimeoutPattern, "LEASE_API_TIMEOUT_SECONDS")
+	if budget < hermesDefaultCronDrainSeconds+hermesCronDrainCleanupReserveSecs {
+		t.Errorf("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = %d, want >= %d (cron drain + cleanup reserve)",
+			budget, hermesDefaultCronDrainSeconds+hermesCronDrainCleanupReserveSecs)
+	}
+	if total := budget + supervisorReleaseCalls*apiTimeout; total >= gatewayTerminationGracePeriodSeconds {
+		t.Errorf("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS + %d x LEASE_API_TIMEOUT_SECONDS = %d, want < gatewayTerminationGracePeriodSeconds (%d)",
+			supervisorReleaseCalls, total, gatewayTerminationGracePeriodSeconds)
 	}
 }
