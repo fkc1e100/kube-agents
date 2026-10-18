@@ -85,13 +85,16 @@ class FakeGitHub:
         return item
 
 
-def _run(env: dict[str, str], gh: FakeGitHub, kubectl_script: list[str]) -> tuple[AgentResult, dict[str, Any], list[list[str]]]:
+def _run(env: dict[str, str], gh: FakeGitHub, kubectl_script: list[Any]) -> tuple[AgentResult, dict[str, Any], list[list[str]]]:
     calls: list[list[str]] = []
     script = list(kubectl_script)
 
     def run_kubectl(args: list[str]) -> str:
         calls.append(args)
-        return script.pop(0) if len(script) > 1 else script[0]
+        item = script.pop(0) if len(script) > 1 else script[0]
+        if isinstance(item, BaseException):
+            raise item
+        return item
 
     clock = FakeClock()
     result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
@@ -242,6 +245,108 @@ def test_sync_timeout_when_argo_never_reaches_merge_sha() -> None:
     _, record, _ = _run(ENV, gh, [_app("Synced", "stale", "Healthy")])
     assert record["outcome"] == gitops.OUTCOME_SYNC_TIMEOUT
     assert record["synced_revision"] == "stale"
+
+
+HEALTHY = _app("Synced", MERGE_SHA, "Healthy")
+SOAK_ENV = {**ENV, "GITOPS_SOAK_SECONDS": "30"}
+
+
+def test_without_a_soak_the_wait_ends_at_the_first_healthy_reading() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, calls = _run(ENV, gh, [HEALTHY, _app("Synced", MERGE_SHA, "Degraded")])
+    assert record["outcome"] == gitops.OUTCOME_MERGED
+    assert len(calls) == 1, "no soak configured: Argo is not read again after Synced+Healthy"
+    assert "soak_s" not in record and "soak_revision" not in record
+
+
+def test_a_soak_that_stays_healthy_is_merged() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY])
+    assert record["outcome"] == gitops.OUTCOME_MERGED
+    assert record["soak_s"] == 30 and record["soak_revision"] == MERGE_SHA
+    # One read settles phase 3; a 30s soak at a 10s poll reads three more times.
+    assert len(calls) == 4
+    assert record["health"] == "Healthy" and "reason" not in record
+
+
+def test_health_that_regresses_during_the_soak_is_not_merged() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, HEALTHY, _app("Synced", MERGE_SHA, "Degraded")])
+    assert record["outcome"] == gitops.OUTCOME_SOAK_REGRESSED
+    assert record["health"] == "Degraded" and record["soak_revision"] == MERGE_SHA
+    assert record["reason"] == f"20s into the 30s soak: sync Synced at {MERGE_SHA[:8]}, health Degraded"
+    # The wait stops at the regression; it does not read out the rest of the soak.
+    assert len(calls) == 3
+
+
+def test_argo_leaving_the_settled_revision_during_the_soak_is_a_regression() -> None:
+    later = "49d52a67afe17cc7ad85edec953626b67bbccf3a"
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, _ = _run(SOAK_ENV, gh, [HEALTHY, _app("Synced", later, "Healthy")])
+    assert record["outcome"] == gitops.OUTCOME_SOAK_REGRESSED
+    assert record["synced_revision"] == later and record["soak_revision"] == MERGE_SHA
+
+
+def test_the_last_soak_poll_lands_on_the_soak_end() -> None:
+    sleeps: list[float] = []
+    clock = FakeClock()
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.sleep(seconds)
+
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
+    env = {**ENV, "GITOPS_SOAK_SECONDS": "25"}
+    record = gitops.await_fix_cycle(result, env=env, fetch_json=gh, run_kubectl=lambda a: HEALTHY, sleep=sleep, clock=clock)
+    assert record is not None and record["outcome"] == gitops.OUTCOME_MERGED
+    assert sleeps == [10, 10, 5]
+
+
+def test_a_failed_read_during_the_soak_is_retried() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, OSError("kubectl: connection refused"), HEALTHY])
+    assert record["outcome"] == gitops.OUTCOME_MERGED
+    assert record["poll_errors"] == 1 and "connection refused" in record["last_error"]
+    assert len(calls) == 4
+
+
+def test_a_soak_whose_end_is_never_read_gives_up_as_sync_timeout() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, OSError("kubectl: connection refused")])
+    assert record["outcome"] == gitops.OUTCOME_SYNC_TIMEOUT
+    assert record["reason"] == "no Argo read at the end of the soak"
+    # 30s of soak plus the 60s sync window to read its end, at a 10s poll.
+    assert len(calls) == 1 + 3 + 6
+    assert record["poll_errors"] == 9
+
+
+def test_a_malformed_application_read_during_the_soak_is_a_poll_error() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, _ = _run(SOAK_ENV, gh, [HEALTHY, "not json", HEALTHY])
+    assert record["outcome"] == gitops.OUTCOME_MERGED
+    assert record["poll_errors"] == 1
+
+
+def test_a_soak_that_is_not_a_number_is_an_error() -> None:
+    result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
+    with pytest.raises(ValueError, match="GITOPS_SOAK_SECONDS"):
+        gitops.await_fix_cycle(result, env={**ENV, "GITOPS_SOAK_SECONDS": "90s"}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_a_soak_that_is_not_finite_is_an_error_not_an_endless_wait(value: str) -> None:
+    result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
+    with pytest.raises(ValueError, match="finite"):
+        gitops.await_fix_cycle(result, env={**ENV, "GITOPS_SOAK_SECONDS": value}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
+
+
+def test_an_application_with_no_status_during_the_soak_is_a_regression_not_a_failed_read() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, _ = _run(SOAK_ENV, gh, [HEALTHY, json.dumps({"status": None})])
+    assert record["outcome"] == gitops.OUTCOME_SOAK_REGRESSED
+    assert record["poll_errors"] == 0
+    assert record["reason"] == "10s into the 30s soak: sync unknown at no revision, health unknown"
 
 
 def test_poll_failure_is_retried_until_the_deadline_not_raised() -> None:
