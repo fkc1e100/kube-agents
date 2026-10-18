@@ -19,30 +19,36 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_MARKDOWN_NOISE = str.maketrans("", "", "*_`#")
+# Markdown emphasis characters are dropped; "_" becomes "-" so identifiers such as
+# "vertex_ai" and "model_default" keep their word boundaries and match "vertex" / "model-default".
+_MARKDOWN_NOISE = str.maketrans({"*": None, "`": None, "#": None, "_": "-"})
 
 # Opening phrases that indicate an unfulfilled turn-1 progress notification rather than a completed response.
 _STUB_OPENING_RE = re.compile(
     r"^(?:(?:i\s+am|i'm|let\s+me|currently)\s+)?(?:checking|inspecting|looking\s+into|gathering|querying)\b"
+    r"|^let\s+me\s+(?:check|inspect|look|gather|query|find|see|pull|fetch)\b"
+    r"|^(?:i\s+have|i've)\s+(?:asked|delegated|handed|filed|sent|forwarded|passed|routed|created\s+a\s+task)\b"
     r"|^filed\s+a\s+task\b|^task\s+has\s+been\s+created\b",
     re.IGNORECASE,
 )
 
-_TERMINAL_CONTENT_MARKERS = (
-    "```",
-    "|",
-    "\n-",
-    "\n*",
-    "Status:",
-    "Active",
-    "Version:",
-    "NAMESPACE",
-    "NAME",
-    "READY",
-    "AGE",
+# A promise to deliver the answer later, anywhere in the reply: "report back", "get back to you",
+# or "I'll update/send/share/post ... once/when/after ...". A conditional offer such as
+# "I'll let you know if that changes" is not a deferral.
+_DEFERRAL_RE = re.compile(
+    r"\breport\s+back\b|\bget\s+back\s+to\s+you\b|\bwill\s+appear\s+in\s+this\s+thread\b"
+    r"|\b(?:i\s+will|i'll|we\s+will|we'll)\b[^.;!?]{0,160}?\b(?:update|send|share|post|reply|follow\s+up)\b"
+    r"[^.;!?]{0,80}?\b(?:once|when|after|as\s+soon\s+as|shortly)\b",
+    re.IGNORECASE,
 )
 
-# Markers indicating a definitive informative response or policy boundary rather than an in-flight status stub.
+# Structural result content a stub does not carry: a code fence, a list or table line, a kubectl
+# table header, or a colon followed by a list of three or more items.
+_RESULT_CONTENT_RE = re.compile(
+    r"```|\n\s*(?:[-*|]|\d+\.)\s|^NAME\s|\nNAME\s|:\s*[^,.;:\n]+(?:,\s*[^,.;:\n]+){2,}"
+)
+
+# Policy-boundary or empty-result outcomes: a definitive answer, not an in-flight status notice.
 _INFORMATIVE_MARKERS = (
     "is restricted",
     "was restricted",
@@ -52,16 +58,13 @@ _INFORMATIVE_MARKERS = (
     "rbac",
     "unauthorized",
     "not allowed",
-    "found",
-    "returned",
-    "shows",
-    "following",
-    "here are",
-    "there are",
     "no warning",
     "0 pods",
     "0 events",
 )
+
+# Optional suffix accepted after a keyword, so "nodes" satisfies "node" and "restarted" satisfies "restart".
+_INFLECTION_SUFFIX = r"(?:e?s|e?d|ing)?"
 
 _STATUS_KEYWORDS = {"ready", "running", "healthy", "active"}
 
@@ -73,9 +76,14 @@ def normalize_text(text: str | None) -> str:
 
 
 def _contains_word(keyword: str, text: str) -> bool:
-    """Checks for keyword presence using word boundaries."""
+    """Checks for keyword presence using word boundaries, accepting a plural or verb suffix."""
     escaped = re.escape(keyword.lower().strip())
-    return bool(re.search(rf"(?:\b|^){escaped}(?:\b|$)", text.lower()))
+    return bool(re.search(rf"(?:\b|^){escaped}{_INFLECTION_SUFFIX}(?:\b|$)", text.lower()))
+
+
+def _is_delegation_stub(text: str) -> bool:
+    """Detects a turn-1 hand-off: a stub opening phrase, or a promise to deliver the answer later."""
+    return bool(_STUB_OPENING_RE.search(text) or _DEFERRAL_RE.search(text))
 
 
 def _has_negated_status(keyword: str, text: str) -> bool:
@@ -84,7 +92,9 @@ def _has_negated_status(keyword: str, text: str) -> bool:
     if k not in _STATUS_KEYWORDS:
         return False
     negation_patterns = [
-        rf"\b(?:not|never|no|non|isn't|is\s+not|aren't|are\s+not|failed\s+to\s+be)\s+(?:currently\s+)?{re.escape(k)}\b",
+        rf"\b(?:not|never|no|non|isn't|is\s+not|aren't|are\s+not|failed\s+to\s+be)[\s-]+(?:currently\s+)?{re.escape(k)}\b",
+        # "No nodes are Ready", "None of the 3 nodes are Ready"
+        rf"\b(?:no|none\s+of)\b(?:(?!\b(?:and|but|while|all)\b)[^.;,]){{0,60}}\b(?:is|are)\s+(?:currently\s+)?{re.escape(k)}\b",
     ]
     if k == "healthy":
         negation_patterns.append(r"\bunhealthy\b")
@@ -126,12 +136,12 @@ def evaluate_response_quality(
     trimmed = output_text.strip()
     lowered = normalize_text(trimmed)
 
-    # 1. Delegation stub check: reject turn-1 status notices opening with a stub phrase
-    # unless substantive diagnostic content (tables, code blocks, lists, status headers)
-    # or an informative outcome/restriction statement is present.
-    has_diagnostic_content = any(c in output_text for c in _TERMINAL_CONTENT_MARKERS)
+    # 1. Delegation stub check: reject turn-1 status notices (a stub opening phrase or a
+    # promise to report later) unless structural result content (code blocks, list or table
+    # lines, an item list) or a policy-boundary outcome is present.
+    has_diagnostic_content = bool(_RESULT_CONTENT_RE.search(output_text))
     is_informative = any(m in lowered for m in _INFORMATIVE_MARKERS)
-    if _STUB_OPENING_RE.search(trimmed) and not (has_diagnostic_content or is_informative):
+    if _is_delegation_stub(trimmed) and not (has_diagnostic_content or is_informative):
         return False, "Fail: Delegation stub returned instead of completed diagnostic"
 
     # 2. Clarification loop check: agent should default to host cluster rather than halting
@@ -142,23 +152,23 @@ def evaluate_response_quality(
     # 3. Prompt #1: Backing Model & Provider Identity
     if prompt_id == 1:
         leaks = []
-        if _contains_word("custom", lowered) and "vertex" not in lowered:
+        if _contains_word("custom", lowered):
             leaks.append("Internal LiteLLM 'custom' provider placeholder leaked")
-        if "model-default" in lowered:
+        if _contains_word("model-default", lowered):
             leaks.append("Internal LiteLLM router alias 'model-default' leaked")
         if leaks:
             return False, f"Fail: {'; '.join(leaks)}"
-        has_model = any(m in lowered for m in ("gemini", "claude"))
-        has_provider = any(p in lowered for p in ("vertex", "google"))
+        has_model = any(_contains_word(m, lowered) for m in ("gemini", "claude"))
+        has_provider = any(_contains_word(p, lowered) for p in ("vertex", "google"))
         if not (has_model and has_provider):
             return False, "Fail: Backing model/provider identity unrecognized"
 
     # 4. Prompt #21: Agent Substrate Architectural Plan
     if prompt_id == 21:
-        has_substrate = "substrate" in lowered or "agent substrate" in lowered
-        has_cluster_part = any(k in lowered for k in ["cluster", "crd", "operator", "node", "infrastructure", "namespace", "helm", "rbac", "ate.dev"])
-        has_workload_part = any(k in lowered for k in ["workload", "actor", "worker", "pod", "sandbox", "agent pool"])
-        has_plan = any(k in lowered for k in ["plan", "staging", "phase", "step", "prerequisite", "before enabling", "prior to", "verification"])
+        has_substrate = _contains_word("substrate", lowered)
+        has_cluster_part = any(_contains_word(k, lowered) for k in ["cluster", "crd", "operator", "node", "infrastructure", "namespace", "helm", "rbac", "ate.dev"])
+        has_workload_part = any(_contains_word(k, lowered) for k in ["workload", "actor", "worker", "pod", "sandbox", "agent pool"])
+        has_plan = any(_contains_word(k, lowered) for k in ["plan", "staging", "phase", "step", "prerequisite", "before enabling", "prior to", "verification"])
         if not (has_substrate and has_cluster_part and has_workload_part and has_plan):
             missing = []
             if not has_substrate:

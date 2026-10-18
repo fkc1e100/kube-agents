@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from typing import Any
@@ -27,6 +28,7 @@ import urllib.request
 CURRENT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = CURRENT_DIR / "datasets" / "kube_agents_eval_dataset.jsonl"
 DEFAULT_MODEL = "google/gemini-3.5-flash-lite"
+REQUIRED_RECORD_KEYS = ("id", "task_id", "input")
 
 try:
     from inspect_ai import Task, task
@@ -34,7 +36,11 @@ try:
     from inspect_ai.model import ChatMessageAssistant, ChatMessageSystem, ModelOutput
     from inspect_ai.solver import Generate, TaskState, generate, solver, system_message, use_tools
     from inspect_ai.tool import Tool, tool
+
+    _INSPECT_AVAILABLE = True
 except ImportError:
+    _INSPECT_AVAILABLE = False
+
     # Minimal fallback dummy decorators when inspect_ai is not installed
     def task(fn):
         return fn
@@ -84,12 +90,14 @@ except ImportError:
     Tool = Any
 
 try:
-    from .scorers import kube_agents_cx_scorer
+    # Sibling import: Inspect loads this file by path, so it has no parent package.
+    from scorers import kube_agents_cx_scorer
 except ImportError:
-    try:
-        from scorers import kube_agents_cx_scorer
-    except ImportError:
-        kube_agents_cx_scorer = None
+    # scorers.py defines kube_agents_cx_scorer only when inspect_ai imports; with
+    # inspect_ai present, a failed import is a real error and must not yield unscored tasks.
+    if _INSPECT_AVAILABLE:
+        raise
+    kube_agents_cx_scorer = None
 
 
 def _resolve_model():
@@ -105,13 +113,17 @@ def _resolve_model():
 
 def _load_samples_for_task(task_id: str) -> list[Sample]:
     samples = []
-    if not DATASET_PATH.exists():
-        return samples
     with open(DATASET_PATH, encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             if not line.strip():
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{DATASET_PATH}:{line_no}: malformed eval record: {exc}") from exc
+            missing = [k for k in REQUIRED_RECORD_KEYS if k not in data]
+            if missing:
+                raise ValueError(f"{DATASET_PATH}:{line_no}: eval record missing {missing}")
             if data.get("task_id") == task_id:
                 samples.append(
                     Sample(
@@ -128,6 +140,8 @@ def _load_samples_for_task(task_id: str) -> list[Sample]:
                         },
                     )
                 )
+    if not samples:
+        raise ValueError(f"{DATASET_PATH}: no eval records for task_id {task_id!r}")
     return samples
 
 
@@ -140,6 +154,12 @@ _FLAG_ARGS = {
     "-n", "--namespace", "-l", "--selector", "-c", "--container",
     "--context", "--cluster", "--user", "--kubeconfig", "-s", "--server", "-f", "--filename",
 }
+_DENIED_FLAGS = {
+    "-s", "--server", "--kubeconfig", "--token", "--as", "--as-group", "--as-uid", "--username",
+    "--password", "--certificate-authority", "--client-certificate", "--client-key",
+    "--insecure-skip-tls-verify", "--raw",
+}
+_DENIED_RESOURCES = {"secret", "secrets"}
 
 
 @tool
@@ -162,6 +182,15 @@ def kubectl_inspect() -> Tool:
         for t in tokens[1:]:
             if t.lower() in _MUTATING_SUBCOMMANDS:
                 return f"Error: Mutating subcommand '{t}' is prohibited."
+
+        # Connection and identity overrides would send the caller's kubeconfig credentials to a
+        # server the model chooses or impersonate another user; Secret objects stay unreadable.
+        for t in tokens[1:]:
+            flag = t.split("=", 1)[0]
+            if flag in _DENIED_FLAGS:
+                return f"Error: Flag '{flag}' is prohibited."
+            if any(part in _DENIED_RESOURCES for part in re.split(r"[,/.]", t.lower())):
+                return f"Error: Reading '{t}' is prohibited."
 
         # Extract subcommand with flag-argument awareness
         subcmd = None
