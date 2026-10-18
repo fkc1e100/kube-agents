@@ -26,33 +26,37 @@ import subprocess
 import sys
 from typing import Any
 import urllib.request
+import uuid
 
 CURRENT_DIR = Path(__file__).resolve().parent
 DATASET_PATH = CURRENT_DIR / "datasets" / "kube_agents_eval_dataset.jsonl"
 DEFAULT_MODEL = "google/gemini-3.5-flash-lite"
 REQUIRED_RECORD_KEYS = ("id", "task_id", "input")
+RESPONSES_PATH = "/v1/responses"
+REPLY_EXCERPT_CHARS = 200
 
 _SCRIPTS_DIR = CURRENT_DIR.parent / "agents" / "platform" / "scripts"
-if _SCRIPTS_DIR.is_dir() and str(_SCRIPTS_DIR) not in sys.path:
+if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-try:
-    import command_policy
-except ImportError:
-    command_policy = None
+# The repository's read-only kubectl policy is required: without it the tool's own checks below
+# would be the only gate, and they do not cover shorthand runs or file-writing flags.
+import command_policy  # noqa: E402
 
 try:
     from inspect_ai import Task, task
     from inspect_ai.dataset import MemoryDataset, Sample
     from inspect_ai.model import ChatMessageAssistant, ChatMessageSystem, ModelOutput
-    from inspect_ai.solver import Generate, TaskState, generate, solver, system_message, use_tools
+    from inspect_ai.solver import Generate, TaskState, solver, use_tools
     from inspect_ai.tool import Tool, tool
 
     _INSPECT_AVAILABLE = True
 except ImportError:
     _INSPECT_AVAILABLE = False
 
-    # Minimal fallback dummy decorators when inspect_ai is not installed
+    # Pass-through decorators so the unit tests can import the tool and the task names without
+    # inspect_ai. Building samples or tasks needs Inspect's types, so only the loader's error
+    # paths run without it.
     def task(fn):
         return fn
 
@@ -62,39 +66,6 @@ except ImportError:
     def solver(fn):
         return fn
 
-    class Sample:
-        def __init__(self, input="", target="", id=0, metadata=None):
-            self.input = input
-            self.target = target
-            self.id = id
-            self.metadata = metadata or {}
-
-    class MemoryDataset(list):
-        def __init__(self, samples=None):
-            super().__init__(samples or [])
-
-    class Task:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-
-    class ModelOutput:
-        @classmethod
-        def from_content(cls, model="", content=""):
-            return cls(model=model, content=content)
-
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-
-    class ChatMessageAssistant:
-        def __init__(self, content="", **kwargs):
-            self.content = content
-
-    class ChatMessageSystem:
-        def __init__(self, content="", **kwargs):
-            self.content = content
-
-    generate = None
-    system_message = None
     use_tools = None
     Generate = Any
     TaskState = Any
@@ -191,11 +162,10 @@ def kubectl_inspect() -> Tool:
         if not tokens or tokens[0] != "kubectl":
             return "Error: Command must start with 'kubectl'."
 
-        # 1. Consult repository command policy first if available
-        if command_policy is not None:
-            decision = command_policy.evaluate(tokens)
-            if not decision.allowed:
-                return f"Error: {decision.message}"
+        # 1. Consult the repository command policy first.
+        decision = command_policy.evaluate(tokens)
+        if not decision.allowed:
+            return f"Error: {decision.message}"
 
         # 2. Guard against mutating subcommands anywhere in the command arguments
         for t in tokens[1:]:
@@ -242,6 +212,36 @@ def kubectl_inspect() -> Tool:
     return execute
 
 
+def _conversation_id(sample_id: Any, epoch: int) -> str:
+    """Returns a fresh conversation id for one gateway call.
+
+    The gateway keeps state per conversation id, so a re-run, another epoch, or an Inspect retry
+    of the same sample must not continue an earlier call's conversation.
+    """
+    return f"eval_{sample_id}_{epoch}_{uuid.uuid4().hex}"
+
+
+def _post_json(req: urllib.request.Request, timeout: float) -> Any:
+    """Sends a request and returns its decoded JSON body; runs in a worker thread."""
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _responses_text(data: Any) -> str:
+    """Joins the assistant's output_text chunks from a /v1/responses reply."""
+    items = data.get("output") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise RuntimeError(f"kube-agents gateway reply has no 'output' list: {str(data)[:REPLY_EXCERPT_CHARS]}")
+    texts = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for chunk in item.get("content") or []:
+            if isinstance(chunk, dict) and chunk.get("type") == "output_text":
+                texts.append(chunk.get("text", ""))
+    return "\n".join(texts).strip()
+
+
 @solver
 def kube_agents_solver(
     sys_prompt: str | None = None,
@@ -249,19 +249,19 @@ def kube_agents_solver(
     timeout: float = 60.0,
 ):
     """Inspect AI solver that dispatches prompts to running kube-agents or executes inspection tools."""
-    tool_solver = use_tools([kubectl_inspect()]) if use_tools and use_tools != Any else None
+    tool_solver = use_tools([kubectl_inspect()]) if use_tools else None
 
     async def solve(state: TaskState, gen: Generate) -> TaskState:
         ep = endpoint or os.environ.get("KUBE_AGENTS_ENDPOINT") or os.environ.get("AGENT_API_URL")
         if ep:
             prompt = state.user_prompt.text
             url = ep.rstrip("/")
-            if not url.endswith(("/v1/responses", "/api/chat")):
-                url = f"{url}/v1/responses"
+            if not url.endswith(RESPONSES_PATH):
+                url = f"{url}{RESPONSES_PATH}"
             sample_id = getattr(state, "sample_id", getattr(state, "id", "default"))
             payload = {
                 "model": os.environ.get("AGENT_MODEL_NAME", "model-default"),
-                "conversation": f"eval_{sample_id}",
+                "conversation": _conversation_id(sample_id, getattr(state, "epoch", 1)),
                 "input": prompt,
                 "message": prompt,
             }
@@ -275,32 +275,19 @@ def kube_agents_solver(
             if token:
                 req.add_header("Authorization", f"Bearer {token}")
 
+            # A transport failure raises, so Inspect records a sample error instead of scoring it.
             try:
-                resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=timeout)
-                data = json.loads(resp.read().decode("utf-8"))
-                if isinstance(data, dict):
-                    out_items = data.get("output")
-                    if isinstance(out_items, list):
-                        texts = []
-                        for item in out_items:
-                            if isinstance(item, dict):
-                                for c in item.get("content", []):
-                                    if isinstance(c, dict) and c.get("type") == "output_text":
-                                        texts.append(c.get("text", ""))
-                        text = "\n".join(texts).strip()
-                    else:
-                        text = str(data.get("response") or data.get("output") or data.get("text") or "")
-                else:
-                    text = str(data)
-
-                state.output = ModelOutput.from_content(model="kube-agents", content=text)
-                state.messages.append(ChatMessageAssistant(content=text))
-                state.completed = True
-                return state
+                data = await asyncio.to_thread(_post_json, req, timeout)
             except Exception as exc:
                 raise RuntimeError(f"Failed to reach kube-agents gateway at {url}: {exc}") from exc
+            text = _responses_text(data)
 
-        if sys_prompt and ChatMessageSystem and ChatMessageSystem != Any:
+            state.output = ModelOutput.from_content(model="kube-agents", content=text)
+            state.messages.append(ChatMessageAssistant(content=text))
+            state.completed = True
+            return state
+
+        if sys_prompt:
             state.messages.insert(0, ChatMessageSystem(content=sys_prompt))
         if tool_solver:
             state = await tool_solver(state, gen)

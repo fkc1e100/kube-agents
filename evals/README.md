@@ -63,6 +63,16 @@ cd evals
 uv run inspect eval kube_agents_tasks.py --model google/gemini-3.5-flash-lite
 ```
 
+Without an endpoint, the tasks run the given model with a read-only `kubectl_inspect` tool. That
+tool imports the repository's kubectl policy from `agents/platform/scripts/command_policy.py`, so run
+the suite from a full checkout, not from a copy of `evals/` alone.
+
+To send the prompts to a running install instead, set `KUBE_AGENTS_ENDPOINT` (or `AGENT_API_URL`)
+to the gateway base URL and `PLATFORM_AGENT_TOKEN` to its bearer token. The solver posts each prompt
+to `/v1/responses` with a fresh conversation id. A transport failure, or a reply with no `output`
+list, is recorded as a sample error rather than scored. The solver makes one call per prompt and
+does not wait for work the front door delegates.
+
 ### Running Discovery Manually
 
 ```bash
