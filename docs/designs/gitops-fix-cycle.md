@@ -350,9 +350,10 @@ delegated-work wait, active only when `GITOPS_RUN_BRANCH` is set:
    `sync_timeout`. The head is re-read each poll because it can move after the merge (it
    did, in run 7); `head_moved_after_merge` is recorded when it does.
 4. Only when `GITOPS_SOAK_SECONDS` is above zero (default 0, no soak): keep polling the
-   Application for that many seconds. Every successful read must still show `Synced` at
-   the revision that settled in step 3 and `Healthy`; the first that does not ends the
-   wait as `soak_regressed`, with the reading in `reason`. The soak passes on a
+   Application for that many seconds. Every successful read (an `Unknown` sync or health
+   status or malformed status object is counted in `poll_errors` and retried) must still
+   show `Synced` at the revision that settled in step 3 and `Healthy`; the first that does
+   not ends the wait as `soak_regressed`, with the reading in `reason`. The soak passes on a
    successful read at or after its end; if reads keep failing past the end, that read is
    retried for up to `GITOPS_SYNC_TIMEOUT` more seconds, then `sync_timeout`. A healthy
    reading at the sync is one moment: a rollout whose new pods pass readiness once and

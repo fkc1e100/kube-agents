@@ -42,9 +42,10 @@ Three phases, each bounded, and an optional fourth:
    against the recovered cluster: ``merged``.
 4. **Soak** (only when ``GITOPS_SOAK_SECONDS`` is above zero): the Application
    is polled for that long and must stay ``Synced`` at the revision that
-   settled in phase 3 and ``Healthy`` throughout. A successful read that is
-   not is ``soak_regressed``, so a fix that comes up and then falls over is
-   not recorded as ``merged``.
+   settled in phase 3 and ``Healthy`` throughout (an ``Unknown`` sync or health
+   status or malformed status object is counted in ``poll_errors`` and retried).
+   A successful read that is not is ``soak_regressed``, so a fix that comes up
+   and then falls over is not recorded as ``merged``.
 
 The outcome and its evidence land in ``result.metadata["gitops"]`` and, because
 devops-bench persists ``trajectory`` but not ``metadata``, in one harness-authored
