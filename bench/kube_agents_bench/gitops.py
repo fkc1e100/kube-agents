@@ -114,6 +114,7 @@ DEFAULT_SOAK_S = 0.0
 # reason quote.
 ARGO_SYNCED = "Synced"
 ARGO_HEALTHY = "Healthy"
+ARGO_UNKNOWN = "Unknown"
 SHORT_SHA_LEN = 8
 READ_APPLICATION = "reading the Argo Application"
 HTTP_TIMEOUT_S = 30
@@ -444,13 +445,26 @@ def await_fix_cycle(
             return finish(OUTCOME_SYNC_TIMEOUT, reason="no Argo read at the end of the soak")
         sleep(min(poll, soak_end - now) if now < soak_end else poll)
         # ``or {}``: an Application with no status is a reading that is not
-        # Synced, not a failed read; None is reserved for the failure.
-        status = attempt(READ_APPLICATION, lambda: json.loads(run_kubectl(args)).get("status") or {})
+        # Synced, not a failed read; None is reserved for the failure. A reading
+        # whose sync.status is Unknown is Argo reporting that its own comparison
+        # failed (repo fetch or manifest error), not a cluster state change, so
+        # _read_soak_status raises ValueError for attempt() to count and retry.
+        def _read_soak_status() -> dict[str, Any]:
+            st = json.loads(run_kubectl(args)).get("status") or {}
+            if (st.get("sync") or {}).get("status") == ARGO_UNKNOWN:
+                raise ValueError("Argo Application sync.status is Unknown")
+            return st
+
+        status = attempt(READ_APPLICATION, _read_soak_status)
         if status is None:
             continue
-        sync = status.get("sync", {})
-        health = status.get("health", {})
-        record.update(sync_status=sync.get("status", ""), synced_revision=sync.get("revision", ""), health=health.get("status", ""))
+        sync = status.get("sync") or {}
+        health = status.get("health") or {}
+        record.update(
+            sync_status=sync.get("status") or "",
+            synced_revision=sync.get("revision") or "",
+            health=health.get("status") or "",
+        )
         if not (sync.get("status") == ARGO_SYNCED and sync.get("revision") == settled and health.get("status") == ARGO_HEALTHY):
             after = round(clock() - soak_started, 1)
             reason = (

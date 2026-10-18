@@ -349,6 +349,23 @@ def test_an_application_with_no_status_during_the_soak_is_a_regression_not_a_fai
     assert record["reason"] == "10s into the 30s soak: sync unknown at no revision, health unknown"
 
 
+def test_a_null_revision_during_the_soak_records_the_regression_without_crashing() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    null_rev = json.dumps({"status": {"sync": {"status": "Synced", "revision": None}, "health": {"status": "Healthy"}}})
+    _, record, _ = _run(SOAK_ENV, gh, [HEALTHY, null_rev])
+    assert record["outcome"] == gitops.OUTCOME_SOAK_REGRESSED
+    assert record["synced_revision"] == ""
+    assert record["reason"] == "10s into the 30s soak: sync Synced at no revision, health Healthy"
+
+
+def test_an_unknown_sync_status_during_the_soak_is_retried_as_a_failed_read() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, _app("Unknown", MERGE_SHA, "Healthy"), HEALTHY])
+    assert record["outcome"] == gitops.OUTCOME_MERGED
+    assert record["poll_errors"] == 1 and "Unknown" in record["last_error"]
+    assert len(calls) == 4
+
+
 def test_poll_failure_is_retried_until_the_deadline_not_raised() -> None:
     calls = {"n": 0}
 
