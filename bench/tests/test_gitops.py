@@ -331,11 +331,21 @@ def test_a_soak_that_is_not_a_number_is_an_error() -> None:
         gitops.await_fix_cycle(result, env={**ENV, "GITOPS_SOAK_SECONDS": "90s"}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
 
 
+@pytest.mark.parametrize(
+    "var",
+    [
+        "GITOPS_SOAK_SECONDS",
+        "GITOPS_SYNC_TIMEOUT",
+        "GITOPS_POLL_INTERVAL",
+        "GITOPS_PR_TIMEOUT",
+        "GITOPS_MERGE_TIMEOUT",
+    ],
+)
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-90", "86401", "1e308"])
-def test_a_soak_outside_zero_to_max_is_an_error(value: str) -> None:
+def test_a_seconds_setting_outside_zero_to_max_is_an_error(var: str, value: str) -> None:
     result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
     with pytest.raises(ValueError, match="between 0 and 86400"):
-        gitops.await_fix_cycle(result, env={**ENV, "GITOPS_SOAK_SECONDS": value}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
+        gitops.await_fix_cycle(result, env={**ENV, var: value}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
 
 
 def test_an_application_with_no_status_during_the_soak_is_a_regression_not_a_failed_read() -> None:

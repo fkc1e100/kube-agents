@@ -346,7 +346,7 @@ delegated-work wait, active only when `GITOPS_RUN_BRANCH` is set:
    is `GITOPS_ARGO_APP`, which the wrapper sets to the task and which otherwise defaults
    to the run branch's last segment) until
    `status.sync.status == Synced`, `status.sync.revision == <branch head>` and
-   `status.health.status == Healthy` (`GITOPS_SYNC_TIMEOUT`, 300s) -> `merged`; else
+   `status.health.status == Healthy` (`GITOPS_SYNC_TIMEOUT`, 300s) -> `merged` (or step 4 when `GITOPS_SOAK_SECONDS` is above zero); else
    `sync_timeout`. The head is re-read each poll because it can move after the merge (it
    did, in run 7); `head_moved_after_merge` is recorded when it does.
 4. Only when `GITOPS_SOAK_SECONDS` is above zero (default 0, no soak): keep polling the

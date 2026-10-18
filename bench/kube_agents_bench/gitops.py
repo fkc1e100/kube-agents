@@ -39,7 +39,8 @@ Three phases, each bounded, and an optional fourth:
    current head and ``Healthy``. The head is re-read each poll because it can
    move after the merge (Argo tracks the branch, not the merge commit);
    ``head_moved_after_merge`` records when it did. Then the verifiers run
-   against the recovered cluster: ``merged``.
+   against the recovered cluster: ``merged`` (or phase 4 runs first when
+   ``GITOPS_SOAK_SECONDS`` is above zero).
 4. **Soak** (only when ``GITOPS_SOAK_SECONDS`` is above zero): the Application
    is polled for that long and must stay ``Synced`` at the revision that
    settled in phase 3 and ``Healthy`` throughout (an ``Unknown`` sync or health
@@ -187,9 +188,14 @@ def _seconds(env: Mapping[str, str], name: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ValueError(f"{name} must be a number of seconds, got {raw!r}") from exc
+    if not (0.0 <= value <= MAX_SOAK_S):
+        # Negative values would skip a phase or soak, and nan/inf/huge floats
+        # would build a deadline that never expires.
+        raise ValueError(f"{name} must be between 0 and {MAX_SOAK_S:g} seconds, got {value!r}")
+    return value
 
 
 def _parse_github_time(value: str) -> float:
@@ -237,10 +243,6 @@ def await_fix_cycle(
     merge_timeout = _seconds(env, "GITOPS_MERGE_TIMEOUT", DEFAULT_MERGE_TIMEOUT_S)
     sync_timeout = _seconds(env, "GITOPS_SYNC_TIMEOUT", DEFAULT_SYNC_TIMEOUT_S)
     soak = _seconds(env, "GITOPS_SOAK_SECONDS", DEFAULT_SOAK_S)
-    if not (0.0 <= soak <= MAX_SOAK_S):
-        # Negative values would silently skip the soak, and nan/inf/huge floats
-        # would never reach the soak's end.
-        raise ValueError(f"GITOPS_SOAK_SECONDS must be between 0 and {MAX_SOAK_S:g} seconds, got {soak!r}")
     merge_checks = {n.strip() for n in (env.get("GITOPS_MERGE_CHECK") or DEFAULT_MERGE_CHECK).split(",") if n.strip()}
 
     headers = dict(GITHUB_HEADERS)
