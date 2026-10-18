@@ -103,6 +103,9 @@ const (
 	envClusterName  = "CLUSTER_NAME"
 	envProjectID    = "PROJECT_ID"
 	envLocation     = "LOCATION"
+
+	envAllowedHosts           = "ALLOWED_HOSTS"
+	envWebConsoleAllowedHosts = "WEB_CONSOLE_ALLOWED_HOSTS"
 	// The model, usage and identity sources the insights banner reads; see
 	// insights.go.
 	envModelName        = "MODEL_NAME"
@@ -256,7 +259,6 @@ type config struct {
 	ReleaseRepo   string
 	AutoUpgrade   bool
 	GitHubAPIBase string
-
 	// AutoUpgradeWindow limits automatic upgrades to a maintenance window;
 	// nil means any time. AutoUpgradeMinReleaseAge is how long a release
 	// must have been published before an automatic upgrade installs it;
@@ -264,6 +266,7 @@ type config struct {
 	// button. See upgrade.go.
 	AutoUpgradeWindow        *upgradeWindow
 	AutoUpgradeMinReleaseAge time.Duration
+	AllowedHosts             []string
 }
 
 func loadConfig() config {
@@ -297,6 +300,7 @@ func loadConfig() config {
 		ReleaseRepo:   envOr(envReleaseRepo, defaultReleaseRepo),
 		AutoUpgrade:   envBool(envAutoUpgrade, false),
 		GitHubAPIBase: gitHubAPIBase,
+		AllowedHosts:  parseAllowedHostsEnv(os.Getenv(envAllowedHosts), os.Getenv(envWebConsoleAllowedHosts)),
 	}
 	if !releaseRepoPat.MatchString(cfg.ReleaseRepo) {
 		log.Printf(logPrefix+"%s=%q is not owner/name; using %s", envReleaseRepo, cfg.ReleaseRepo, defaultReleaseRepo)
@@ -304,6 +308,24 @@ func loadConfig() config {
 	}
 	cfg.AutoUpgradeWindow, cfg.AutoUpgradeMinReleaseAge = loadAutoUpgradePolicy()
 	return cfg
+}
+
+func parseAllowedHostsEnv(primary, fallback string) []string {
+	raw := strings.TrimSpace(primary)
+	if raw == "" {
+		raw = strings.TrimSpace(fallback)
+	}
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // envBool reads an on/off setting; unset or unrecognised values give the
@@ -487,6 +509,9 @@ type server struct {
 	patchesMu        sync.RWMutex
 	cachedAppliedPRs []AppliedPR
 	patchesLoaded    bool
+
+	// allowedHosts contains hosts accepted by requireLocalHost beyond default loopbacks.
+	allowedHosts map[string]bool
 }
 
 func newServer(cfg config) *server {
@@ -504,6 +529,13 @@ func newServer(cfg config) *server {
 		streamCeiling:          streamTurnCeiling,
 		delegationPollInterval: defaultDelegationPollInterval,
 		kube:                   loadKubeClient(),
+		allowedHosts:           make(map[string]bool),
+	}
+	for _, h := range cfg.AllowedHosts {
+		h = strings.ToLower(strings.Trim(strings.TrimSpace(h), "[]"))
+		if h != "" {
+			s.allowedHosts[h] = true
+		}
 	}
 	s.fetchMetrics = s.fetchPeerMetrics
 	s.fetchModel = s.fetchLiveModel
@@ -555,12 +587,26 @@ func denyFraming(next http.Handler) http.Handler {
 	})
 }
 
-// requireLocalHost refuses a request whose Host is not one the operator's own
-// port-forward would send. A rebinding DNS name resolving to 127.0.0.1 still
-// carries its own name in Host, so it is refused here.
+// isAllowedHost reports whether host is an accepted host.
+func (s *server) isAllowedHost(host string) bool {
+	h := hostOnly(host)
+	if loopbackHosts[h] {
+		return true
+	}
+	if s.allowedHosts != nil {
+		if s.allowedHosts["*"] || s.allowedHosts[h] {
+			return true
+		}
+	}
+	return false
+}
+
+// requireLocalHost refuses a request whose Host is not allowed. By default,
+// only loopback hosts (localhost, 127.0.0.1, ::1) are allowed. Additional hosts
+// or wildcards may be configured via ALLOWED_HOSTS / WEB_CONSOLE_ALLOWED_HOSTS.
 func (s *server) requireLocalHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !loopbackHosts[hostOnly(r.Host)] {
+		if !s.isAllowedHost(r.Host) {
 			writeError(w, http.StatusForbidden, "host_not_allowed",
 				"The web console only answers on localhost. Reach it with kubectl port-forward.")
 			return
@@ -583,7 +629,13 @@ func (s *server) requireConsoleRequest(next http.Handler) http.Handler {
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, err := url.Parse(origin)
-			if err != nil || u.Host != r.Host {
+			if err != nil {
+				writeError(w, http.StatusForbidden, "cross_origin", "Cross-origin requests are refused.")
+				return
+			}
+			originHost := hostOnly(u.Host)
+			reqHost := hostOnly(r.Host)
+			if originHost != reqHost && !s.allowedHosts["*"] && (!s.isAllowedHost(originHost) || !s.isAllowedHost(reqHost)) {
 				writeError(w, http.StatusForbidden, "cross_origin", "Cross-origin requests are refused.")
 				return
 			}
@@ -1296,12 +1348,13 @@ func (s *server) resolveDelegatedTurn(rows []hermesMessage, beforeID int64) (str
 }
 
 func isTerminalKanbanStatus(status string) bool {
-	switch status {
-	case "completed", "done", "blocked", "failed", "timed_out", "crashed", "gave_up":
-		return true
-	default:
-		return false
+	s := strings.ToLower(strings.TrimSpace(status))
+	for _, term := range []string{"completed", "done", "blocked", "failed", "timed_out", "timed out", "crashed", "gave_up", "gave up"} {
+		if s == term || strings.HasPrefix(s, term+";") || strings.HasPrefix(s, term+":") || strings.HasPrefix(s, term+".") || strings.HasPrefix(s, term+" ") {
+			return true
+		}
 	}
+	return false
 }
 
 // hermes sends one request to the gateway with the API key attached.
