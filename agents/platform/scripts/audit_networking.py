@@ -25,6 +25,21 @@ CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # Optional CRD kinds: kubectl's "no such resource type" error for these means the kind is not installed.
 OPTIONAL_CRD_KEYS = frozenset({"gateways", "httproutes", "backendconfigs", "healthcheckpolicies"})
 MISSING_RESOURCE_TYPE_MARKER = "doesn't have a resource type"
+# The parentRef kind the Gateway API defaults to when spec.parentRefs omits it.
+DEFAULT_PARENT_KIND = "Gateway"
+# Gateway listener conditions whose False status means that listener does not serve traffic.
+LISTENER_HEALTH_CONDITIONS = ("Accepted", "Programmed", "ResolvedRefs")
+
+
+def parent_ref_key(ref: dict, route_namespace: str) -> tuple:
+    """Identity of a parentRef, so status.parents[].parentRef is matched to spec.parentRefs, not counted."""
+    return (
+        ref.get("kind") or DEFAULT_PARENT_KIND,
+        ref.get("namespace") or route_namespace,
+        ref.get("name", ""),
+        ref.get("sectionName"),
+        ref.get("port"),
+    )
 
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
@@ -136,6 +151,16 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         # Programmed/Ready decides when present; Accepted alone only speaks for a Gateway that reports neither.
         is_programmed = (prog_cond or acc_cond).get("status") == "True"
         reason = prog_cond.get("reason") or acc_cond.get("reason") or "Accepted"
+        # A Gateway can stay Programmed=True while one listener is invalid; that listener serves nothing.
+        listener_failures = [
+            f"listener {listener.get('name', '')}: {c.get('type')}=False {c.get('reason', '')}".rstrip()
+            for listener in item.get("status", {}).get("listeners", []) or []
+            for c in listener.get("conditions", []) or []
+            if c.get("type") in LISTENER_HEALTH_CONDITIONS and c.get("status") == "False"
+        ]
+        if is_programmed and listener_failures:
+            is_programmed = False
+            reason = "; ".join(listener_failures)
 
         gw_info = {
             "namespace": ns,
@@ -168,7 +193,8 @@ def audit_networking(kubeconfig: str | None = None) -> int:
                     conditions.append(f"{c.get('type')}={c.get('status')}")
                     route_failed = route_failed or c.get("status") == "False"
         # A parentRef that no Gateway controller has reported on leaves the route unattached there.
-        not_attached = len(status_parents) < len(parents)
+        reported_keys = {parent_ref_key(p.get("parentRef") or {}, ns) for p in status_parents}
+        not_attached = any(parent_ref_key(p, ns) not in reported_keys for p in parents)
         route_failed = route_failed or not_attached
 
         route_info = {

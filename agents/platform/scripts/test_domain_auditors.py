@@ -517,6 +517,26 @@ class TestAuditNetworking(unittest.TestCase):
         self.assertIn("could not read: ingresses", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
+        # An optional CRD that is Forbidden (not absent) is unread, as under the minimal ClusterRole.
+        def forbidden_gateways(args, env):
+            if "gateways.gateway.networking.k8s.io" in args:
+                return 1, {"error": "Error from server (Forbidden): gateways.gateway.networking.k8s.io is forbidden"}
+            return 0, {"items": []}
+
+        out = self._run_networking(forbidden_gateways)
+        self.assertIn("could not read: gateways", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+        # The missing-resource-type text on a core kind is a failed read, not an absent CRD.
+        def missing_type_ingress(args, env):
+            if "ingress" in args:
+                return 1, {"error": 'error: the server doesn\'t have a resource type "ingress"'}
+            return 0, {"items": []}
+
+        out = self._run_networking(missing_type_ingress)
+        self.assertIn("could not read: ingresses", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
     def test_gateway_programmed_false_and_failing_route_are_degraded(self):
         def fake_run_kubectl_json(args, env):
             if "gateways.gateway.networking.k8s.io" in args:
@@ -596,6 +616,63 @@ class TestAuditNetworking(unittest.TestCase):
 
         out = self._run_networking(fake_run_kubectl_json)
         self.assertIn("1 failing HTTPRoutes", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_route_with_duplicate_status_for_one_parent_and_none_for_the_other_is_degraded(self):
+        def fake_run_kubectl_json(args, env):
+            if "httproutes.gateway.networking.k8s.io" in args:
+                accepted = [{"type": "Accepted", "status": "True"}]
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "dup"},
+                            "spec": {"parentRefs": [{"name": "gw-a"}, {"name": "gw-b"}]},
+                            "status": {
+                                "parents": [
+                                    {"parentRef": {"name": "gw-a"}, "controllerName": "c1", "conditions": accepted},
+                                    {"parentRef": {"name": "gw-a"}, "controllerName": "c2", "conditions": accepted},
+                                ]
+                            },
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("1 failing HTTPRoutes", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_programmed_gateway_with_failing_listener_is_degraded(self):
+        def fake_run_kubectl_json(args, env):
+            if "gateways.gateway.networking.k8s.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "ext-gw"},
+                            "spec": {"gatewayClassName": "istio"},
+                            "status": {
+                                "addresses": [{"value": "34.100.1.3"}],
+                                "conditions": [
+                                    {"type": "Accepted", "status": "True", "reason": "Accepted"},
+                                    {"type": "Programmed", "status": "True", "reason": "Programmed"},
+                                ],
+                                "listeners": [
+                                    {
+                                        "name": "https",
+                                        "conditions": [
+                                            {"type": "ResolvedRefs", "status": "False", "reason": "InvalidCertificateRef"}
+                                        ],
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("1 unaccepted Gateways", out)
+        self.assertIn("listener https: ResolvedRefs=False InvalidCertificateRef", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
 
