@@ -334,10 +334,10 @@ def test_a_soak_that_is_not_a_number_is_an_error() -> None:
         gitops.await_fix_cycle(result, env={**ENV, "GITOPS_SOAK_SECONDS": "90s"}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
-def test_a_soak_that_is_not_finite_is_an_error_not_an_endless_wait(value: str) -> None:
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-90", "86401", "1e308"])
+def test_a_soak_outside_zero_to_max_is_an_error(value: str) -> None:
     result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises(ValueError, match="between 0 and 86400"):
         gitops.await_fix_cycle(result, env={**ENV, "GITOPS_SOAK_SECONDS": value}, fetch_json=lambda *_: pytest.fail("no HTTP expected"))
 
 
@@ -367,12 +367,30 @@ def test_a_non_string_revision_during_the_soak_is_normalised_to_str() -> None:
     assert record["reason"] == "10s into the 30s soak: sync Synced at 123, health Healthy"
 
 
-def test_an_unknown_sync_status_during_the_soak_is_retried_as_a_failed_read() -> None:
+@pytest.mark.parametrize(
+    "bad_app",
+    [
+        _app("Unknown", MERGE_SHA, "Healthy"),
+        _app("Synced", MERGE_SHA, "Unknown"),
+        json.dumps({"status": "oops"}),
+        json.dumps(["not", "a", "dict"]),
+    ],
+)
+def test_an_unknown_or_malformed_status_during_the_soak_is_retried_as_a_failed_read(bad_app: str) -> None:
     gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
-    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, _app("Unknown", MERGE_SHA, "Healthy"), HEALTHY])
+    _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, bad_app, HEALTHY])
     assert record["outcome"] == gitops.OUTCOME_MERGED
-    assert record["poll_errors"] == 1 and "Unknown" in record["last_error"]
+    assert record["poll_errors"] == 1
     assert len(calls) == 4
+
+
+def test_non_dict_sync_or_health_during_the_soak_is_a_regression_not_a_crash() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    bad_sync = json.dumps({"status": {"sync": "Synced", "health": "Healthy"}})
+    _, record, _ = _run(SOAK_ENV, gh, [HEALTHY, bad_sync])
+    assert record["outcome"] == gitops.OUTCOME_SOAK_REGRESSED
+    assert record["poll_errors"] == 0
+    assert record["reason"] == "10s into the 30s soak: sync unknown at no revision, health unknown"
 
 
 def test_poll_failure_is_retried_until_the_deadline_not_raised() -> None:

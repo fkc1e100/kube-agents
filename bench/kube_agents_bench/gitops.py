@@ -82,7 +82,6 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import math
 import os
 import subprocess
 import time
@@ -109,6 +108,7 @@ DEFAULT_SYNC_TIMEOUT_S = 300.0
 # No soak unless GITOPS_SOAK_SECONDS asks for one: the wait ends at the first
 # Synced+Healthy reading, as it always has.
 DEFAULT_SOAK_S = 0.0
+MAX_SOAK_S = 86400.0
 # The Argo Application readings phases 3 and 4 wait for, the poll label their
 # reads are counted under, and how much of a SHA the soak's log lines and
 # reason quote.
@@ -236,9 +236,10 @@ def await_fix_cycle(
     merge_timeout = _seconds(env, "GITOPS_MERGE_TIMEOUT", DEFAULT_MERGE_TIMEOUT_S)
     sync_timeout = _seconds(env, "GITOPS_SYNC_TIMEOUT", DEFAULT_SYNC_TIMEOUT_S)
     soak = _seconds(env, "GITOPS_SOAK_SECONDS", DEFAULT_SOAK_S)
-    if not math.isfinite(soak):
-        # nan and inf get past ``soak <= 0`` and then never reach the soak's end.
-        raise ValueError(f"GITOPS_SOAK_SECONDS must be a finite number of seconds, got {soak!r}")
+    if not (0.0 <= soak <= MAX_SOAK_S):
+        # Negative values would silently skip the soak, and nan/inf/huge floats
+        # would never reach the soak's end.
+        raise ValueError(f"GITOPS_SOAK_SECONDS must be between 0 and {MAX_SOAK_S:g} seconds, got {soak!r}")
     merge_checks = {n.strip() for n in (env.get("GITOPS_MERGE_CHECK") or DEFAULT_MERGE_CHECK).split(",") if n.strip()}
 
     headers = dict(GITHUB_HEADERS)
@@ -446,13 +447,24 @@ def await_fix_cycle(
         sleep(min(poll, soak_end - now) if now < soak_end else poll)
         # ``or {}``: an Application with no status is a reading that is not
         # Synced, not a failed read; None is reserved for the failure. A reading
-        # whose sync.status is Unknown is Argo reporting that its own comparison
-        # failed (repo fetch or manifest error), not a cluster state change, so
-        # _read_soak_status raises ValueError for attempt() to count and retry.
+        # whose sync.status or health.status is Unknown is Argo reporting that
+        # its own comparison or health check failed (repo fetch or manifest
+        # error), not a cluster state change, so _read_soak_status raises
+        # ValueError for attempt() to count and retry.
         def _read_soak_status() -> dict[str, Any]:
-            st = json.loads(run_kubectl(args)).get("status") or {}
-            if (st.get("sync") or {}).get("status") == ARGO_UNKNOWN:
+            doc = json.loads(run_kubectl(args))
+            if not isinstance(doc, dict):
+                raise ValueError("Argo Application response is not a JSON object")
+            raw_st = doc.get("status")
+            if raw_st is not None and not isinstance(raw_st, dict):
+                raise ValueError("Argo Application status is not a JSON object")
+            st: dict[str, Any] = raw_st or {}
+            sync_part = st.get("sync") if isinstance(st.get("sync"), dict) else {}
+            health_part = st.get("health") if isinstance(st.get("health"), dict) else {}
+            if sync_part.get("status") == ARGO_UNKNOWN:
                 raise ValueError("Argo Application sync.status is Unknown")
+            if health_part.get("status") == ARGO_UNKNOWN:
+                raise ValueError("Argo Application health.status is Unknown")
             return st
 
         status = attempt(READ_APPLICATION, _read_soak_status)
