@@ -358,6 +358,15 @@ def test_a_null_revision_during_the_soak_records_the_regression_without_crashing
     assert record["reason"] == "10s into the 30s soak: sync Synced at no revision, health Healthy"
 
 
+def test_a_non_string_revision_during_the_soak_is_normalised_to_str() -> None:
+    gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
+    int_rev = json.dumps({"status": {"sync": {"status": "Synced", "revision": 123}, "health": {"status": "Healthy"}}})
+    _, record, _ = _run(SOAK_ENV, gh, [HEALTHY, int_rev])
+    assert record["outcome"] == gitops.OUTCOME_SOAK_REGRESSED
+    assert record["synced_revision"] == "123"
+    assert record["reason"] == "10s into the 30s soak: sync Synced at 123, health Healthy"
+
+
 def test_an_unknown_sync_status_during_the_soak_is_retried_as_a_failed_read() -> None:
     gh = FakeGitHub(pulls=[[_pr()]], details=[_pr(merged=True)])
     _, record, calls = _run(SOAK_ENV, gh, [HEALTHY, _app("Unknown", MERGE_SHA, "Healthy"), HEALTHY])

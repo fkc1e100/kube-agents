@@ -458,12 +458,12 @@ def await_fix_cycle(
         status = attempt(READ_APPLICATION, _read_soak_status)
         if status is None:
             continue
-        sync = status.get("sync") or {}
-        health = status.get("health") or {}
+        sync = status.get("sync") if isinstance(status.get("sync"), dict) else {}
+        health = status.get("health") if isinstance(status.get("health"), dict) else {}
         record.update(
-            sync_status=sync.get("status") or "",
-            synced_revision=sync.get("revision") or "",
-            health=health.get("status") or "",
+            sync_status=str(sync.get("status") or ""),
+            synced_revision=str(sync.get("revision") or ""),
+            health=str(health.get("status") or ""),
         )
         if not (sync.get("status") == ARGO_SYNCED and sync.get("revision") == settled and health.get("status") == ARGO_HEALTHY):
             after = round(clock() - soak_started, 1)
