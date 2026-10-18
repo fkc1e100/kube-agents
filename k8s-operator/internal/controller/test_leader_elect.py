@@ -204,5 +204,70 @@ class TestGatewayProfile(unittest.TestCase):
         popen.assert_called_once_with(["hermes", "--profile", "platform", "gateway", "run"])
 
 
+class TestSupervisorShutdown(unittest.TestCase):
+    """The shutdown drain and cleanup budget supervised by leader_elect.py.
+
+    On SIGTERM or when yielding leadership, leader_elect.py terminates Hermes and
+    must wait up to GATEWAY_SHUTDOWN_TIMEOUT_SECONDS (50s) to allow Hermes to
+    complete in-flight cron drains (agent.cron_drain_timeout, default 30s) and its
+    cleanup reserve (10s) before escalating to process.kill().
+    """
+
+    def setUp(self):
+        leader_elect.lease_name = "test-lease"
+        leader_elect.namespace = "test-ns"
+        leader_elect.pod_name = "pod-1"
+        leader_elect.process = None
+        leader_elect.is_shutting_down = False
+
+    def tearDown(self):
+        leader_elect.process = None
+        leader_elect.is_shutting_down = False
+
+    @patch("leader_elect.sys.exit")
+    def test_release_lease_waits_for_drain_budget(self, mock_exit):
+        mock_process = MagicMock()
+        mock_process.wait.return_value = 0
+        leader_elect.process = mock_process
+
+        mock_coordination = MagicMock()
+        mock_kubernetes.client.CoordinationV1Api.return_value = mock_coordination
+        mock_kubernetes.client.CoreV1Api.return_value = MagicMock()
+        lease = MagicMock()
+        lease.spec.holder_identity = "pod-1"
+        mock_coordination.read_namespaced_lease.return_value = lease
+
+        leader_elect.release_lease_and_exit(15, None)
+
+        mock_process.terminate.assert_called_once()
+        mock_process.wait.assert_called_once_with(timeout=leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
+        self.assertGreaterEqual(leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS, 40)
+        mock_process.kill.assert_not_called()
+        mock_exit.assert_called_once_with(0)
+
+    @patch("leader_elect.sys.exit")
+    def test_release_lease_kills_process_after_timeout(self, mock_exit):
+        mock_process = MagicMock()
+        mock_process.wait.side_effect = [
+            leader_elect.subprocess.TimeoutExpired(cmd="hermes", timeout=leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS),
+            0,
+        ]
+        leader_elect.process = mock_process
+
+        mock_coordination = MagicMock()
+        mock_kubernetes.client.CoordinationV1Api.return_value = mock_coordination
+        mock_kubernetes.client.CoreV1Api.return_value = MagicMock()
+        lease = MagicMock()
+        lease.spec.holder_identity = "pod-1"
+        mock_coordination.read_namespaced_lease.return_value = lease
+
+        leader_elect.release_lease_and_exit(15, None)
+
+        mock_process.terminate.assert_called_once()
+        self.assertEqual(mock_process.wait.call_count, 2)
+        mock_process.kill.assert_called_once()
+        mock_exit.assert_called_once_with(0)
+
+
 if __name__ == '__main__':
     unittest.main()

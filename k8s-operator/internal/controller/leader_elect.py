@@ -47,6 +47,15 @@ HERMES_PROBE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}
 _gateway_profile = (os.environ.get("HERMES_GATEWAY_PROFILE") or "").strip()
 HERMES_COMMAND = ["hermes"] + (["--profile", _gateway_profile] if _gateway_profile else []) + ["gateway", "run"]
 
+# How long the supervisor waits between process.terminate() (SIGTERM) and
+# process.kill() (SIGKILL) when shutting down or yielding leadership. Kubernetes
+# gives the gateway pod terminationGracePeriodSeconds (60s), during which Hermes
+# drains in-flight cron runs (agent.cron_drain_timeout, default 30s) and keeps a
+# 10s cleanup reserve (40s total). Sizing this at 50s gives Hermes its full 40s
+# stop budget with a 10s margin before leader_elect.py forces termination, and
+# leaves another 10s before the kubelet SIGKILLs the container.
+GATEWAY_SHUTDOWN_TIMEOUT_SECONDS = int(os.environ.get("GATEWAY_SHUTDOWN_TIMEOUT_SECONDS", "50"))
+
 # Tradeoff documented explicitly per review:
 # This active/passive failover blackholes traffic during leader transition.
 # The Service selector requires 'kubeagents.io/is-leader=true', which is only carried by the active leader.
@@ -114,7 +123,7 @@ def release_lease_and_exit(signum, frame):
     if process is not None:
         process.terminate()
         try:
-            process.wait(timeout=10)
+            process.wait(timeout=GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
             process.kill()
@@ -234,7 +243,7 @@ def main():
                 print(f"[{pod_name}] Lost leadership! Stopping Hermes...", flush=True)
                 process.terminate()
                 try:
-                    process.wait(timeout=10)
+                    process.wait(timeout=GATEWAY_SHUTDOWN_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
                     print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
                     process.kill()
