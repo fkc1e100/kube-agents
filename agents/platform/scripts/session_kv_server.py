@@ -172,7 +172,14 @@ INCIDENT_BRANCH_DIGEST_LEN = 8
 # "In review" is open, or merged or closed within the grace period
 # below: a merged fix takes ArgoCD's sync and a rollout to reach the pods, and
 # the failing pods keep reporting until it does.
-INCIDENT_PR_REVIEW_GRACE_SECONDS = 600
+#
+# CE515 lab fork: the default is 0, so only an OPEN pull request folds new
+# events (upstream uses 600). The lab's chaos scenarios break the same
+# workload again minutes after a merge or a reset (Scenario C after A on
+# checkout-gateway, F after B on auth-service), and a 10-minute fold would
+# swallow that next scenario. Set INCIDENT_PR_REVIEW_GRACE_SECONDS to restore
+# the upstream behavior.
+INCIDENT_PR_REVIEW_GRACE_SECONDS = int(os.environ.get("INCIDENT_PR_REVIEW_GRACE_SECONDS", "0") or 0)
 # How far back the fold looks for the admitted row it records the event as a
 # duplicate of. An open pull request implies one exists; this only bounds the
 # query. With no row found the event is admitted as before.

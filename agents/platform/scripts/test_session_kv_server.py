@@ -1056,6 +1056,18 @@ class TestPullRequestInReview(unittest.TestCase):
         self.assertEqual(first.json()["status"], "injected")
         return first.json()
 
+    def test_lab_default_folds_only_open_pull_requests(self):
+        """CE515 lab fork: a merged or closed PR no longer counts as in review."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        just_now = (now - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+        self.assertEqual(session_kv_server.INCIDENT_PR_REVIEW_GRACE_SECONDS, 0)
+        self.assertTrue(session_kv_server._proposal_in_review({"state": "open"}, now))
+        self.assertFalse(session_kv_server._proposal_in_review({"state": "merged", "closed": just_now}, now))
+        self.assertFalse(session_kv_server._proposal_in_review({"state": "closed", "updated": just_now}, now))
+
+    @patch.object(session_kv_server, "INCIDENT_PR_REVIEW_GRACE_SECONDS", 600)
     def test_proposal_in_review(self):
         from datetime import datetime, timedelta, timezone
         now = datetime(2026, 10, 6, 21, 0, tzinfo=timezone.utc)
