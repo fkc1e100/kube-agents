@@ -2031,11 +2031,14 @@ def _proposal_in_review(proposal: Dict[str, Any], now: datetime) -> bool:
 def _lookup_incident_pull_request(branch: str) -> str:
     """The URL of a proposal on `branch` that is still in review, or ''."""
     import forge  # the agent pod's forge view; imported here so tests and drift need no broker
-    from gitops_workspace import get_managed_forge_repos
+    # get_managed_repos() returns each managed repository by the name the
+    # forge verbs accept. The earlier import named a function that does not
+    # exist, so every lookup failed and every event past the workload window
+    # was admitted as a new incident.
+    from gitops_workspace import get_managed_repos
 
     now = datetime.now(timezone.utc)
-    for entry in get_managed_forge_repos():
-        repo = entry.get("repo") or ""
+    for repo in get_managed_repos():
         if not repo:
             continue
         try:
@@ -4797,7 +4800,8 @@ def _read_task_worker_steps(
     Best-effort: an absent or locked profile store yields no steps rather than
     failing the card detail read.
     """
-    data_root = Path(KANBAN_DB_PATH).parent
+    # KANBAN_DB_PATH is a test hook and None in production; resolve the live board.
+    data_root = Path(_kanban_db_path()).parent
     sessions: list[tuple[str, str]] = []
     seen_sids: set[str] = set()
 

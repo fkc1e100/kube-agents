@@ -1084,9 +1084,9 @@ class TestPullRequestInReview(unittest.TestCase):
             ]}
 
         fake_forge = MagicMock(call=call)
-        repos = [{"repo": "down/repo"}, {"repo": ""}, {"repo": "gitea.local/demo/repo"}]
+        repos = ["down/repo", "", "gitea.local/demo/repo"]
         with patch.dict(sys.modules, {"forge": fake_forge}), \
-                patch("gitops_workspace.get_managed_forge_repos", return_value=repos):
+                patch("gitops_workspace.get_managed_repos", return_value=repos):
             url = session_kv_server._lookup_incident_pull_request("platform-agent/incident-x")
         self.assertEqual(url, "http://gitea/demo/repo/pulls/9")
         self.assertEqual([c[2] for c in calls], ["down/repo", "gitea.local/demo/repo"])
@@ -6174,6 +6174,18 @@ class TestTaskWorkerStepsFeed(unittest.TestCase):
                         reasoning,
                     ),
                 )
+
+    def test_task_detail_works_when_the_test_hook_is_unset(self):
+        """Production leaves KANBAN_DB_PATH as None; the detail route must resolve the live board.
+
+        Path(None) raised TypeError in _read_task_worker_steps, so every
+        GET /v1/tasks/{id} answered 500 on a real install and no worker
+        progress note ever reached the console.
+        """
+        with patch.object(session_kv_server, "KANBAN_DB_PATH", None), \
+                patch.object(session_kv_server.gitops_workspace, "board_path", return_value=self.kanban_path):
+            resp = self.client.get("/v1/tasks/t_d1c3323e")
+        self.assertEqual(resp.status_code, 200, resp.text)
 
     def test_worker_steps_are_matched_by_dispatcher_prompt_and_returned_in_order(self):
         long_output = "diff --git a/deployment.yaml b/deployment.yaml\n" + ("+line\n" * 80)
