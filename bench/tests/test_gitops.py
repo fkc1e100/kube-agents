@@ -91,10 +91,7 @@ def _run(env: dict[str, str], gh: FakeGitHub, kubectl_script: list[Any]) -> tupl
 
     def run_kubectl(args: list[str]) -> str:
         calls.append(args)
-        item = script.pop(0) if len(script) > 1 else script[0]
-        if isinstance(item, BaseException):
-            raise item
-        return item
+        return FakeGitHub._next(script)
 
     clock = FakeClock()
     result = AgentResult(output="ack", trajectory=[], errors=[], metadata={})
