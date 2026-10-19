@@ -563,7 +563,10 @@ class TestAuditNetworking(unittest.TestCase):
                             "spec": {"parentRefs": [{"name": "ext-gw"}]},
                             "status": {
                                 "parents": [
-                                    {"conditions": [{"type": "ResolvedRefs", "status": "False", "reason": "BackendNotFound"}]}
+                                    {
+                                        "parentRef": {"name": "ext-gw"},
+                                        "conditions": [{"type": "ResolvedRefs", "status": "False", "reason": "BackendNotFound"}],
+                                    }
                                 ]
                             },
                         }
@@ -574,7 +577,47 @@ class TestAuditNetworking(unittest.TestCase):
         out = self._run_networking(fake_run_kubectl_json)
         self.assertIn("1 unaccepted Gateways, 1 failing HTTPRoutes", out)
         self.assertIn("NOT PROGRAMMED (Invalid)", out)
+        web_line = next(line for line in out.splitlines() if "web" in line)
+        self.assertIn("ResolvedRefs=False", web_line)
+        self.assertNotIn("NotAttached", web_line)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_gateway_with_no_status_conditions_reports_no_conditions_reason(self):
+        def fake_run_kubectl_json(args, env):
+            if "gateways.gateway.networking.k8s.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "unreconciled-gw"},
+                            "spec": {"gatewayClassName": "missing-class"},
+                            "status": {},
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("1 unaccepted Gateways", out)
+        self.assertIn("NOT PROGRAMMED (no status conditions reported)", out)
+        self.assertNotIn("NOT PROGRAMMED (Accepted)", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_truncated_proxy_reply_is_reported_as_truncated_not_json_error(self):
+        truncated = mock.Mock(
+            returncode=0,
+            stdout='{"items": [{"metadata": {"name": "cut',
+            stderr="credential proxy output truncated at 4194304 bytes\n",
+        )
+        for mod in (audit_networking, audit_storage, audit_network_policies, audit_certificates):
+            with self.subTest(module=mod.__name__):
+                with mock.patch.object(mod.subprocess, "run", return_value=truncated):
+                    code, data = mod.run_kubectl_json(["get", "svc"], {})
+                self.assertNotEqual(code, 0)
+                self.assertIn("credential proxy output truncated", data["error"])
+        with mock.patch.object(audit_certificates.subprocess, "run", return_value=truncated):
+            cmd_code, cmd_out = audit_certificates.run_cmd(["kubectl", "get", "crd"], {})
+        self.assertNotEqual(cmd_code, 0)
+        self.assertIn("credential proxy output truncated", cmd_out)
 
     def test_route_with_parent_refs_but_no_status_parents_is_not_attached(self):
         def fake_run_kubectl_json(args, env):

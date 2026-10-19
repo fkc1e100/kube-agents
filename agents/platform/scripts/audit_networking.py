@@ -18,15 +18,20 @@ import sys
 
 # How much of a failed query's error text the unread list shows per kind.
 UNREAD_REASON_MAX_CHARS = 200
-# Per-call kubectl deadline; a listing that exceeds it is reported as unread.
-KUBECTL_TIMEOUT_SECONDS = 15
+# Per-call kubectl deadline: 60 s broker admission wait + 60 s broker kubectl run cap + 5 s margin,
+# matching cluster_preflight.sh so queued calls on the shared 8-slot sandbox pool do not time out locally.
+KUBECTL_TIMEOUT_SECONDS = 125
 # The sandbox's kubectl wrapper that forwards calls through the credential proxy.
 CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
+# Marker emitted on stderr when the credential proxy cuts output at CREDENTIAL_PROXY_MAX_OUTPUT_BYTES.
+PROXY_TRUNCATED_MARKER = "truncated"
 # Optional CRD kinds: kubectl's "no such resource type" error for these means the kind is not installed.
 OPTIONAL_CRD_KEYS = frozenset({"gateways", "httproutes", "backendconfigs", "healthcheckpolicies"})
 MISSING_RESOURCE_TYPE_MARKER = "doesn't have a resource type"
 # The parentRef kind the Gateway API defaults to when spec.parentRefs omits it.
 DEFAULT_PARENT_KIND = "Gateway"
+# Fallback reason when an unprogrammed Gateway reports no reason on Programmed/Ready/Accepted.
+DEFAULT_UNPROGRAMMED_REASON = "no status conditions reported"
 # Gateway listener conditions whose False status means that listener does not serve traffic.
 LISTENER_HEALTH_CONDITIONS = ("Accepted", "Programmed", "ResolvedRefs")
 
@@ -55,7 +60,14 @@ def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
             check=False,
         )
         if res.returncode == 0 and res.stdout.strip():
-            return 0, json.loads(res.stdout)
+            stderr_msg = res.stderr.strip()
+            if PROXY_TRUNCATED_MARKER in stderr_msg.lower():
+                return 1, {"error": stderr_msg}
+            try:
+                return 0, json.loads(res.stdout)
+            except Exception as exc:
+                err_text = f"{stderr_msg} ({exc})" if stderr_msg else str(exc)
+                return 1, {"error": err_text}
         return res.returncode or 1, {"error": res.stderr.strip() or f"kubectl exit {res.returncode} with no output"}
     except Exception as e:
         return 1, {"error": str(e)}
@@ -150,7 +162,11 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         acc_cond = next((c for c in conditions if c.get("type") == "Accepted"), {})
         # Programmed/Ready decides when present; Accepted alone only speaks for a Gateway that reports neither.
         is_programmed = (prog_cond or acc_cond).get("status") == "True"
-        reason = prog_cond.get("reason") or acc_cond.get("reason") or "Accepted"
+        reason = (
+            prog_cond.get("reason")
+            or acc_cond.get("reason")
+            or ("Accepted" if is_programmed else DEFAULT_UNPROGRAMMED_REASON)
+        )
         # A Gateway can stay Programmed=True while one listener is invalid; that listener serves nothing.
         listener_failures = [
             f"listener {listener.get('name', '')}: {c.get('type')}=False {c.get('reason', '')}".rstrip()
