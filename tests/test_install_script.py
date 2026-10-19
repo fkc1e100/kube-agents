@@ -12314,7 +12314,7 @@ class SapAiCoreInstallerTest(unittest.TestCase):
             env_file.write_text(install_env or "")
             overrides = {"KUBE_AGENTS_INSTALL_ENV": str(env_file), "TMPDIR_UNDER_TEST": tmp}
             full_env = get_isolated_test_env(overrides=overrides)
-            for key in self._SAP_KEYS + ("MODEL_PROVIDER",):
+            for key in self._SAP_KEYS + ("MODEL_PROVIDER", "PERSIST_SECRETS_ON_DISK"):
                 full_env.pop(key, None)
             full_env.update(env or {})
             setup = (
@@ -12335,6 +12335,13 @@ class SapAiCoreInstallerTest(unittest.TestCase):
         )
         self.assertIn("rc=1", proc.stdout, proc.stderr)
         self.assertIn("Remove AICORE_SERVICE_KEY from", proc.stdout + proc.stderr)
+        # An empty --aicore-*= flag is no value and does not trigger the refusal.
+        proc_empty = self._run(
+            'parse_args --aicore-client-id=; rc=0; refuse_sap_ai_core_flags_against_install_env || rc=$?; '
+            'echo "rc=$rc from_flag=$PARAM_AICORE_DISCRETE_FROM_FLAG"',
+            install_env="AICORE_SERVICE_KEY='{\"clientid\":\"old\"}'\n",
+        )
+        self.assertIn("rc=0 from_flag=false", proc_empty.stdout, proc_empty.stderr)
 
     def test_a_service_key_file_over_recorded_client_credentials_is_refused(self):
         proc = self._run(
@@ -12454,13 +12461,16 @@ class SapAiCoreInstallerTest(unittest.TestCase):
         sap_arm = text[text.index("          6)\n", menu_start):text.index("        esac\n        ;;\n      4)", menu_start)]
         self.assertIn('if [ "$model_provider" = "sap" ] && [ -n "$model_default_name" ]; then', sap_arm)
         self.assertIn('sap_menu_model_default="$model_default_name"', sap_arm)
-        # Save & Apply leaves an unchanged multi-line AICORE_SERVICE_KEY valid shell.
+        # Save & Apply leaves an unchanged multi-line AICORE_SERVICE_KEY valid
+        # shell, and refuses to overwrite it even when a later comment contains
+        # an apostrophe.
         recorded = (
             "MODEL_PROVIDER=sap\n"
             "AICORE_SERVICE_KEY='{\n"
             '  "clientid": "sb-client",\n'
             '  "url": "https://t.example"\n'
             "}'\n"
+            "# The agent's namespace\n"
         )
         proc = self._run(
             'model_provider=sap; AICORE_SERVICE_KEY=\'{"url":"https://t.example","clientid":"sb-client"}\'; '
@@ -12473,10 +12483,13 @@ class SapAiCoreInstallerTest(unittest.TestCase):
             '  fi; '
             '  save_secret_env_var "$sap_save_key" "${!sap_save_key:-}"; '
             'done; '
-            'bash -n "$INSTALL_ENV_FILE"; echo "rc=$?"',
+            'bash -n "$INSTALL_ENV_FILE"; echo "rc=$?"; '
+            'refuse_rc=0; save_env_var AICORE_SERVICE_KEY \'{"clientid":"replaced"}\' || refuse_rc=$?; echo "refuse_rc=$refuse_rc"',
             install_env=recorded,
         )
         self.assertIn("rc=0", proc.stdout, proc.stderr)
+        self.assertIn("refuse_rc=1", proc.stdout, proc.stderr)
+        self.assertIn("spans multiple lines", proc.stdout + proc.stderr)
 
 
 if __name__ == "__main__":

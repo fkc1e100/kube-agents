@@ -1672,12 +1672,16 @@ save_env_var() {
   if [ -f "$INSTALL_ENV_FILE" ]; then
     chmod 600 "$INSTALL_ENV_FILE" 2>/dev/null || true
     # Drops the previous assignment whichever spelling it used, so a file
-    # migrated from vars.sh does not end up carrying both. Refuses when
-    # removing the opening line leaves the file invalid shell (a multi-line
-    # quoted value such as a service key pasted from the SAP BTP cockpit).
+    # migrated from vars.sh does not end up carrying both. Refuses when the
+    # existing assignment line does not parse on its own or removing it leaves
+    # the file invalid shell (a multi-line quoted value such as a service key
+    # pasted from the SAP BTP cockpit, even when a later comment contains an
+    # apostrophe).
+    local existing_lines
+    existing_lines=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${var_name}=" "$INSTALL_ENV_FILE" 2>/dev/null || true)
     grep -E -v "^[[:space:]]*(export[[:space:]]+)?${var_name}=" "$INSTALL_ENV_FILE" \
       > "$INSTALL_ENV_FILE.tmp" 2>/dev/null || true
-    if ! bash -n "$INSTALL_ENV_FILE.tmp" 2>/dev/null; then
+    if ! bash -n <<<"$existing_lines" 2>/dev/null || ! bash -n "$INSTALL_ENV_FILE.tmp" 2>/dev/null; then
       rm -f "$INSTALL_ENV_FILE.tmp"
       umask "$old_umask"
       print_error "Cannot rewrite ${var_name} in '${INSTALL_ENV_FILE}': its existing assignment spans multiple lines."
@@ -1703,13 +1707,14 @@ save_secret_env_var() {
   if is_truthy "${PERSIST_SECRETS_ON_DISK:-$DEFAULT_PERSIST_SECRETS_ON_DISK}"; then
     save_env_var "$var_name" "$var_val" || return 1
   elif [ -f "$INSTALL_ENV_FILE" ]; then
-    local old_umask
+    local old_umask existing_lines
     old_umask=$(umask)
     umask 077
     chmod 600 "$INSTALL_ENV_FILE" 2>/dev/null || true
+    existing_lines=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${var_name}=" "$INSTALL_ENV_FILE" 2>/dev/null || true)
     grep -E -v "^[[:space:]]*(export[[:space:]]+)?${var_name}=" "$INSTALL_ENV_FILE" \
       > "$INSTALL_ENV_FILE.tmp" 2>/dev/null || true
-    if ! bash -n "$INSTALL_ENV_FILE.tmp" 2>/dev/null; then
+    if ! bash -n <<<"$existing_lines" 2>/dev/null || ! bash -n "$INSTALL_ENV_FILE.tmp" 2>/dev/null; then
       rm -f "$INSTALL_ENV_FILE.tmp"
       umask "$old_umask"
       print_error "Cannot remove ${var_name} from '${INSTALL_ENV_FILE}': its existing assignment spans multiple lines."
@@ -4382,8 +4387,8 @@ write_tfvars_from_state() {
   # default provider for the same reason.
   if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
     normalize_sap_ai_core_service_key || return 1
-    refuse_both_sap_ai_core_credential_shapes || return 1
     refuse_incomplete_sap_ai_core_discrete_credentials || return 1
+    refuse_both_sap_ai_core_credential_shapes || return 1
   fi
 
   # MEMORY is the one key whose absence from install.env costs DATA rather than

@@ -1096,16 +1096,16 @@ parse_args() {
       --openai-compatible-api-key=*) PARAM_OPENAI_COMPATIBLE_API_KEY="${1#*=}"; shift ;;
       --aicore-service-key-file=*) PARAM_AICORE_SERVICE_KEY_FILE="${1#*=}"; shift ;;
       --aicore-client-id=*)
-        PARAM_AICORE_CLIENT_ID="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        PARAM_AICORE_CLIENT_ID="${1#*=}"; [[ -n "${1#*=}" ]] && PARAM_AICORE_DISCRETE_FROM_FLAG="true"
         note_install_env_flag AICORE_CLIENT_ID "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_CLIENT_ID; shift ;;
       --aicore-client-secret=*)
-        PARAM_AICORE_CLIENT_SECRET="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        PARAM_AICORE_CLIENT_SECRET="${1#*=}"; [[ -n "${1#*=}" ]] && PARAM_AICORE_DISCRETE_FROM_FLAG="true"
         note_install_env_flag AICORE_CLIENT_SECRET "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_CLIENT_SECRET; shift ;;
       --aicore-auth-url=*)
-        PARAM_AICORE_AUTH_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        PARAM_AICORE_AUTH_URL="${1#*=}"; [[ -n "${1#*=}" ]] && PARAM_AICORE_DISCRETE_FROM_FLAG="true"
         note_install_env_flag AICORE_AUTH_URL "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_AUTH_URL; shift ;;
       --aicore-base-url=*)
-        PARAM_AICORE_BASE_URL="${1#*=}"; PARAM_AICORE_DISCRETE_FROM_FLAG="true"
+        PARAM_AICORE_BASE_URL="${1#*=}"; [[ -n "${1#*=}" ]] && PARAM_AICORE_DISCRETE_FROM_FLAG="true"
         note_install_env_flag AICORE_BASE_URL "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_CREDENTIAL" PARAM_AICORE_BASE_URL; shift ;;
       --aicore-resource-group=*)
         PARAM_AICORE_RESOURCE_GROUP="${1#*=}"
@@ -6157,8 +6157,13 @@ run_menu_system() {
         # existing assignment spans lines, save_secret_env_var refuses before
         # any other key in install.env has been touched.
         if [ "$model_provider" = "sap" ]; then
-          if ! normalize_sap_ai_core_service_key || ! refuse_both_sap_ai_core_credential_shapes ||
-            ! refuse_incomplete_sap_ai_core_discrete_credentials; then
+          # When PERSIST_SECRETS_ON_DISK=false, write_tfvars_from_state checks
+          # discrete completeness after recovering any unentered keys from the
+          # live Secret.
+          if ! normalize_sap_ai_core_service_key ||
+            { is_truthy "${PERSIST_SECRETS_ON_DISK:-$DEFAULT_PERSIST_SECRETS_ON_DISK}" &&
+              ! refuse_incomplete_sap_ai_core_discrete_credentials; } ||
+            ! refuse_both_sap_ai_core_credential_shapes; then
             if [ -n "$install_env_before" ]; then
               rm -f "$install_env_before"
               trap - EXIT

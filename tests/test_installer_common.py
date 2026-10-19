@@ -2461,14 +2461,17 @@ class InstallerCommonTest(unittest.TestCase):
 
     def test_a_partial_discrete_set_against_a_live_service_key_is_refused(self):
         # A partial set of discrete flags (--aicore-client-secret=rotated alone)
-        # cannot replace a live service key: the service key still recovers so
-        # the mixed-shape refusal stops the run before the Secret is overwritten.
+        # cannot replace a live service key: the service key still recovers, and
+        # the incomplete-discrete check runs first so the message names the
+        # missing discrete keys rather than telling the operator to unset the
+        # service key.
         content, output = self._sap_tfvars(
             {"MODEL_PROVIDER": "sap", "AICORE_CLIENT_SECRET": "rotated"},
             self._sap_secret_kubectl(("AICORE_SERVICE_KEY",)),
             want_rc=1,
         )
-        self.assertIn("LiteLLM reads the service key and ignores the others", output)
+        self.assertIn("Incomplete SAP AI Core client credentials", output)
+        self.assertIn("AICORE_CLIENT_ID, AICORE_AUTH_URL, AICORE_BASE_URL not set", output)
         self.assertEqual(content, "")
 
     def test_an_incomplete_discrete_set_is_refused_and_names_the_missing_keys(self):
@@ -2489,6 +2492,7 @@ class InstallerCommonTest(unittest.TestCase):
                 '  "clientid": "sb-client",\n'
                 '  "url": "https://t.example"\n'
                 "}'\n"
+                "# The agent's namespace\n"
             )
             env_file.write_text(original)
             proc = self._run(
