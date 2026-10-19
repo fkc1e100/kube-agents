@@ -23,17 +23,26 @@ from typing import Any
 # "vertex_ai" and "model_default" keep their word boundaries and match "vertex" / "model-default".
 _MARKDOWN_NOISE = str.maketrans({"*": None, "`": None, "#": None, "_": "-"})
 
-# Opening phrases that indicate an unfulfilled turn-1 progress notification rather than a completed response.
+# Opening phrases on the first sentence that indicate an unfulfilled turn-1 progress notification.
 # Matches after optional conversational preamble (e.g. "sure,", "ok,", "got it:", "on it -").
 _STUB_OPENING_RE = re.compile(
-    r"(?:^|(?<=[.!?\n]))\s*(?:(?:sure|ok|okay|got\s+it|on\s+it)[,.:;!\s-]*\s*)?"
+    r"^\s*(?:(?:sure|ok|okay|got\s+it|on\s+it)[,.:;!\s-]*\s*)?"
     r"(?:[\w\s-]{0,30}?\b(?:is|am|are|'m|'re)\s+(?:now\s+|currently\s+)?)?"
     r"(?:checking|inspecting|looking\s+into|gathering|querying)\b"
-    r"|(?:^|(?<=[.!?\n]))\s*(?:(?:sure|ok|okay|got\s+it|on\s+it)[,.:;!\s-]*\s*)?"
+    r"|^\s*(?:(?:sure|ok|okay|got\s+it|on\s+it)[,.:;!\s-]*\s*)?"
     r"let\s+me\s+(?:check|inspect|look|gather|query|find|see|pull|fetch)\b"
-    r"|(?:^|(?<=[.!?\n]))\s*(?:(?:sure|ok|okay|got\s+it|on\s+it)[,.:;!\s-]*\s*)?"
+    r"|^\s*(?:(?:sure|ok|okay|got\s+it|on\s+it)[,.:;!\s-]*\s*)?"
     r"(?:i\s+have|i've)\s+(?:asked|delegated|handed|filed|sent|forwarded|passed|routed|created\s+a\s+task)\b"
-    r"|(?:^|(?<=[.!?\n]))\s*(?:filed\s+(?:a\s+task|with)|task\s+has\s+been\s+created)\b",
+    r"|^\s*(?:filed\s+(?:a\s+task|with)|task\s+has\s+been\s+created)\b",
+    re.IGNORECASE,
+)
+
+# Explicit delegation or hand-off phrasing in a sentence (e.g. "with the cluster agent").
+_DELEGATION_ACTOR_RE = re.compile(
+    r"\b(?:let\s+me\s+(?:check|inspect|look|gather|query|find|see|pull|fetch)"
+    r"|(?:i\s+have|i've)\s+(?:asked|delegated|handed|filed|sent|forwarded|passed|routed|created\s+a\s+task)"
+    r"|filed\s+(?:a\s+task|with)|task\s+has\s+been\s+created"
+    r"|with\s+the\s+cluster\s+agent|to\s+the\s+cluster\s+agent|cluster\s+agent\s+(?:is|has|will))\b",
     re.IGNORECASE,
 )
 
@@ -47,12 +56,14 @@ _DEFERRAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Structural result content a stub does not carry: code blocks, table headers, or structured items.
+# Structural result content a stub does not carry: code blocks or kubectl table headers.
 _DIAGNOSTIC_BLOCK_RE = re.compile(
-    r"```|^NAME\s+(?:READY|STATUS|NAMESPACE|VERSION|AGE)|\nNAME\s+(?:READY|STATUS|NAMESPACE|VERSION|AGE)"
-    r"|:\s*[^,.;:\n]+(?:,\s*[^,.;:\n]+){2,}",
+    r"```|^NAME\s+(?:READY|STATUS|NAMESPACE|VERSION|AGE)|\nNAME\s+(?:READY|STATUS|NAMESPACE|VERSION|AGE)",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Colon-separated enumeration of 3+ items inside a non-stub sentence.
+_COLON_LIST_RE = re.compile(r":\s*[^,.;:\n]+(?:,\s*[^,.;:\n]+){2,}")
 
 # Policy-boundary or empty-result outcomes: a definitive answer, not an in-flight status notice.
 _INFORMATIVE_MARKERS = (
@@ -67,6 +78,40 @@ _INFORMATIVE_MARKERS = (
     "no warning",
     "0 pods",
     "0 events",
+)
+
+# Direct restriction outcome predicate (exempts a gerund subject like "Querying logs is restricted by RBAC").
+_DIRECT_RESTRICTION_RE = re.compile(
+    r"\b(?:is|was|are)\s+(?:restricted|forbidden|not\s+allowed|blocked)\b|\bpermission\s+denied\b",
+    re.IGNORECASE,
+)
+
+# Substantive diagnostic facts in a non-stub result sentence.
+_SUBSTANTIVE_FACT_RE = re.compile(
+    r"\b(?:\d+/\d+\s+replicas?|\d+\s+replicas?|running|ready|available|healthy|active|version\s+v?\d+)\b",
+    re.IGNORECASE,
+)
+
+# Speculative/pending verbs that disqualify a sentence from counting as a completed result sentence.
+_PENDING_QUERY_RE = re.compile(
+    r"\b(?:confirm|check|inspect|query|whether|if|once|when)\b",
+    re.IGNORECASE,
+)
+
+# Table header line in kubectl output (e.g. "NAME READY UP-TO-DATE AVAILABLE AGE") so column names
+# like "READY" do not satisfy positive status checks on their own.
+_KUBECTL_HEADER_LINE_RE = re.compile(
+    r"^\s*name\s+.*\b(?:ready|status|available|namespace|version|age)\b.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Clause-level negation tokens and zero-counts for status keywords.
+_CLAUSE_NEGATION_RE = re.compile(
+    r"\b(?:not|never|non|no|none|isn't|aren't|wasn't|weren't|false|unhealthy|notready"
+    r"|failed|failing|down|unavailable|crashloopbackoff|errimagepull|imagepullbackoff)\b"
+    r"|\b0\s*(?:/|of)\s*\d+\b"
+    r"|\b0\s+(?:pods?|nodes?|replicas?|containers?|instances?|endpoints?|ready|running|healthy|active)\b",
+    re.IGNORECASE,
 )
 
 # Optional suffix accepted after a keyword, so "nodes" satisfies "node" and "restarted" satisfies "restart".
@@ -94,61 +139,71 @@ def _contains_word(keyword: str, text: str) -> bool:
     return bool(re.search(rf"(?:\b|^){escaped}{suffix}(?:\b|$)", text.lower()))
 
 
+def _is_stub_sentence(sentence: str, is_first: bool) -> bool:
+    """Returns True if a single sentence is an opening hand-off, delegation notice, or deferral."""
+    if _DEFERRAL_RE.search(sentence) or _DELEGATION_ACTOR_RE.search(sentence):
+        return True
+    if is_first and _STUB_OPENING_RE.search(sentence):
+        # Allow a single-sentence completed answer whose opening gerund is the subject of a
+        # restriction outcome ("Querying container logs is restricted by RBAC...") or a
+        # colon-headed result list ("Checking kubeagents-system: a, b, and c are all running.").
+        if not _PENDING_QUERY_RE.search(sentence):
+            if _DIRECT_RESTRICTION_RE.search(sentence):
+                return False
+            if ":" in sentence and _SUBSTANTIVE_FACT_RE.search(sentence.split(":", 1)[1]):
+                return False
+        return True
+    return False
+
+
+def _is_result_sentence(sentence: str) -> bool:
+    """Returns True if a non-stub sentence states a completed diagnostic fact, list, or policy outcome."""
+    if _PENDING_QUERY_RE.search(sentence):
+        return False
+    if _COLON_LIST_RE.search(sentence) or _SUBSTANTIVE_FACT_RE.search(sentence):
+        return True
+    return any(_contains_word(m, sentence) for m in _INFORMATIVE_MARKERS)
+
+
 def _is_delegation_stub(raw_text: str, lowered: str) -> bool:
-    """Detects a turn-1 hand-off: a stub opening phrase, or a promise to deliver the answer later."""
+    """Detects a turn-1 hand-off: a stub opening phrase, or a promise to deliver the answer later.
+
+    Stub-ness is decided per sentence: a sentence carrying an opening phrase (on sentence 1),
+    explicit cluster-agent delegation, or a deferral is a stub sentence; it is exempted only
+    when a different sentence in the reply states a completed result.
+    """
     if _DIAGNOSTIC_BLOCK_RE.search(raw_text):
         return False
 
-    has_stub_open = bool(_STUB_OPENING_RE.search(lowered))
-    has_defer = bool(_DEFERRAL_RE.search(lowered))
-
-    if has_stub_open:
+    sentences = [s.strip() for s in re.split(r"[.!?\n]+", lowered) if s.strip()]
+    if not sentences:
         return True
 
-    if has_defer:
-        sentences = [s.strip() for s in re.split(r"[.!?\n]+", lowered) if s.strip()]
-        non_defer_sentences = [
-            s for s in sentences
-            if not _DEFERRAL_RE.search(s) and not _STUB_OPENING_RE.search(s)
-        ]
-        if not non_defer_sentences:
-            return True
-        has_substantive_fact = any(
-            re.search(r"\b(?:\d+/\d+\s+replicas?|\d+\s+replicas?|running|ready|available|version\s+v?\d+)\b", s)
-            and not re.search(r"\b(?:confirm|check|inspect|query|whether|if)\b", s)
-            for s in non_defer_sentences
-        )
-        if not has_substantive_fact:
-            return True
+    stub_flags = [_is_stub_sentence(s, idx == 0) for idx, s in enumerate(sentences)]
+    if not any(stub_flags):
+        return False
 
-    return False
+    non_stub_sentences = [s for s, is_stub in zip(sentences, stub_flags) if not is_stub]
+    if not non_stub_sentences:
+        return True
+
+    return not any(_is_result_sentence(s) for s in non_stub_sentences)
 
 
 def _has_negated_status(keyword: str, text: str) -> bool:
-    """Detects if a status keyword is negated (e.g. 'not running', 'unhealthy', 'Ready=False')."""
+    """Detects if a status keyword is negated in a clause by any negation token or zero-count."""
     k = keyword.lower().strip()
     if k not in _STATUS_KEYWORDS:
         return False
-    negation_patterns = [
-        rf"\b(?:not|never|non|isn't|is\s+not|aren't|are\s+not|failed\s+to\s+be)\b(?:(?!\b(?:and|but|while|although)\b)[^.;,\n]){{0,30}}\b{re.escape(k)}\b",
-        rf"\bno\s+longer\s+{re.escape(k)}\b",
-        rf"\b(?:0\s*(?:/|of)\s*\d+|no|none(?:\s+of)?)\b(?:(?!\b(?:and|but|while|although)\b)[^.;,\n]){{0,40}}\b(?:is|are|reports?)\s+(?:currently\s+)?{re.escape(k)}\b",
-        rf"\b{re.escape(k)}\s*[:=]\s*false\b",
-        rf"\bnot{re.escape(k)}\b",
-    ]
-    if k == "healthy":
-        negation_patterns.append(r"\bunhealthy\b")
-    for pat in negation_patterns:
-        if re.search(pat, text, re.IGNORECASE):
-            return True
-    return False
+    return bool(_CLAUSE_NEGATION_RE.search(text))
 
 
 def _has_positive_status(keyword: str, text: str) -> bool:
-    """Checks that a status keyword appears positively in at least one clause/sentence."""
+    """Checks that a status keyword appears positively in at least one non-header clause/sentence."""
+    without_headers = _KUBECTL_HEADER_LINE_RE.sub("", text)
     clauses = re.split(
         r"(?<=[.!?\n;])\s*|\s*,\s*(?:but|however|while|whereas|although)\s+",
-        text,
+        without_headers,
         flags=re.IGNORECASE,
     )
     for c in clauses:
@@ -176,10 +231,9 @@ def evaluate_response_quality(
     trimmed = output_text.strip()
     lowered = normalize_text(trimmed)
 
-    # 1. Delegation stub check: reject turn-1 status notices (a stub opening phrase or a
-    # promise to report later) unless substantive diagnostic content or an informative marker is present.
-    is_informative = any(_contains_word(m, lowered) for m in _INFORMATIVE_MARKERS)
-    if not is_informative and _is_delegation_stub(trimmed, lowered):
+    # 1. Delegation stub check: reject turn-1 status notices unless a non-stub sentence
+    # states a completed diagnostic fact, enumeration, or policy outcome.
+    if _is_delegation_stub(trimmed, lowered):
         return False, "Fail: Delegation stub returned instead of completed diagnostic"
 
     # 2. Clarification loop check: agent should default to host cluster rather than halting
@@ -204,9 +258,17 @@ def evaluate_response_quality(
     # 4. Prompt #21: Agent Substrate Architectural Plan
     if prompt_id == 21:
         has_substrate = _contains_word("substrate", lowered)
-        has_cluster_part = any(_contains_word(k, lowered) for k in ["cluster", "crd", "operator", "node", "infrastructure", "namespace", "helm", "rbac", "ate.dev"])
-        has_workload_part = any(_contains_word(k, lowered) for k in ["workload", "actor", "worker", "pod", "sandbox", "agent pool"])
-        has_plan = any(_contains_word(k, lowered) for k in ["plan", "staging", "phase", "step", "prerequisite", "before enabling", "prior to", "verification"])
+        has_cluster_part = any(
+            _contains_word(k, lowered)
+            for k in ["cluster", "crd", "operator", "node", "infrastructure", "namespace", "helm", "rbac", "ate.dev"]
+        )
+        has_workload_part = any(
+            _contains_word(k, lowered) for k in ["workload", "actor", "worker", "pod", "sandbox", "agent pool"]
+        )
+        has_plan = any(
+            _contains_word(k, lowered)
+            for k in ["plan", "staging", "phase", "step", "prerequisite", "before enabling", "prior to", "verification"]
+        )
         if not (has_substrate and has_cluster_part and has_workload_part and has_plan):
             missing = []
             if not has_substrate:

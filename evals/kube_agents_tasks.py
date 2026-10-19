@@ -128,20 +128,20 @@ def _load_samples_for_task(task_id: str) -> list[Sample]:
 
 
 _ALLOWED_SUBCOMMANDS = {"get", "describe", "logs", "version", "cluster-info"}
-_MUTATING_SUBCOMMANDS = {
-    "delete", "apply", "patch", "edit", "scale", "exec", "run", "replace", "create",
-    "drain", "cordon", "uncordon", "taint", "rollout", "set", "attach", "cp", "port-forward",
-}
-_FLAG_ARGS = {
-    "-n", "--namespace", "-l", "--selector", "-c", "--container",
-    "--context", "--cluster", "--user", "--kubeconfig", "-s", "--server", "-f", "--filename",
-}
+# Flags that command_policy.evaluate permits by design (because the agent pod has no alternate
+# contexts or local manifests) but that must be refused when running against a developer's
+# local kubeconfig on the no-endpoint evaluation path.
 _DENIED_FLAGS = {
-    "-s", "--server", "--kubeconfig", "--token", "--as", "--as-group", "--as-uid", "--username",
-    "--password", "--certificate-authority", "--client-certificate", "--client-key",
-    "--insecure-skip-tls-verify", "--raw",
-    "--context", "--cluster", "--user",
-    "-f", "--filename", "-k", "--kustomize", "-R", "--recursive",
+    "--kubeconfig",
+    "--context",
+    "--cluster",
+    "--raw",
+    "-f",
+    "--filename",
+    "-k",
+    "--kustomize",
+    "-R",
+    "--recursive",
 }
 _DENIED_RESOURCES = {"secret", "secrets"}
 
@@ -162,39 +162,28 @@ def kubectl_inspect() -> Tool:
         if not tokens or tokens[0] != "kubectl":
             return "Error: Command must start with 'kubectl'."
 
-        # 1. Consult the repository command policy first.
+        # 1. Consult the repository command policy first (enforces the read-only verb allowlist,
+        # blocks identity/server/impersonation flags, and blocks file-writing flags).
         decision = command_policy.evaluate(tokens)
         if not decision.allowed:
             return f"Error: {decision.message}"
 
-        # 2. Guard against mutating subcommands anywhere in the command arguments
-        for t in tokens[1:]:
-            if t.lower() in _MUTATING_SUBCOMMANDS:
-                return f"Error: Mutating subcommand '{t}' is prohibited."
-
-        # 3. Connection/identity/target overrides, indirect manifest reads, and Secret reads.
-        # Catches exact denied flags and attached short flags (e.g. -s<url>, -f<path>, -k<dir>).
+        # 2. Refuse local kubeconfig/context overrides, indirect manifest reads, clustered
+        # short flags, and Secret reads.
         for t in tokens[1:]:
             flag = t.split("=", 1)[0]
-            if flag in _DENIED_FLAGS or (t.startswith(("-s", "-f", "-k")) and not t.startswith("--")):
+            # pflag clusters shorthands: `-Af URL` is `-A -f URL`, so a single-dash token longer
+            # than its one letter can carry a manifest or server flag past the exact lookup below.
+            if flag.startswith("-") and not flag.startswith("--") and len(flag) > 2:
+                return f"Error: Combined short flags '{flag}' are prohibited."
+            if flag in _DENIED_FLAGS:
                 return f"Error: Flag '{flag}' is prohibited."
             if any(part in _DENIED_RESOURCES for part in re.split(r"[,/.]", t.lower())):
                 return f"Error: Reading '{t}' is prohibited."
 
-        # Extract subcommand with flag-argument awareness
-        subcmd = None
-        i = 1
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok in _FLAG_ARGS:
-                i += 2
-                continue
-            if tok.startswith("-"):
-                i += 1
-                continue
-            subcmd = tok
-            break
-
+        # 3. Narrow to the 5 inspection verbs using the policy's own verb parser.
+        verbs, _ = command_policy._kubectl_verb_and_flag(tokens)
+        subcmd = verbs[0] if verbs else None
         if not subcmd:
             return "Error: No kubectl subcommand specified."
         if subcmd not in _ALLOWED_SUBCOMMANDS:
