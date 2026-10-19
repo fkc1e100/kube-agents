@@ -458,13 +458,44 @@ class TestDrainHoldsLease(unittest.TestCase):
         self.assertNotIn("renew", [event[0] for event in self.events])
         self.assertEqual(self.events[-1][:2], ("label", None))
 
+    @patch("leader_elect.hermes_answers", return_value=True)
+    @patch("leader_elect.subprocess.Popen")
+    @patch("leader_elect.time.sleep")
+    def test_drain_renews_on_entry_after_slow_probe_and_sleep(self, mock_sleep, mock_popen, _mock_answers):
+        """A 3s probe plus a 7s sleep after the main loop's renewal already passes
+        the 10s renew deadline while the 15s lease is still valid; main() stamps
+        lease_renewed_at after the write, and the drain renews on entry instead of
+        killing Hermes on iteration 1."""
+        self.leases = _Leases(self.clock, self.events, holder="pod-1", call_seconds=1.5)
+        mock_kubernetes.client.CoordinationV1Api.return_value = self.leases
+        self.hermes = _Hermes(self.clock, self.events, exit_after=30)
+        leader_elect.process = self.hermes
+        mock_sleep.side_effect = Exception("StopLoop")
+
+        with self.assertRaisesRegex(Exception, "StopLoop"):
+            leader_elect.main()
+
+        # main() stamped lease_renewed_at after the 1.5s read + 1.5s replace (t=3.0),
+        # not at loop_started (t=0.0).
+        self.assertEqual(leader_elect.lease_renewed_at, 3.0)
+
+        # Advance 10.5s past that renewal (e.g. a 3s probe + 0.5s patch + 7s sleep)
+        # and deliver SIGTERM against a healthy apiserver.
+        self.clock.now = leader_elect.lease_renewed_at + 10.5
+        self.events.clear()
+        self._shut_down(exit_after=30)
+
+        self.hermes.kill.assert_not_called()
+        self.assertEqual(self._time_of("renew"), 13.5)
+        self.assertEqual(self._time_of("exit"), 43.5)
+
     def test_budgets_nest(self):
         # Hermes' stop path (30s cron drain + 10s cleanup) fits inside the
         # supervisor's budget; the budget plus the label clear and lease release
         # fits inside the pod's grace; a renewal in flight at the renew deadline
-        # still ends before a standby may take the lease; and the steady-state
-        # loop renews inside the renew deadline, so a drain starts with a lease
-        # it can still renew.
+        # still ends before a standby may take the lease; the drain's poll slice
+        # sits under the renew deadline; and the main loop's probe plus sleep
+        # leaves the 15s lease valid when a drain renews on entry.
         self.assertGreaterEqual(leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS, 40)
         self.assertLess(leader_elect.GATEWAY_SHUTDOWN_TIMEOUT_SECONDS + 3 * leader_elect.LEASE_API_TIMEOUT_SECONDS,
                         self.POD_GRACE_SECONDS)
@@ -472,6 +503,9 @@ class TestDrainHoldsLease(unittest.TestCase):
                              + self.CLOCK_SKEW_SECONDS, leader_elect.LEASE_DURATION_SECONDS)
         self.assertLess(leader_elect.LEASE_POLL_INTERVAL_SECONDS + leader_elect.LEASE_POLL_JITTER_SECONDS,
                         leader_elect.LEASE_RENEW_DEADLINE_SECONDS)
+        self.assertLess(leader_elect.LEASE_POLL_INTERVAL_SECONDS + leader_elect.LEASE_POLL_JITTER_SECONDS
+                        + leader_elect.HERMES_PROBE_TIMEOUT_SECONDS,
+                        leader_elect.LEASE_DURATION_SECONDS)
 
 
 if __name__ == '__main__':

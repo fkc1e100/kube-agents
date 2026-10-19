@@ -16,8 +16,8 @@ process = None
 # clears it before anything selects on it.
 label_state = None
 is_shutting_down = False
-# lease_renewed_at is the time.monotonic() reading taken before the last write
-# that confirmed this pod holds the lease, or None before the first. A draining
+# lease_renewed_at is the time.monotonic() reading taken when the last write
+# confirmed this pod holds the lease, or None before the first. A draining
 # Hermes is killed once LEASE_RENEW_DEADLINE_SECONDS pass from it with no newer one.
 lease_renewed_at = None
 # The label means "this pod holds the lease and its Hermes answers": the
@@ -195,14 +195,20 @@ def stop_hermes_holding_lease(coordination_v1):
     global lease_renewed_at
     process.terminate()
     deadline = time.monotonic() + GATEWAY_SHUTDOWN_TIMEOUT_SECONDS
+    first_slice = True
     while True:
         now = time.monotonic()
         if now >= deadline:
             print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
             break
-        if lease_renewed_at is None or now >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS:
+        # On entry, a 3s probe plus a 5-7s sleep after the main loop's renewal
+        # can already exceed LEASE_RENEW_DEADLINE_SECONDS while the 15s lease is
+        # still valid, so the first slice tries a renewal before enforcing the
+        # deadline.
+        if lease_renewed_at is None or (not first_slice and now >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS):
             print(f"[{pod_name}] Lease renewal unconfirmed past its deadline, killing Hermes...", flush=True)
             break
+        first_slice = False
         # A renewal starts only if it can finish inside the budget, so the kill
         # and the release after it stay inside the pod's grace period.
         if now + LEASE_RENEWAL_MAX_SECONDS <= deadline:
@@ -212,6 +218,9 @@ def stop_hermes_holding_lease(coordination_v1):
                 break
             if renewed:
                 lease_renewed_at = now
+        if time.monotonic() >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS:
+            print(f"[{pod_name}] Lease renewal unconfirmed past its deadline, killing Hermes...", flush=True)
+            break
         # Wake for the next renewal, the budget, or the renew deadline,
         # whichever comes first; a timeout of 0 still sees an exit.
         wake_at = min(now + LEASE_POLL_INTERVAL_SECONDS, deadline, lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS)
@@ -289,7 +298,6 @@ def main():
     
     while not is_shutting_down:
         now = datetime.now(timezone.utc)
-        loop_started = time.monotonic()
         holder = None
         
         try:
@@ -300,6 +308,7 @@ def main():
                 lease.spec.renew_time = now
                 try:
                     coordination_v1.replace_namespaced_lease(name=lease_name, namespace=namespace, body=lease)
+                    lease_renewed_at = time.monotonic()
                 except ApiException:
                     holder = None
             else:
@@ -322,6 +331,7 @@ def main():
                     lease.spec.lease_transitions = (lease.spec.lease_transitions or 0) + 1
                     try:
                         coordination_v1.replace_namespaced_lease(name=lease_name, namespace=namespace, body=lease)
+                        lease_renewed_at = time.monotonic()
                         holder = pod_name
                     except ApiException:
                         holder = None
@@ -343,6 +353,7 @@ def main():
                 )
                 try:
                     coordination_v1.create_namespaced_lease(namespace=namespace, body=body)
+                    lease_renewed_at = time.monotonic()
                     holder = pod_name
                 except ApiException:
                     holder = None
@@ -350,10 +361,6 @@ def main():
                 print(f"[LeaderElect] Error reading lease: {e}", file=sys.stderr, flush=True)
 
         if holder == pod_name:
-            # Every path that sets holder to this pod went through an accepted
-            # write, so the lease is good until LEASE_DURATION_SECONDS after the
-            # loop began; a drain counts from here.
-            lease_renewed_at = loop_started
             if process is None:
                 print(f"[{pod_name}] Acquired leadership! Starting Hermes...", flush=True)
                 process = subprocess.Popen(HERMES_COMMAND)
