@@ -249,6 +249,10 @@ class InstallerCommonTest(unittest.TestCase):
                     "AICORE_AUTH_URL": "",
                     "AICORE_BASE_URL": "",
                     "AICORE_RESOURCE_GROUP": "",
+                    # And the provider the same install.env exports: the sap
+                    # gates in the generator key on it, and the cases that
+                    # want the default provider name none.
+                    "MODEL_PROVIDER": "",
                     **(env or {}),
                 },
                 bin_dir=str(bin_dir),
@@ -2370,7 +2374,8 @@ class InstallerCommonTest(unittest.TestCase):
             '  *"config current-context"*) printf "gke_test-project_us-central1_test-cluster"; exit 0 ;;\n'
             '  *"get secret platform-agent-secrets"*)\n'
             '    for a in "$@"; do case "$a" in jsonpath=*) k="${a#jsonpath=\\{.data.}"; k="${k%\\}}" ;; esac; done\n'
-            f'    case " {held} " in *" $k "*) printf "live-%s" "$k" | base64 ;; esac; exit 0 ;;\n'
+            '    if [ "$k" = "AICORE_SERVICE_KEY" ]; then v=\'{"clientid":"live-AICORE_SERVICE_KEY"}\'; else v="live-$k"; fi\n'
+            f'    case " {held} " in *" $k "*) printf "%s" "$v" | base64 ;; esac; exit 0 ;;\n'
             "esac\n"
             "exit 1\n"
         )
@@ -2453,6 +2458,45 @@ class InstallerCommonTest(unittest.TestCase):
             {**self._SAP_DISCRETE, "AICORE_SERVICE_KEY": '{"clientid":"x"}'}, want_rc=1)
         self.assertIn("LiteLLM reads the service key and ignores the others", output)
         self.assertEqual(content, "")
+
+    def test_a_partial_discrete_set_against_a_live_service_key_is_refused(self):
+        # A partial set of discrete flags (--aicore-client-secret=rotated alone)
+        # cannot replace a live service key: the service key still recovers so
+        # the mixed-shape refusal stops the run before the Secret is overwritten.
+        content, output = self._sap_tfvars(
+            {"MODEL_PROVIDER": "sap", "AICORE_CLIENT_SECRET": "rotated"},
+            self._sap_secret_kubectl(("AICORE_SERVICE_KEY",)),
+            want_rc=1,
+        )
+        self.assertIn("LiteLLM reads the service key and ignores the others", output)
+        self.assertEqual(content, "")
+
+    def test_an_incomplete_discrete_set_is_refused_and_names_the_missing_keys(self):
+        content, output = self._sap_tfvars(
+            {"MODEL_PROVIDER": "sap", "AICORE_CLIENT_SECRET": "only-one"},
+            want_rc=1,
+        )
+        self.assertIn("Incomplete SAP AI Core client credentials", output)
+        self.assertIn("AICORE_CLIENT_ID, AICORE_AUTH_URL, AICORE_BASE_URL not set", output)
+        self.assertEqual(content, "")
+
+    def test_save_env_var_refuses_to_corrupt_a_multi_line_assignment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = pathlib.Path(tmp) / "install.env"
+            original = (
+                "MODEL_PROVIDER=sap\n"
+                "AICORE_SERVICE_KEY='{\n"
+                '  "clientid": "sb-client",\n'
+                '  "url": "https://t.example"\n'
+                "}'\n"
+            )
+            env_file.write_text(original)
+            proc = self._run(
+                f'INSTALL_ENV_FILE="{env_file}"; rc=0; save_secret_env_var AICORE_SERVICE_KEY "" || rc=$?; echo "rc=$rc"',
+            )
+            self.assertIn("rc=1", proc.stdout, proc.stderr)
+            self.assertIn("spans multiple lines", proc.stdout + proc.stderr)
+            self.assertEqual(env_file.read_text(), original)
 
     def test_the_generator_compacts_a_multi_line_service_key(self):
         # upgrade.sh, uninstall.sh and the menu reach the generator without

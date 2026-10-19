@@ -791,13 +791,39 @@ sap_ai_core_discrete_named() {
   return 1
 }
 
+# Whether this run names all four discrete SAP AI Core values.
+sap_ai_core_all_discrete_set() {
+  [ -n "${AICORE_CLIENT_ID:-}" ] && [ -n "${AICORE_CLIENT_SECRET:-}" ] \
+    && [ -n "${AICORE_AUTH_URL:-}" ] && [ -n "${AICORE_BASE_URL:-}" ]
+}
+
 # Whether this run has enough to authenticate to SAP AI Core: a service key, or
 # all four of the discrete values. Returns 0 when it does. The resource group is
 # optional either way (LiteLLM falls back to "default").
 has_sap_ai_core_credentials() {
-  [ -n "${AICORE_SERVICE_KEY:-}" ] && return 0
-  [ -n "${AICORE_CLIENT_ID:-}" ] && [ -n "${AICORE_CLIENT_SECRET:-}" ] \
-    && [ -n "${AICORE_AUTH_URL:-}" ] && [ -n "${AICORE_BASE_URL:-}" ]
+  [ -n "${AICORE_SERVICE_KEY:-}" ] || sap_ai_core_all_discrete_set
+}
+
+# Refuse a run that names some but not all four discrete SAP AI Core values.
+# LiteLLM needs all four to exchange a token, and applying a partial set when
+# secrets are off disk would overwrite the live Secret with an unusable subset.
+refuse_incomplete_sap_ai_core_discrete_credentials() {
+  sap_ai_core_discrete_named && ! sap_ai_core_all_discrete_set || return 0
+  local key missing=""
+  for key in $SAP_AI_CORE_DISCRETE_KEYS; do
+    [ -n "${!key:-}" ] || missing="${missing}${missing:+, }${key}"
+  done
+  print_error "Incomplete SAP AI Core client credentials: ${missing} not set. Set all four of ${SAP_AI_CORE_DISCRETE_KEYS// /, }, or use AICORE_SERVICE_KEY instead."
+  return 1
+}
+
+# Canonical form of an AICORE_SERVICE_KEY for equality comparisons across
+# install.env and the live environment: compacted and key-sorted (jq -cS), or
+# the raw string when the input is empty or not valid JSON.
+sap_ai_core_service_key_canonical() {
+  local raw="${1:-}"
+  [ -n "$raw" ] || return 0
+  printf '%s' "$raw" | jq -cS . 2>/dev/null || printf '%s' "$raw"
 }
 
 # Refuse a run that holds both SAP AI Core credential shapes, and say which key
@@ -1646,9 +1672,18 @@ save_env_var() {
   if [ -f "$INSTALL_ENV_FILE" ]; then
     chmod 600 "$INSTALL_ENV_FILE" 2>/dev/null || true
     # Drops the previous assignment whichever spelling it used, so a file
-    # migrated from vars.sh does not end up carrying both.
+    # migrated from vars.sh does not end up carrying both. Refuses when
+    # removing the opening line leaves the file invalid shell (a multi-line
+    # quoted value such as a service key pasted from the SAP BTP cockpit).
     grep -E -v "^[[:space:]]*(export[[:space:]]+)?${var_name}=" "$INSTALL_ENV_FILE" \
       > "$INSTALL_ENV_FILE.tmp" 2>/dev/null || true
+    if ! bash -n "$INSTALL_ENV_FILE.tmp" 2>/dev/null; then
+      rm -f "$INSTALL_ENV_FILE.tmp"
+      umask "$old_umask"
+      print_error "Cannot rewrite ${var_name} in '${INSTALL_ENV_FILE}': its existing assignment spans multiple lines."
+      print_info "Put ${var_name} on one line in '${INSTALL_ENV_FILE}' and re-run."
+      return 1
+    fi
     chmod 600 "$INSTALL_ENV_FILE.tmp" 2>/dev/null || true
     mv "$INSTALL_ENV_FILE.tmp" "$INSTALL_ENV_FILE"
   fi
@@ -1666,7 +1701,7 @@ save_secret_env_var() {
   local var_val=$2
   export "${var_name}=${var_val}"
   if is_truthy "${PERSIST_SECRETS_ON_DISK:-$DEFAULT_PERSIST_SECRETS_ON_DISK}"; then
-    save_env_var "$var_name" "$var_val"
+    save_env_var "$var_name" "$var_val" || return 1
   elif [ -f "$INSTALL_ENV_FILE" ]; then
     local old_umask
     old_umask=$(umask)
@@ -1674,6 +1709,13 @@ save_secret_env_var() {
     chmod 600 "$INSTALL_ENV_FILE" 2>/dev/null || true
     grep -E -v "^[[:space:]]*(export[[:space:]]+)?${var_name}=" "$INSTALL_ENV_FILE" \
       > "$INSTALL_ENV_FILE.tmp" 2>/dev/null || true
+    if ! bash -n "$INSTALL_ENV_FILE.tmp" 2>/dev/null; then
+      rm -f "$INSTALL_ENV_FILE.tmp"
+      umask "$old_umask"
+      print_error "Cannot remove ${var_name} from '${INSTALL_ENV_FILE}': its existing assignment spans multiple lines."
+      print_info "Remove ${var_name} from '${INSTALL_ENV_FILE}' and re-run."
+      return 1
+    fi
     chmod 600 "$INSTALL_ENV_FILE.tmp" 2>/dev/null || true
     mv "$INSTALL_ENV_FILE.tmp" "$INSTALL_ENV_FILE"
     chmod 600 "$INSTALL_ENV_FILE" 2>/dev/null || true
@@ -4295,14 +4337,16 @@ write_tfvars_from_state() {
   # as one set: a run that rotates the client secret or names a resource group
   # must not lose the rest, and the apply rewrites the Secret from what is
   # recovered here. The resource group belongs to either shape and always
-  # recovers. The service key recovers only when this run names none of the
-  # four discrete values, and the discrete values only when it names no service
-  # key, so a live value of the shape the operator is leaving cannot come back
-  # and shadow the one being named (LiteLLM reads the service key first).
+  # recovers. The service key recovers unless all four discrete values are
+  # already set (a partial discrete set cannot replace a live service key,
+  # whose Secret holds none of the discrete values to complete it), and the
+  # discrete values recover when no service key is set, so a live value of the
+  # shape the operator is leaving cannot come back and shadow the one being
+  # named (LiteLLM reads the service key first).
   local recover_keys="API_SERVER_KEY GEMINI_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY OPENAI_COMPATIBLE_API_KEY SLACK_BOT_TOKEN SLACK_APP_TOKEN SESSION_KV_API_KEY SESSION_KV_SALT"
   if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
     recover_keys="$recover_keys AICORE_RESOURCE_GROUP"
-    sap_ai_core_discrete_named || recover_keys="$recover_keys AICORE_SERVICE_KEY"
+    sap_ai_core_all_discrete_set || recover_keys="$recover_keys AICORE_SERVICE_KEY"
     [ -n "${AICORE_SERVICE_KEY:-}" ] || recover_keys="$recover_keys $SAP_AI_CORE_DISCRETE_KEYS"
   fi
   if command -v kubectl >/dev/null 2>&1 &&
@@ -4339,6 +4383,7 @@ write_tfvars_from_state() {
   if [ "${MODEL_PROVIDER:-$DEFAULT_MODEL_PROVIDER}" = "sap" ]; then
     normalize_sap_ai_core_service_key || return 1
     refuse_both_sap_ai_core_credential_shapes || return 1
+    refuse_incomplete_sap_ai_core_discrete_credentials || return 1
   fi
 
   # MEMORY is the one key whose absence from install.env costs DATA rather than

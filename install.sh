@@ -457,6 +457,7 @@ PARAM_AICORE_RESOURCE_GROUP="${AICORE_RESOURCE_GROUP:-}"
 # Set when a discrete --aicore-* credential flag was typed on this run, so a
 # flag can move an install from a recorded service key to client credentials.
 PARAM_AICORE_DISCRETE_FROM_FLAG="false"
+PARAM_MODEL_PROVIDER_FROM_FLAG="false"
 PARAM_GITOPS_ORG="${GITOPS_ORG:-${GITHUB_ORG:-}}"
 PARAM_GITOPS_REPO="${GITOPS_REPO:-${GITHUB_REPO:-}}"
 PARAM_GITHUB_APP_ID="${GITHUB_APP_ID:-}"
@@ -1070,7 +1071,7 @@ parse_args() {
         note_install_env_flag PLATFORM_AGENT_MODE "${1%%=*}" "$INSTALL_ENV_FLAG_KIND_STRING" PARAM_PLATFORM_AGENT_MODE DEFAULT_PLATFORM_AGENT_MODE
         shift ;;
       --agent-namespace=*) PARAM_AGENT_NAMESPACE="${1#*=}"; shift ;;
-      --model-provider=*) PARAM_MODEL_PROVIDER="${1#*=}"; shift ;;
+      --model-provider=*) PARAM_MODEL_PROVIDER="${1#*=}"; PARAM_MODEL_PROVIDER_FROM_FLAG="true"; shift ;;
       --model-default-name=*) PARAM_MODEL_DEFAULT_NAME="${1#*=}"; PARAM_MODEL_DEFAULT_NAME_PASSED="true"; shift ;;
       --model-max-tokens=*) PARAM_MODEL_MAX_TOKENS="${1#*=}"; shift ;;
       --litellm-redaction|--litellm-redaction=*)
@@ -1970,6 +1971,9 @@ warn_unrecorded_interview_answers() {
     if ! install_env_records_key "$file" "$key"; then
       if [ "$switched_to_openai_compatible" = "true" ] && [[ "$key" == OPENAI_COMPATIBLE_* ]]; then
         drifted="${drifted}${drifted:+ }${key}"
+      elif [ "${MODEL_PROVIDER:-}" = "sap" ] && [[ "$key" == AICORE_* ]] && [ -n "${!key:-}" ] &&
+        is_truthy "${PERSIST_SECRETS_ON_DISK:-$DEFAULT_PERSIST_SECRETS_ON_DISK}"; then
+        drifted="${drifted}${drifted:+ }${key}"
       fi
       continue
     fi
@@ -1980,8 +1984,9 @@ warn_unrecorded_interview_answers() {
     esac
     # The run compacts the service key to one line, and the file may hold it as
     # the cockpit gave it; the same key either way is not drift.
-    if [ "$key" = "AICORE_SERVICE_KEY" ] && [ -n "$recorded" ]; then
-      recorded="$(printf '%s' "$recorded" | jq -c . 2>/dev/null || printf '%s' "$recorded")"
+    if [ "$key" = "AICORE_SERVICE_KEY" ]; then
+      recorded="$(sap_ai_core_service_key_canonical "$recorded")"
+      current="$(sap_ai_core_service_key_canonical "$current")"
     fi
     [ "$recorded" != "$current" ] || continue
     # The GitHub GitOps keys follow the answer when the run commits
@@ -2856,10 +2861,12 @@ bootstrap_install_env_file() {
     write_env_var "$tmp" OPENAI_COMPATIBLE_CA_SECRET_NAME "${OPENAI_COMPATIBLE_CA_SECRET_NAME:-}"
     write_secret_env_var "$tmp" OPENAI_COMPATIBLE_API_KEY "${OPENAI_COMPATIBLE_API_KEY:-}"
   fi
-  local sap_env_key
-  for sap_env_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
-    write_secret_env_var "$tmp" "$sap_env_key" "${!sap_env_key:-}"
-  done
+  if [ "${MODEL_PROVIDER:-}" = "sap" ]; then
+    local sap_env_key
+    for sap_env_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+      write_secret_env_var "$tmp" "$sap_env_key" "${!sap_env_key:-}"
+    done
+  fi
   write_env_var "$tmp" ALLOWED_USERS "${ALLOWED_USERS:-}"
   write_env_var "$tmp" CHAT_TOPIC_NAME "${CHAT_TOPIC_NAME:-}"
   write_env_var "$tmp" CHAT_SUB_NAME "${CHAT_SUB_NAME:-}"
@@ -3631,11 +3638,20 @@ clear_sap_ai_core_discrete_values() {
 # that disagrees with the file; the discrete flags each go through that check
 # too. Returns 1 having said why. Needs installer_common.sh sourced.
 refuse_sap_ai_core_flags_against_install_env() {
-  local file="${INSTALL_ENV_FILE:-}" key recorded_key recorded_discrete=""
+  local file="${INSTALL_ENV_FILE:-}" key recorded_key recorded_discrete="" recorded_provider=""
   [ -n "$file" ] && [ -f "$file" ] || return 0
-  [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] || [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] || return 0
+  [ "$PARAM_MODEL_PROVIDER_FROM_FLAG" = "true" ] || [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] || [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] || return 0
   # shellcheck disable=SC2086  # a word list by design
-  read_recorded_install_env_values "$file" $SAP_AI_CORE_CREDENTIAL_KEYS
+  read_recorded_install_env_values "$file" MODEL_PROVIDER $SAP_AI_CORE_CREDENTIAL_KEYS
+  if install_env_records_key "$file" MODEL_PROVIDER; then
+    recorded_provider="$(recorded_install_env_value "$file" MODEL_PROVIDER)"
+    recorded_provider="${recorded_provider:-$DEFAULT_MODEL_PROVIDER}"
+    if [ "$recorded_provider" != "sap" ]; then
+      print_error "Switching to MODEL_PROVIDER=sap by flag would hold for this run only: ${file} records MODEL_PROVIDER=${recorded_provider}, and the next run without the flag, or upgrade.sh, renders ${recorded_provider} again and drops the SAP AI Core credentials from the live Secret."
+      print_info "Set MODEL_PROVIDER=sap (and the SAP AI Core credentials) in ${file} and re-run without the flags, or switch with './install.sh --menu', whose Save & Apply writes them."
+      return 1
+    fi
+  fi
   recorded_key="$(recorded_install_env_value "$file" AICORE_SERVICE_KEY)"
   for key in $SAP_AI_CORE_DISCRETE_KEYS; do
     [ -z "$(recorded_install_env_value "$file" "$key")" ] || recorded_discrete="true"
@@ -3651,7 +3667,7 @@ refuse_sap_ai_core_flags_against_install_env() {
     return 1
   fi
   if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$recorded_key" ] &&
-    [ "$(printf '%s' "$recorded_key" | jq -cS . 2>/dev/null || true)" != "$(printf '%s' "${AICORE_SERVICE_KEY:-}" | jq -cS . 2>/dev/null || true)" ]; then
+    [ "$(sap_ai_core_service_key_canonical "$recorded_key")" != "$(sap_ai_core_service_key_canonical "${AICORE_SERVICE_KEY:-}")" ]; then
     print_error "--aicore-service-key-file gives a different AICORE_SERVICE_KEY from the one ${file} records, so it would hold for this run only."
     print_info "Replace AICORE_SERVICE_KEY in ${file} with the new key and re-run without the flag."
     return 1
@@ -6034,9 +6050,17 @@ run_menu_system() {
               openai_compatible_api_key openai_compatible_ca_secret_name
             ;;
           6)
+            # A model this sap install already pins survives a revisit, as the
+            # interview arm keeps it; a switch from another provider takes the
+            # sap default, because the old name is not valid here.
+            local sap_menu_model_default
+            sap_menu_model_default="$(default_model_for_provider sap)"
+            if [ "$model_provider" = "sap" ] && [ -n "$model_default_name" ]; then
+              sap_menu_model_default="$model_default_name"
+            fi
             model_provider="sap"
             prompt_sap_ai_core_credentials || return 1
-            prompt_read "SAP AI Core model name (<publisher>--<model>, e.g. $(default_model_for_provider sap))" model_default_name "$(default_model_for_provider sap)"
+            prompt_read "SAP AI Core model name (<publisher>--<model>, e.g. $(default_model_for_provider sap))" model_default_name "$sap_menu_model_default"
             ;;
         esac
         ;;
@@ -6125,6 +6149,42 @@ run_menu_system() {
         # took from the App's name) is refused here too, before anything is
         # saved or applied.
         validate_github_app_id "$github_app_id" "GITHUB_APP_ID in ${INSTALL_ENV_FILE}" || return 1
+        # On a sap install, compact the service key before saving and write all
+        # six keys first (AICORE_SERVICE_KEY is first in the list): when the
+        # recorded service key is already the same key and secrets stay on disk,
+        # skip rewriting it so a multi-line key pasted from the SAP BTP cockpit
+        # stays valid shell; when it must be replaced or removed and its
+        # existing assignment spans lines, save_secret_env_var refuses before
+        # any other key in install.env has been touched.
+        if [ "$model_provider" = "sap" ]; then
+          if ! normalize_sap_ai_core_service_key || ! refuse_both_sap_ai_core_credential_shapes ||
+            ! refuse_incomplete_sap_ai_core_discrete_credentials; then
+            if [ -n "$install_env_before" ]; then
+              rm -f "$install_env_before"
+              trap - EXIT
+            fi
+            return 1
+          fi
+          local sap_save_key recorded_sap_service_key=""
+          if [ -n "$install_env_before" ] && install_env_records_key "$install_env_before" AICORE_SERVICE_KEY; then
+            recorded_sap_service_key="$(recorded_install_env_value "$install_env_before" AICORE_SERVICE_KEY)"
+          fi
+          for sap_save_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
+            if [ "$sap_save_key" = "AICORE_SERVICE_KEY" ] &&
+              is_truthy "${PERSIST_SECRETS_ON_DISK:-$DEFAULT_PERSIST_SECRETS_ON_DISK}" &&
+              [ -n "$install_env_before" ] && install_env_records_key "$install_env_before" AICORE_SERVICE_KEY &&
+              [ "$(sap_ai_core_service_key_canonical "$recorded_sap_service_key")" = "$(sap_ai_core_service_key_canonical "${AICORE_SERVICE_KEY:-}")" ]; then
+              continue
+            fi
+            if ! save_secret_env_var "$sap_save_key" "${!sap_save_key:-}"; then
+              if [ -n "$install_env_before" ]; then
+                rm -f "$install_env_before"
+                trap - EXIT
+              fi
+              return 1
+            fi
+          done
+        fi
         save_env_var PROJECT_ID "$project_id"
         save_env_var CLUSTER_NAME "$cluster_name"
         save_env_var REGION "$region"
@@ -6143,16 +6203,6 @@ run_menu_system() {
           save_env_var OPENAI_COMPATIBLE_CA_SECRET_NAME "$openai_compatible_ca_secret_name"
           save_secret_env_var OPENAI_COMPATIBLE_API_KEY "$openai_compatible_api_key"
         fi
-        # On a sap install all six, empty ones included, so the shape the panel
-        # cleared is cleared in the file too and cannot come back on the next
-        # upgrade.sh. On any other provider only the ones that hold a value, so
-        # the file does not gain six empty lines.
-        local sap_save_key
-        for sap_save_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do
-          if [ "$model_provider" = "sap" ] || [ -n "${!sap_save_key:-}" ]; then
-            save_secret_env_var "$sap_save_key" "${!sap_save_key:-}"
-          fi
-        done
         save_env_var ALLOWED_USERS "$allowed_users"
         save_env_var CHAT_TOPIC_NAME "$chat_topic_name"
         save_env_var CHAT_SUB_NAME "$chat_sub_name"
@@ -7186,7 +7236,7 @@ main() {
       if [ -n "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" != "true" ] && sap_ai_core_discrete_named; then
         print_info "--aicore-service-key-file replaces the client credentials this run inherited; the service key is what the gateway will use."
         clear_sap_ai_core_discrete_values
-      elif [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] && [ -z "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$AICORE_SERVICE_KEY" ]; then
+      elif [ "$PARAM_AICORE_DISCRETE_FROM_FLAG" = "true" ] && [ -z "$PARAM_AICORE_SERVICE_KEY_FILE" ] && [ -n "$AICORE_SERVICE_KEY" ] && sap_ai_core_all_discrete_set; then
         print_info "The --aicore-* client credentials replace the service key this run inherited."
         clear_sap_ai_core_service_key
       fi

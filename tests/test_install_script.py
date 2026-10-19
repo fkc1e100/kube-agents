@@ -12393,6 +12393,91 @@ class SapAiCoreInstallerTest(unittest.TestCase):
                 self.assertIn('rc=1 key={"clientid":"held"}', proc.stdout, proc.stderr)
                 self.assertIn(message, proc.stdout + proc.stderr)
 
+    def test_switching_to_sap_by_flag_over_a_recorded_other_provider_is_refused(self):
+        proc = self._run(
+            'PARAM_MODEL_PROVIDER_FROM_FLAG=true; rc=0; refuse_sap_ai_core_flags_against_install_env || rc=$?; echo "rc=$rc"',
+            install_env="MODEL_PROVIDER=gemini\n",
+        )
+        self.assertIn("rc=1", proc.stdout, proc.stderr)
+        self.assertIn("Switching to MODEL_PROVIDER=sap by flag would hold for this run only", proc.stdout + proc.stderr)
+
+    def test_first_install_writes_sap_keys_only_for_sap_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gemini_env = pathlib.Path(tmp) / "gemini.install.env"
+            sap_env = pathlib.Path(tmp) / "sap.install.env"
+            proc_gemini = self._run(
+                f'PARAM_DRY_RUN=false; MODEL_PROVIDER=gemini; AICORE_CLIENT_ID=stray-id; bootstrap_install_env_file "{gemini_env}" v1.0.0',
+            )
+            self.assertEqual(proc_gemini.returncode, 0, proc_gemini.stderr)
+            self.assertNotIn("AICORE_", gemini_env.read_text())
+            proc_sap = self._run(
+                f'PARAM_DRY_RUN=false; MODEL_PROVIDER=sap; AICORE_CLIENT_ID=sap-id; bootstrap_install_env_file "{sap_env}" v1.0.0',
+            )
+            self.assertEqual(proc_sap.returncode, 0, proc_sap.stderr)
+            self.assertIn("AICORE_CLIENT_ID=sap-id", sap_env.read_text())
+
+    def test_drift_warning_uses_canonical_service_key_and_names_unrecorded_discrete_keys(self):
+        recorded = (
+            "MODEL_PROVIDER=sap\n"
+            "AICORE_SERVICE_KEY='{\n"
+            '  "url": "https://t.example",\n'
+            '  "clientid": "sb-client"\n'
+            "}'\n"
+        )
+        # Reordered keys and single-line vs multi-line are not drift, even when
+        # the interview switches away from sap without touching the service key.
+        proc_same = self._run(
+            'PARAM_NON_INTERACTIVE=false; PARAM_DRY_RUN=false; has_controlling_tty() { return 0; }; '
+            'MODEL_PROVIDER=gemini; AICORE_SERVICE_KEY=\'{"clientid":"sb-client","url":"https://t.example"}\'; '
+            'warn_unrecorded_interview_answers "$INSTALL_ENV_FILE"',
+            install_env=recorded,
+        )
+        self.assertIn("MODEL_PROVIDER=gemini", proc_same.stdout)
+        self.assertNotIn("AICORE_SERVICE_KEY", proc_same.stdout)
+        # Switching from a recorded service key to discrete credentials in the
+        # interview warns to remove AICORE_SERVICE_KEY and add the four discrete keys.
+        proc_switch = self._run(
+            'PARAM_NON_INTERACTIVE=false; PARAM_DRY_RUN=false; has_controlling_tty() { return 0; }; '
+            'MODEL_PROVIDER=sap; AICORE_SERVICE_KEY=""; '
+            'AICORE_CLIENT_ID=cid; AICORE_CLIENT_SECRET=csec; AICORE_AUTH_URL=https://a; AICORE_BASE_URL=https://b; '
+            'warn_unrecorded_interview_answers "$INSTALL_ENV_FILE"',
+            install_env=recorded,
+        )
+        self.assertIn("AICORE_SERVICE_KEY=   (remove it: this run dropped it)", proc_switch.stdout)
+        for key in ("AICORE_CLIENT_ID=cid", "AICORE_CLIENT_SECRET=<the value you entered>",
+                    "AICORE_AUTH_URL=https://a", "AICORE_BASE_URL=https://b"):
+            self.assertIn(key, proc_switch.stdout)
+
+    def test_day2_menu_sap_arm_preserves_a_pinned_model_and_save_keeps_a_multiline_service_key(self):
+        text = _INSTALL_SH.read_text()
+        menu_start = text.index("run_menu_system() {")
+        sap_arm = text[text.index("          6)\n", menu_start):text.index("        esac\n        ;;\n      4)", menu_start)]
+        self.assertIn('if [ "$model_provider" = "sap" ] && [ -n "$model_default_name" ]; then', sap_arm)
+        self.assertIn('sap_menu_model_default="$model_default_name"', sap_arm)
+        # Save & Apply leaves an unchanged multi-line AICORE_SERVICE_KEY valid shell.
+        recorded = (
+            "MODEL_PROVIDER=sap\n"
+            "AICORE_SERVICE_KEY='{\n"
+            '  "clientid": "sb-client",\n'
+            '  "url": "https://t.example"\n'
+            "}'\n"
+        )
+        proc = self._run(
+            'model_provider=sap; AICORE_SERVICE_KEY=\'{"url":"https://t.example","clientid":"sb-client"}\'; '
+            'install_env_before="$TMPDIR_UNDER_TEST/before"; cp "$INSTALL_ENV_FILE" "$install_env_before"; '
+            'recorded_sap_service_key="$(recorded_install_env_value "$install_env_before" AICORE_SERVICE_KEY)"; '
+            'for sap_save_key in $SAP_AI_CORE_CREDENTIAL_KEYS; do '
+            '  if [ "$sap_save_key" = "AICORE_SERVICE_KEY" ] && '
+            '    [ "$(sap_ai_core_service_key_canonical "$recorded_sap_service_key")" = "$(sap_ai_core_service_key_canonical "${AICORE_SERVICE_KEY:-}")" ]; then '
+            '    continue; '
+            '  fi; '
+            '  save_secret_env_var "$sap_save_key" "${!sap_save_key:-}"; '
+            'done; '
+            'bash -n "$INSTALL_ENV_FILE"; echo "rc=$?"',
+            install_env=recorded,
+        )
+        self.assertIn("rc=0", proc.stdout, proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
