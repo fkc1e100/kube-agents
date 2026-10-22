@@ -11,9 +11,9 @@ It runs as the `platform` Hermes profile in the agent pod, scaffolded at pod sta
 
 ## How a request reaches it
 
-Per `SOUL.md §0`, every piece of work arrives as a kanban card:
+Per `SOUL.md §0`, the Planning Agent delegates to it only through kanban cards. Scheduled runs on its profile are not cards; see [Autonomous watchdogs](/kube-agents/concepts/autonomous-watchdogs/).
 
-1. The Planning Agent files a card, and the Platform Agent is invoked with `work kanban task <id>`.
+1. A card is assigned to it, usually filed by the Planning Agent, and it is invoked with `work kanban task <id>`.
 2. It reads the request with `kanban_show` and does the work.
 3. On a long job it reports progress as it goes with `kanban_heartbeat(note=…)`. The notes accumulate into a single rolling `⏳` message that the notifier edits in place, so the thread stays current without waking the Planning Agent and without notifying the space once per note (`deploy/docker/patches/kanban_progress_lines.py`).
 4. It always finishes with `kanban_complete` or `kanban_block`.
@@ -30,18 +30,18 @@ The delivery path measures the result and logs what it finds. A `#` H1 duplicati
 
 ## Completion guardrails
 
-Patches the image applies to the kanban tools stop a card from closing in a state that would mislead the person who asked, or from stalling the board.
+Patches the image applies to the kanban tools change what these calls do in the cases below.
 
 | When the worker…                                                                                                                                             | What happens                                                                                                                                                                             | Patch                          |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| Completes with a blank `result`                                                                                                                              | Refused at most once per card; the card then closes with whatever the worker sends.                                                                                                      | `kanban_children_settled.py`   |
-| Completes while the card's own fan-out children are unfinished                                                                                               | Told to wait for them and synthesize instead. Refused at most once per card; the card then closes with whatever the worker sends.                                                        | `kanban_children_settled.py`   |
+| Completes with a blank `result`                                                                                                                              | Refused at most once per card within 15 minutes; the retry is accepted, with `summary` promoted into `result`.                                                                           | `kanban_result_required.py`    |
+| Completes while the card's own fan-out children are unfinished                                                                                               | Told to wait for them and synthesize instead. Refused at most once per card within 15 minutes; the card then closes with whatever the worker sends.                                      | `kanban_children_settled.py`   |
 | Calls `kanban_block(kind="dependency")` with nothing unfinished to wait on (no unfinished parent, and no fan-out child the scheduling repair turns into one) | Refused. The board would hand that card straight to a fresh worker that can't see what the first one already did.                                                                        | `kanban_children_settled.py`   |
 | Calls `kanban_link` after the child has started (running, claimed, or any run on record)                                                                     | Refused, because the link would hold that run behind the new parent. The worker is told to wait for a running child's result, or that a blocked one needs an unblock rather than a link. | `kanban_link_running_guard.py` |
-| Started a fleet audit (`audit_report.py start` printed its result line) and no `finish` result line came back after the last `start`                         | `kanban_complete` is refused with the next step: run `finish`, or block the card. A retry within 15 minutes closes the card with a "Not published" line at the top of the result.        | `kanban_audit_ledger.py`       |
+| Completes after starting a fleet audit (`audit_report.py start` printed its result line) when no `finish` result line came back after the last `start`       | `kanban_complete` is refused with the next step: run `finish`, or block the card. A retry within 15 minutes closes the card with a "Not published" line at the top of the result.        | `kanban_audit_ledger.py`       |
 | Leaves out the ledger URL that a `finish` result line carries                                                                                                | The URL is added to the result.                                                                                                                                                          | `kanban_audit_ledger.py`       |
 | Keeps running after someone else blocks the card                                                                                                             | The worker is stopped. A worker whose run has ended is told to stop rather than retry.                                                                                                   | `kanban_ended_run.py`          |
-| Completes while a declared plan step is not `done` (see [Plans](#plans))                                                                                     | Refused on every attempt, not once.                                                                                                                                                      | `kanban_ended_run.py`          |
+| Completes while a declared plan step is not `done` (see [Plans](#plans))                                                                                     | Refused on every attempt, not once.                                                                                                                                                      | `kanban_children_settled.py`   |
 
 All patches live under `deploy/docker/patches/`.
 
