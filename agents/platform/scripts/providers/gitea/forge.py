@@ -101,6 +101,9 @@ class GiteaForge(Forge):
     accepts_port = True
     error_overrides = ERROR_OVERRIDES
     acknowledges = True
+    # Issues and pull requests carry labels; `label-ensure` creates them and
+    # the list verbs match them by name.
+    labels = True
     whoami_route = ("user", "login")
     COMMIT_CAP = COMMIT_CAP
     REACH_PAGES = REACH_PAGES

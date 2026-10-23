@@ -1944,8 +1944,8 @@ func TestCredentialProxyMountsSelfManagedForgeTokens(t *testing.T) {
 
 	raw := buildCredentialProxyPolicyConfigMap(agent).Data[vcsForgesKey]
 	wantJSON := `{"forges":[{"provider":"github","host":"github.com"},` +
-		`{"provider":"gitlab","host":"gitlab.com","tokenPath":"/var/run/kube-agents/forge-credentials/gitlab/token","allowedPaths":["acme"]},` +
-		`{"provider":"gitea","host":"gitea.gitea.svc.cluster.local","scheme":"http","port":3000,"tokenPath":"/var/run/kube-agents/forge-credentials/gitea/token","allowedPaths":["platform-team"]}]}`
+		`{"provider":"gitlab","host":"gitlab.com","tokenPath":"/var/run/kube-agents/forge-credentials/gitlab/token","readTokenPath":"/var/run/kube-agents/forge-credentials/gitlab/read-token","allowedPaths":["acme"]},` +
+		`{"provider":"gitea","host":"gitea.gitea.svc.cluster.local","scheme":"http","port":3000,"tokenPath":"/var/run/kube-agents/forge-credentials/gitea/token","readTokenPath":"/var/run/kube-agents/forge-credentials/gitea/read-token","allowedPaths":["platform-team"]}]}`
 	if raw != wantJSON {
 		t.Errorf("vcs-forges.json =\n %s\nwant\n %s", raw, wantJSON)
 	}
@@ -1985,7 +1985,10 @@ func TestCredentialProxyMountsSelfManagedForgeTokens(t *testing.T) {
 		t.Fatalf("expected secret volume vcs-forge-credentials-2, got %+v", vol)
 	}
 	sec := vol.Secret
-	if sec.SecretName != "gitea-token" || len(sec.Items) != 1 || sec.Items[0].Key != "token" || sec.Items[0].Path != "token" {
+	// The same two keys every self-managed forge's Secret projects: `token`,
+	// and the optional `read-token`, which a Gitea forge does not read.
+	if sec.SecretName != "gitea-token" || len(sec.Items) != 2 || sec.Items[0].Key != "token" || sec.Items[0].Path != "token" ||
+		sec.Items[1].Key != agentv1alpha1.ForgeCredentialsReadTokenKey || sec.Items[1].Path != agentv1alpha1.ForgeCredentialsReadTokenKey {
 		t.Errorf("unexpected secret volume source: %+v", sec)
 	}
 

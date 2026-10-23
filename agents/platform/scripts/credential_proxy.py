@@ -5846,9 +5846,8 @@ class CommandExecutor:
             # "allow all" — it is a list containing one empty protocol name,
             # so it allows nothing and breaks every clone. The value must stay
             # non-empty. `https` is the base; `_execute` widens it to
-            # `https:http` only when `allow_http` is set or `extra_config`
-            # carries a `credential.http://` helper for an explicitly declared
-            # `http` forge.
+            # `https:http` only when `allow_http` is set for an explicitly
+            # declared `http` forge.
             #
             # It also refuses the `file` protocol, and that is load-bearing
             # rather than incidental: `--upload-pack=<cmd>` and
