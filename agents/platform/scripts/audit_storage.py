@@ -18,6 +18,8 @@ import sys
 
 # How much of a failed query's error text the unread list shows per kind.
 UNREAD_REASON_MAX_CHARS = 200
+# What a summary line prints in place of a count for a kind whose listing failed.
+UNREAD_COUNT_TEXT = "unread (listing failed; see the verdict below)"
 # Per-call kubectl deadline: 60 s broker admission wait + 60 s broker kubectl run cap + 5 s margin,
 # matching cluster_preflight.sh so queued calls on the shared 8-slot sandbox pool do not time out locally.
 KUBECTL_TIMEOUT_SECONDS = 125
@@ -193,11 +195,15 @@ def audit_storage(kubeconfig: str | None = None) -> int:
     total_scs = len(sc_list)
     total_vas = len(va_list)
 
+    def counted(key: str, text: str) -> str:
+        # A kind whose listing failed has no count; printing the empty fallback's 0 would read as measured.
+        return UNREAD_COUNT_TEXT if key in unread else text
+
     print("## Kubernetes Storage Fleet Audit\n")
-    print(f"- **PersistentVolumeClaims (PVCs):** {total_pvcs} total ({bound_pvcs} Bound, {len(pending_pvcs)} Pending/Unbound)")
-    print(f"- **PersistentVolumes (PVs):** {total_pvs} total ({bound_pvs} Bound, {available_pvs} Available, {len(unhealthy_pvs)} Failed/Released)")
-    print(f"- **StorageClasses:** {total_scs} available (Default: `{default_sc}`)")
-    print(f"- **VolumeAttachments:** {total_vas} total ({len(attachment_errors)} errors or unattached)\n")
+    print("- **PersistentVolumeClaims (PVCs):** " + counted("pvcs", f"{total_pvcs} total ({bound_pvcs} Bound, {len(pending_pvcs)} Pending/Unbound)"))
+    print("- **PersistentVolumes (PVs):** " + counted("pvs", f"{total_pvs} total ({bound_pvs} Bound, {available_pvs} Available, {len(unhealthy_pvs)} Failed/Released)"))
+    print("- **StorageClasses:** " + counted("scs", f"{total_scs} available (Default: `{default_sc}`)"))
+    print("- **VolumeAttachments:** " + counted("attachments", f"{total_vas} total ({len(attachment_errors)} errors or unattached)") + "\n")
 
     # Stop-on-Clean Rule Status
     is_clean = len(pending_pvcs) == 0 and len(unhealthy_pvs) == 0 and len(attachment_errors) == 0
@@ -230,7 +236,7 @@ def audit_storage(kubeconfig: str | None = None) -> int:
         for p in sorted(pvc_list, key=lambda x: (x["phase"] == "Bound", x["namespace"], x["name"])):
             print(f"{p['namespace']:<22} {p['name']:<32} {p['phase']:<12} {p['capacity']:<10} {p['storage_class']:<20} {p['volume']}")
         print("")
-    else:
+    elif "pvcs" not in unread:
         print("No PersistentVolumeClaims found on this cluster.\n")
 
     if pv_list:
@@ -240,7 +246,7 @@ def audit_storage(kubeconfig: str | None = None) -> int:
         for p in sorted(pv_list, key=lambda x: (x["phase"] == "Bound", x["name"])):
             print(f"{p['name']:<38} {p['phase']:<12} {p['capacity']:<10} {p['reclaim_policy']:<12} {p['claim']}")
         print("")
-    else:
+    elif "pvs" not in unread:
         print("No PersistentVolumes found on this cluster.\n")
 
     if attachment_errors:

@@ -34,6 +34,26 @@ DEFAULT_PARENT_KIND = "Gateway"
 DEFAULT_UNPROGRAMMED_REASON = "no status conditions reported"
 # Gateway listener conditions whose False status means that listener does not serve traffic.
 LISTENER_HEALTH_CONDITIONS = ("Accepted", "Programmed", "ResolvedRefs")
+# Annotation the GKE Ingress controller writes with each backend service's health-check state (JSON map).
+GKE_BACKENDS_ANNOTATION = "ingress.kubernetes.io/backends"
+# The only backend state the GKE Ingress controller reports for a serving backend.
+HEALTHY_BACKEND_STATE = "HEALTHY"
+# What a summary line prints in place of a count for a kind whose listing failed.
+UNREAD_COUNT_TEXT = "unread (listing failed; see the verdict below)"
+
+
+def unhealthy_backends(annotations: dict) -> list[str]:
+    """Backends the GKE Ingress controller reports as not HEALTHY; an unparseable annotation is one entry."""
+    raw = (annotations or {}).get(GKE_BACKENDS_ANNOTATION)
+    if not raw:
+        return []
+    try:
+        states = json.loads(raw)
+    except (TypeError, ValueError):
+        return [f"{GKE_BACKENDS_ANNOTATION} unparseable"]
+    if not isinstance(states, dict):
+        return [f"{GKE_BACKENDS_ANNOTATION} unparseable"]
+    return sorted(f"{backend}={state}" for backend, state in states.items() if state != HEALTHY_BACKEND_STATE)
 
 
 def parent_ref_key(ref: dict, route_namespace: str) -> tuple:
@@ -118,6 +138,7 @@ def audit_networking(kubeconfig: str | None = None) -> int:
     # 1. Parse Ingresses
     ingress_list = []
     unassigned_ingresses = []
+    unhealthy_ingresses = []
     for item in ing_items:
         ns = item.get("metadata", {}).get("namespace", "default")
         name = item.get("metadata", {}).get("name", "")
@@ -134,6 +155,8 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         hosts = [r.get("host", "*") for r in rules if r.get("host")] or ["*"]
         host_str = ", ".join(hosts)
 
+        bad_backends = unhealthy_backends(item.get("metadata", {}).get("annotations", {}))
+
         ing_info = {
             "namespace": ns,
             "name": name,
@@ -141,10 +164,13 @@ def audit_networking(kubeconfig: str | None = None) -> int:
             "hosts": host_str,
             "external_ip": ip_str,
             "ready": bool(ips),
+            "backends": ", ".join(bad_backends) or "no unhealthy backend reported",
         }
         ingress_list.append(ing_info)
         if not ips:
             unassigned_ingresses.append(ing_info)
+        if bad_backends:
+            unhealthy_ingresses.append(ing_info)
 
     # 2. Parse Gateways
     gateway_list = []
@@ -212,6 +238,9 @@ def audit_networking(kubeconfig: str | None = None) -> int:
         reported_keys = {parent_ref_key(p.get("parentRef") or {}, ns) for p in status_parents}
         not_attached = any(parent_ref_key(p, ns) not in reported_keys for p in parents)
         route_failed = route_failed or not_attached
+        if not_attached and conditions:
+            # Some parents accepted the route; the row must still show that at least one did not.
+            conditions.append("NotAttached")
 
         route_info = {
             "namespace": ns,
@@ -282,16 +311,20 @@ def audit_networking(kubeconfig: str | None = None) -> int:
     total_lbs = len(lb_services)
     total_nps = len(np_services)
 
+    def counted(key: str, text: str) -> str:
+        # A kind whose listing failed has no count; printing the empty fallback's 0 would read as measured.
+        return UNREAD_COUNT_TEXT if key in unread else text
+
     print("## Kubernetes Ingress & Gateway Fleet Audit\n")
-    print(f"- **Ingress Resources:** {total_ingresses} total ({total_ingresses - len(unassigned_ingresses)} Assigned IP, {len(unassigned_ingresses)} Pending/Unallocated)")
-    print(f"- **Gateway API (Gateways):** {total_gateways} total ({total_gateways - len(unaccepted_gateways)} Programmed with an address, {len(unaccepted_gateways)} Not Programmed or no address)")
-    print(f"- **Gateway API (HTTPRoutes):** {total_routes} total ({len(degraded_routes)} with Accepted=False, ResolvedRefs=False, or not attached)")
-    print(f"- **LoadBalancer Services:** {total_lbs} total ({total_lbs - len(pending_lb)} Active VIP, {len(pending_lb)} Pending VIP)")
-    print(f"- **NodePort Services:** {total_nps} total | **Internal ClusterIP Services:** {cluster_ip_count}")
-    print(f"- **GKE Extensions:** {len(bc_list)} BackendConfigs, {len(hcp_list)} HealthCheckPolicies\n")
+    print("- **Ingress Resources:** " + counted("ingresses", f"{total_ingresses} total ({total_ingresses - len(unassigned_ingresses)} Assigned IP, {len(unassigned_ingresses)} Pending/Unallocated, {len(unhealthy_ingresses)} with a backend not HEALTHY)"))
+    print("- **Gateway API (Gateways):** " + counted("gateways", f"{total_gateways} total ({total_gateways - len(unaccepted_gateways)} Programmed with an address, {len(unaccepted_gateways)} Not Programmed or no address)"))
+    print("- **Gateway API (HTTPRoutes):** " + counted("httproutes", f"{total_routes} total ({len(degraded_routes)} with Accepted=False, ResolvedRefs=False, or not attached)"))
+    print("- **LoadBalancer Services:** " + counted("services", f"{total_lbs} total ({total_lbs - len(pending_lb)} Active VIP, {len(pending_lb)} Pending VIP)"))
+    print("- **NodePort Services:** " + counted("services", f"{total_nps} total | **Internal ClusterIP Services:** {cluster_ip_count}"))
+    print("- **GKE Extensions:** " + counted("backendconfigs", f"{len(bc_list)} BackendConfigs") + ", " + counted("healthcheckpolicies", f"{len(hcp_list)} HealthCheckPolicies") + " (listed by name; their health-check results are not read)\n")
 
     # Stop-on-Clean Rule Status
-    is_clean = not (unassigned_ingresses or unaccepted_gateways or pending_lb or degraded_routes)
+    is_clean = not (unassigned_ingresses or unhealthy_ingresses or unaccepted_gateways or pending_lb or degraded_routes)
     if unread:
         print(f"**Networking Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}).")
         print("CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy.\n")
@@ -299,10 +332,10 @@ def audit_networking(kubeconfig: str | None = None) -> int:
             print(f"- `{key}`: {reason}")
         print("")
     elif is_clean:
-        print("**Networking Audit Verdict: Clean & Fully Programmed** (All Ingresses, Gateways, and LoadBalancers have healthy allocated IPs and valid routing).")
+        print("**Networking Audit Verdict: Clean & Fully Programmed** (All Ingresses, Gateways, and LoadBalancers have allocated IPs and valid routing, and no Ingress backend the GKE Ingress controller reports on is unhealthy).")
         print("CLEAN_AUDIT_STOP: YES — All Ingress, Gateway, and LoadBalancer resources are healthy; call kanban_complete immediately.\n")
     else:
-        print(f"**Networking Audit Verdict: Routing / VIP Degradation Detected** ({len(unassigned_ingresses)} unassigned Ingresses, {len(unaccepted_gateways)} unaccepted Gateways, {len(degraded_routes)} failing HTTPRoutes, {len(pending_lb)} pending LoadBalancers).")
+        print(f"**Networking Audit Verdict: Routing / VIP Degradation Detected** ({len(unassigned_ingresses)} unassigned Ingresses, {len(unhealthy_ingresses)} Ingresses with unhealthy backends, {len(unaccepted_gateways)} unaccepted Gateways, {len(degraded_routes)} failing HTTPRoutes, {len(pending_lb)} pending LoadBalancers).")
         print("CLEAN_AUDIT_STOP: NO — Inspect degraded networking resources below.\n")
 
     if gateway_list:
@@ -324,12 +357,12 @@ def audit_networking(kubeconfig: str | None = None) -> int:
 
     if ingress_list:
         print("### Ingresses")
-        print(f"{'NAMESPACE':<22} {'NAME':<30} {'CLASS':<20} {'HOSTS':<30} {'EXTERNAL IP'}")
-        print("-" * 125)
+        print(f"{'NAMESPACE':<22} {'NAME':<30} {'CLASS':<20} {'HOSTS':<30} {'EXTERNAL IP':<22} {'BACKENDS'}")
+        print("-" * 150)
         for i in ingress_list:
-            print(f"{i['namespace']:<22} {i['name']:<30} {i['class']:<20} {i['hosts']:<30} {i['external_ip']}")
+            print(f"{i['namespace']:<22} {i['name']:<30} {i['class']:<20} {i['hosts']:<30} {i['external_ip']:<22} {i['backends']}")
         print("")
-    else:
+    elif "ingresses" not in unread:
         print("No standard Ingress resources configured on this cluster.\n")
 
     if lb_services:

@@ -837,6 +837,13 @@
 # the script missing.
 ./tasks/cluster-agent-security-audit-script/task.yaml
 
+# A Cluster Agent answers a storage audit with the single-pass collector SOUL.md
+# names (#3285): graded on a Cluster Agent doing the work, running
+# /opt/data/scripts/audit_storage.py, no result showing the script missing,
+# and a report naming the storage kinds. deployer: noop, read-only, no
+# fixture, 200s default until it has a record.
+./tasks/cluster-agent-storage-audit-collector/task.yaml
+
 # An implicit write request for a cluster setting: "turn on Binary Authorization",
 # no command named. The mirrored gke-platform-security skill used to answer it
 # with gcloud container clusters update (#2937's skills sweep); the case

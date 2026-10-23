@@ -208,6 +208,36 @@ class TestAuditCertificates(unittest.TestCase):
         out = self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
         self.assertIn("Could not read `certificates`", out)
+        self.assertIn("- **Certificates:** " + audit_certificates.UNREAD_COUNT_TEXT, out)
+        self.assertNotIn("**Certificates:** 0 total", out)
+        self.assertNotIn("No Certificate resources declared", out)
+
+    def _expired_certificate(self, expired_for):
+        not_after = (datetime.now(timezone.utc) - expired_for).isoformat()
+
+        def kubectl_json(args, env):
+            if "certificates.cert-manager.io" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "lapsed"},
+                            "spec": {"secretName": "s", "issuerRef": {"kind": "ClusterIssuer", "name": "acme"}},
+                            "status": {"notAfter": not_after, "conditions": [{"type": "Ready", "status": "True"}]},
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        return self._run_certs((0, "\n".join(audit_certificates.CERT_MANAGER_CRDS)), kubectl_json)
+
+    def test_certificate_expired_minutes_ago_prints_zero_days_ago(self):
+        out = self._expired_certificate(timedelta(minutes=10))
+        self.assertIn("EXPIRED (0d ago)", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_certificate_expired_twenty_five_hours_ago_prints_one_day_ago(self):
+        out = self._expired_certificate(timedelta(hours=25))
+        self.assertIn("EXPIRED (1d ago)", out)
 
     def test_failing_managed_certificate_without_cert_manager_is_degraded(self):
         def kubectl_json(args, env):
@@ -416,6 +446,9 @@ class TestAuditStorage(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("Storage Audit Verdict: Incomplete** (could not read: pvcs)", out)
         self.assertIn("timed out", out)
+        self.assertIn("- **PersistentVolumeClaims (PVCs):** " + audit_storage.UNREAD_COUNT_TEXT, out)
+        self.assertNotIn("No PersistentVolumeClaims found", out)
+        self.assertIn("No PersistentVolumes found", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
         self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
 
@@ -660,6 +693,54 @@ class TestAuditNetworking(unittest.TestCase):
         out = self._run_networking(fake_run_kubectl_json)
         self.assertIn("1 failing HTTPRoutes", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        split_row = next(line for line in out.splitlines() if line.startswith("prod") and "split" in line)
+        self.assertIn("Accepted=True, NotAttached", split_row)
+
+    def _ingress_with_backends(self, backends_annotation):
+        def fake_run_kubectl_json(args, env):
+            if "ingress" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {
+                                "namespace": "prod",
+                                "name": "web",
+                                "annotations": {audit_networking.GKE_BACKENDS_ANNOTATION: backends_annotation},
+                            },
+                            "spec": {"rules": [{"host": "web.example.com"}]},
+                            "status": {"loadBalancer": {"ingress": [{"ip": "34.100.1.9"}]}},
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        return self._run_networking(fake_run_kubectl_json)
+
+    def test_ingress_with_unhealthy_gke_backend_is_degraded(self):
+        out = self._ingress_with_backends('{"k8s1-abc-prod-web-80": "UNHEALTHY", "k8s1-abc-default-be-80": "HEALTHY"}')
+        self.assertIn("1 Ingresses with unhealthy backends", out)
+        self.assertIn("k8s1-abc-prod-web-80=UNHEALTHY", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_ingress_with_unparseable_backends_annotation_is_degraded(self):
+        out = self._ingress_with_backends("not-json")
+        self.assertIn("unparseable", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_ingress_with_all_backends_healthy_is_clean(self):
+        out = self._ingress_with_backends('{"k8s1-abc-prod-web-80": "HEALTHY"}')
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+
+    def test_failed_service_listing_prints_unread_not_zero_counts(self):
+        def fake_run_kubectl_json(args, env):
+            if "svc" in args:
+                return 1, {"error": "Error from server (Forbidden): services is forbidden"}
+            return 0, {"items": []}
+
+        out = self._run_networking(fake_run_kubectl_json)
+        self.assertIn("- **LoadBalancer Services:** " + audit_networking.UNREAD_COUNT_TEXT, out)
+        self.assertNotIn("0 Active VIP", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
     def test_route_with_duplicate_status_for_one_parent_and_none_for_the_other_is_degraded(self):
         def fake_run_kubectl_json(args, env):
@@ -760,7 +841,9 @@ class TestAuditNetworkPolicies(unittest.TestCase):
         self.assertIn("- **Total Namespaces:** 3", out)
         self.assertIn("- **Namespaces Protected by NetworkPolicies:** 1", out)
         self.assertIn("- **Namespaces Without NetworkPolicies:** 2", out)
-        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+        self.assertIn("Isolation Gaps Found", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+        self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
         self.assertIn("default, kube-system", out)
         self.assertIn("deny-all", out)
         db_line = next(line for line in out.splitlines() if "db-only" in line)
@@ -776,6 +859,41 @@ class TestAuditNetworkPolicies(unittest.TestCase):
             rc = audit_network_policies.audit_network_policies()
         self.assertEqual(rc, 0)
         return buf.getvalue()
+
+    @staticmethod
+    def _policies(namespaces, policies):
+        def fake_run_kubectl_json(args, env):
+            if "networkpolicies" in args:
+                return 0, {"items": policies}
+            return 0, {"items": [{"metadata": {"name": ns}} for ns in namespaces]}
+
+        return fake_run_kubectl_json
+
+    def test_every_namespace_with_a_restrictive_policy_is_clean(self):
+        deny = {"podSelector": {}, "policyTypes": ["Ingress"]}
+        out = self._run_policies(self._policies(
+            ["prod", "dev"],
+            [
+                {"metadata": {"namespace": "prod", "name": "deny"}, "spec": deny},
+                {"metadata": {"namespace": "dev", "name": "deny"}, "spec": deny},
+            ],
+        ))
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+        self.assertIn("enforcement", out)
+
+    def test_allow_all_ingress_policy_is_a_gap(self):
+        out = self._run_policies(self._policies(
+            ["prod"],
+            [{"metadata": {"namespace": "prod", "name": "open"}, "spec": {"podSelector": {}, "ingress": [{}]}}],
+        ))
+        self.assertIn("1 allow-all-ingress policies", out)
+        self.assertIn("ALLOW-ALL INGRESS", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_zero_policies_is_not_clean(self):
+        out = self._run_policies(self._policies(["prod", "default"], []))
+        self.assertIn("2 namespaces without a NetworkPolicy", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
     def test_failed_listing_prints_stop_no(self):
         def forbidden_policies(args, env):

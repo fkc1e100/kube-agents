@@ -48,6 +48,10 @@ FORBIDDEN_MARKER = "forbidden"
 RENEWAL_IN_PROGRESS_GRACE = timedelta(hours=1)
 # Metadata-only Secret listing, so no tls.key or tls.crt payload leaves the credential proxy.
 TLS_SECRET_COLUMNS = "custom-columns=NS:.metadata.namespace,NAME:.metadata.name,CREATED:.metadata.creationTimestamp"
+# Whole days in a timedelta; floor division keeps "ago" and "remaining" both rounded down.
+ONE_DAY = timedelta(days=1)
+# What a summary line prints in place of a count for a kind whose listing failed.
+UNREAD_COUNT_TEXT = "unread (listing failed; see the verdict below)"
 
 
 def run_cmd(args: list[str], env: dict[str, str]) -> tuple[int, str]:
@@ -211,6 +215,10 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         if mc.get("status", {}).get("certificateStatus") != MANAGED_CERT_ACTIVE
     ]
 
+    def counted(keys: tuple[str, ...], text: str) -> str:
+        # A kind whose listing failed has no count; printing the empty fallback's 0 would read as measured.
+        return UNREAD_COUNT_TEXT if any(k in unread for k in keys) else text
+
     def print_incomplete_or_mc_failures() -> bool:
         """Print the unread kinds and failing ManagedCertificates; True when either exists."""
         for key, reason in sorted(unread.items()):
@@ -226,7 +234,7 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
         print("## Cert-Manager & TLS Certificate Fleet Audit\n")
         print("- **cert_manager_installed:** `false`")
         print("- **cert-manager Status:** NOT INSTALLED on this cluster (0 `cert-manager.io` CRDs found).")
-        print(f"- **GKE ManagedCertificates:** {len(mc_items)} total ({len(unhealthy_mcs)} not Active)")
+        print("- **GKE ManagedCertificates:** " + counted(("managedcerts",), f"{len(mc_items)} total ({len(unhealthy_mcs)} not Active)"))
         print(f"- **Native TLS Secrets (`kubernetes.io/tls`):** {tls_summary_str}\n")
         if not print_incomplete_or_mc_failures():
             print("**Certificate Audit Verdict: Clean / Not Installed** (cert-manager is not active on this cluster; 0 failing ManagedCertificates).")
@@ -289,12 +297,11 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
             try:
                 exp_dt = datetime.fromisoformat(not_after_str.replace("Z", "+00:00"))
                 delta = exp_dt - now
-                days = delta.days
-                if days < 0:
-                    days_remaining_str = f"EXPIRED ({abs(days)}d ago)"
+                if delta < timedelta(0):
+                    days_remaining_str = f"EXPIRED ({-delta // ONE_DAY}d ago)"
                     is_expired = True
                 else:
-                    days_remaining_str = f"{days}d"
+                    days_remaining_str = f"{delta // ONE_DAY}d"
             except Exception:
                 days_remaining_str = not_after_str
 
@@ -373,9 +380,9 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
     print("## Cert-Manager & TLS Certificate Fleet Audit\n")
     print("- **cert_manager_installed:** `true`")
     print(f"- **cert-manager Status:** {crd_mode}")
-    print(f"- **Certificates:** {total_certs} total ({ready_certs} Ready, {len(unready_certs)} Unready/Degraded)")
-    print(f"- **Issuers & ClusterIssuers:** {total_issuers} total ({ready_issuers} Ready, {len(unready_issuers)} Unready)")
-    print(f"- **Active CertificateRequests:** {len(cr_items)} | **GKE ManagedCertificates:** {len(mc_items)} ({len(unhealthy_mcs)} not Active)")
+    print("- **Certificates:** " + counted(("certificates",), f"{total_certs} total ({ready_certs} Ready, {len(unready_certs)} Unready/Degraded)"))
+    print("- **Issuers & ClusterIssuers:** " + counted(("issuers", "clusterissuers"), f"{total_issuers} total ({ready_issuers} Ready, {len(unready_issuers)} Unready)"))
+    print("- **Active CertificateRequests:** " + counted(("certrequests",), f"{len(cr_items)}") + " | **GKE ManagedCertificates:** " + counted(("managedcerts",), f"{len(mc_items)} ({len(unhealthy_mcs)} not Active)"))
     print(f"- **Native TLS Secrets (`kubernetes.io/tls`):** {tls_summary_str}\n")
 
     is_clean = len(unready_certs) == 0 and len(unready_issuers) == 0
@@ -396,7 +403,7 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
             ready_str = "True" if c["ready"] else f"FALSE ({c['reason']})"
             print(f"{c['namespace']:<20} {c['name']:<32} {ready_str:<10} {c['remaining']:<15} {c['issuer']:<25} {c['secret']}")
         print("")
-    else:
+    elif "certificates" not in unread:
         print("No Certificate resources declared in this cluster.\n")
 
     if all_issuers:
