@@ -515,6 +515,23 @@ class TestTeamsRelayPatch(unittest.IsolatedAsyncioTestCase):
                 "conv-123", "https://smba.trafficmanager.net/teams/"
             )
 
+    async def test_send_failure_returns_failed_send_result(self):
+        from gateway.platforms.base import SendResult
+        from gateway.platform_registry import PlatformRegistry
+
+        teams_relay_patch.install()
+        adapter = PlatformRegistry().create_adapter("teams")
+
+        rejected = urllib.error.HTTPError(
+            "http://relay/v1/chat/teams/api", 400, "Bad Request", {}, None
+        )
+        for error in (rejected, urllib.error.URLError("connection refused")):
+            with mock.patch("urllib.request.urlopen", side_effect=error):
+                res = await adapter.send(chat_id="conv-123", content="hello")
+            self.assertIsInstance(res, SendResult)
+            self.assertFalse(res.success)
+            self.assertTrue(res.error)
+
     async def test_relay_loop_acks_processed_event_and_nacks_failed_event(self):
         from gateway.platform_registry import PlatformRegistry
 

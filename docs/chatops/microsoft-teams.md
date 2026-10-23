@@ -28,7 +28,7 @@ The Microsoft Teams integration connects the gateway (`agents/platform/scripts/t
 4. Under **Certificates & secrets**, create a new client secret and copy its value (`TEAMS_APP_PASSWORD`).
 5. Create an **Azure Bot** resource in the Azure Portal:
    - Bot handle: `kube-agents-bot`
-   - App Type: _Single Tenant_ or _MultiTenant_
+   - App Type: _Single Tenant_ or _MultiTenant_. If you set `tenantId` in Step 3, choose _Single Tenant_: the broker then requests its Bot Framework token from that tenant instead of `botframework.com`, and a MultiTenant bot may get `401` responses on outbound replies.
    - Microsoft App ID: Use the client ID created above.
 6. In the Azure Bot blade, navigate to **Channels** and add **Microsoft Teams**.
 
@@ -48,8 +48,9 @@ type: Opaque
 stringData:
   TEAMS_APP_ID: "00000000-0000-0000-0000-000000000000"
   TEAMS_APP_PASSWORD: "your-azure-app-client-secret"
-  TEAMS_TENANT_ID: "11111111-1111-1111-1111-111111111111" # Optional single-tenant lock-down
 ```
+
+The tenant lock-down is not read from this Secret. Set it with `tenantId` in Step 3, which the operator renders as `TEAMS_TENANT_ID`.
 
 ---
 
@@ -69,7 +70,6 @@ platformAgent:
         - "22222222-2222-2222-2222-222222222222" # Entra ID Object ID (from.aadObjectId)
       allowAllUsers: false
       homeChannel: "19:abc123conversationid@thread.v2"
-      serviceUrl: "https://smba.trafficmanager.net/teams/"
       adaptiveCards: true
 ```
 
@@ -98,7 +98,6 @@ spec:
         - "22222222-2222-2222-2222-222222222222"
       allowAllUsers: false
       homeChannel: "19:teamchannelid@thread.v2"
-      serviceUrl: "https://smba.trafficmanager.net/teams/"
       adaptiveCards: true
 ```
 

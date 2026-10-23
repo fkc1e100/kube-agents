@@ -1506,8 +1506,6 @@ platformAgent:
       allowAllUsers: false
       # Default conversation ID / channel for asynchronous alerts and reports.
       homeChannel: ""
-      # Bot Framework Service URL (defaults to Microsoft public cloud endpoint).
-      serviceUrl: "https://smba.trafficmanager.net/teams/"
       # Render responses with Microsoft Adaptive Cards v1.5 (markdown fallback if false).
       adaptiveCards: true
 
