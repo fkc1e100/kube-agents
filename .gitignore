@@ -116,3 +116,5 @@ k8s-operator/cmd/drift-detector/drift-detector
 !.claude/settings.json.example
 !.claude/skills
 !.claude/rules
+# `uv run` in evals/ writes a lock; like bench/, the suite pins ranges in pyproject.toml.
+evals/uv.lock

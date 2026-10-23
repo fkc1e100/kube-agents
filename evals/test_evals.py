@@ -170,6 +170,8 @@ Please review this /plan before enabling or mutating cluster infrastructure.
         import asyncio
         from kube_agents_tasks import kubectl_inspect
 
+        from unittest import mock
+
         tool_fn = kubectl_inspect()
 
         # Mutating command must be rejected
@@ -211,27 +213,120 @@ Please review this /plan before enabling or mutating cluster infrastructure.
             "kubectl cluster-info dump",
             "kubectl -Ashttps://attacker.example get pods",
             "kubectl get pods --profile=cpu --profile-output=/tmp/x",
+            # Local file reads through output templates.
+            "kubectl get pods -o go-template-file=/home/u/.kube/config",
+            "kubectl get pods -o=go-template-file=/home/u/.kube/config",
+            "kubectl get pods --output go-template-file=/home/u/.kube/config",
+            "kubectl get pods --output=jsonpath-file=/home/u/.kube/config",
+            "kubectl get pods -o custom-columns-file=/home/u/.kube/config",
+            "kubectl get pods -o template --template=/home/u/.kube/config",
+            "kubectl get pods --template /home/u/.kube/config",
+            "kubectl get pods -o go-template={{.}}",
+            "kubectl get pods -ogo-template-file=/home/u/.kube/config",
+            "kubectl get pods -o",
+            # Clustered shorthand carrying a file flag.
+            "kubectl get -Af/path",
+            "kubectl get -Rf /etc",
+            "kubectl get -Af kc.txt",
         ):
-            with self.subTest(cmd=cmd):
+            # With a context set and kubectl stubbed, a refusal must come from a guard: the
+            # missing-context error cannot stand in for it, and a regression cannot run kubectl.
+            with self.subTest(cmd=cmd), mock.patch.dict(
+                "os.environ", {"EVALS_KUBE_CONTEXT": "kind-evals"}
+            ), mock.patch("subprocess.run") as run_mock:
                 res = asyncio.run(tool_fn(cmd))
                 self.assertTrue("prohibited" in res or "Error:" in res, f"Expected refusal for {cmd}, got: {res}")
+                self.assertNotIn("EVALS_KUBE_CONTEXT", res)
+                run_mock.assert_not_called()
 
         # Valid read commands with global value flags (-v 5) or pod names matching verbs ("run", "set")
-        # must pass the guardrails and reach subprocess.run.
-        from unittest import mock
-
+        # must pass the guardrails and reach subprocess.run, pinned to EVALS_KUBE_CONTEXT.
         completed = subprocess.CompletedProcess(args=["kubectl"], returncode=0, stdout="ok", stderr="")
-        with mock.patch("subprocess.run", return_value=completed) as run_mock:
-            for valid_cmd in (
-                "kubectl -v 5 get pods -n kubeagents-system",
-                "kubectl --request-timeout 30 get pods",
-                "kubectl logs run -n kubeagents-system",
-                "kubectl describe pod set -n kubeagents-system",
-            ):
+        valid_cmds = (
+            "kubectl -v 5 get pods -n kubeagents-system",
+            "kubectl --request-timeout 30 get pods",
+            "kubectl logs run -n kubeagents-system",
+            "kubectl describe pod set -n kubeagents-system",
+            "kubectl get pods -o wide",
+            "kubectl get pods --output=yaml",
+            "kubectl get pods -o jsonpath={.items[*].metadata.name}",
+            "kubectl get pods -o=custom-columns=NAME:.metadata.name",
+        )
+        with mock.patch.dict("os.environ", {"EVALS_KUBE_CONTEXT": "kind-evals"}), mock.patch(
+            "subprocess.run", return_value=completed
+        ) as run_mock:
+            for valid_cmd in valid_cmds:
                 with self.subTest(valid_cmd=valid_cmd):
                     res = asyncio.run(tool_fn(valid_cmd))
                     self.assertEqual(res, "ok")
-            self.assertEqual(run_mock.call_count, 4)
+                    argv = run_mock.call_args.args[0]
+                    self.assertEqual(argv[:3], ["kubectl", "--context", "kind-evals"])
+            self.assertEqual(run_mock.call_count, len(valid_cmds))
+
+    def test_kubectl_inspect_requires_explicit_context(self):
+        """Tests that the tool refuses to run against the current kubeconfig context."""
+        import asyncio
+        import os
+        from unittest import mock
+        from kube_agents_tasks import kubectl_inspect
+
+        tool_fn = kubectl_inspect()
+        env = {k: v for k, v in os.environ.items() if k != "EVALS_KUBE_CONTEXT"}
+        for value in (None, "  "):
+            if value is not None:
+                env["EVALS_KUBE_CONTEXT"] = value
+            with self.subTest(value=value), mock.patch.dict("os.environ", env, clear=True), mock.patch(
+                "subprocess.run"
+            ) as run_mock:
+                res = asyncio.run(tool_fn("kubectl get pods"))
+                self.assertIn("EVALS_KUBE_CONTEXT", res)
+                run_mock.assert_not_called()
+
+    def test_endpoint_scheme_and_opener(self):
+        """Tests that the token is not sent over cleartext off-host, via a proxy, or across a redirect."""
+        import urllib.error
+        import urllib.request
+        from kube_agents_tasks import _OPENER, _NoRedirect, _check_endpoint
+
+        for ok in (
+            "https://agents.example/v1/responses",
+            "http://127.0.0.1:8080/v1/responses",
+            "http://localhost:8080/v1/responses",
+            "http://[::1]:8080/v1/responses",
+        ):
+            with self.subTest(ok=ok):
+                _check_endpoint(ok)
+        for bad in ("http://agents.example/v1/responses", "ftp://127.0.0.1/x", "agents.example/v1/responses"):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                _check_endpoint(bad)
+
+        self.assertTrue(any(isinstance(h, _NoRedirect) for h in _OPENER.handlers))
+        # Rebuild the opener with proxies in the environment: a default opener would route
+        # through them, ProxyHandler({}) must not.
+        import importlib
+        import os
+        from unittest import mock
+
+        import kube_agents_tasks
+
+        proxy_env = {"http_proxy": "http://proxy.example:3128", "https_proxy": "http://proxy.example:3128"}
+        try:
+            with mock.patch.dict(os.environ, proxy_env):
+                self.assertTrue(
+                    any(
+                        isinstance(h, urllib.request.ProxyHandler) and h.proxies
+                        for h in urllib.request.build_opener().handlers
+                    ),
+                    "control: a default opener should pick up the proxy",
+                )
+                opener = importlib.reload(kube_agents_tasks)._OPENER
+            self.assertFalse(
+                [h for h in opener.handlers if isinstance(h, urllib.request.ProxyHandler) and h.proxies]
+            )
+        finally:
+            importlib.reload(kube_agents_tasks)
+        req = urllib.request.Request("http://127.0.0.1/v1/responses")
+        self.assertIsNone(_NoRedirect().redirect_request(req, None, 302, "Found", {}, "https://evil.example/"))
 
     def test_conversation_ids_are_fresh_per_call(self):
         """Tests that every gateway call gets its own conversation id naming the sample and epoch."""

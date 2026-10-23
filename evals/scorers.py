@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 # Markdown emphasis characters are dropped; "_" becomes "-" so identifiers such as
 # "vertex_ai" and "model_default" keep their word boundaries and match "vertex" / "model-default".

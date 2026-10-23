@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import sys
 from typing import Any
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -142,8 +143,24 @@ _DENIED_FLAGS = {
     "--kustomize",
     "-R",
     "--recursive",
+    # A template file is read from local disk and a template with no actions prints the file
+    # verbatim, so these can return a kubeconfig. --template takes a file path or an inline
+    # template; both are refused, and inline formats go through -o below.
+    "--template",
 }
 _DENIED_RESOURCES = {"secret", "secrets"}
+# -o/--output is an allowlist, not a denylist: every *-file format (go-template-file,
+# jsonpath-file, custom-columns-file, template-file) reads a local file into the output.
+_ALLOWED_OUTPUT_FORMATS = {"wide", "name", "json", "yaml"}
+_ALLOWED_OUTPUT_PREFIXES = ("jsonpath=", "custom-columns=")
+_OUTPUT_FLAGS = {"-o", "--output"}
+# The tool runs against the developer's kubeconfig, so the target context is never implicit:
+# without this variable the tool refuses to run, and with it the tool pins --context itself.
+KUBE_CONTEXT_ENV = "EVALS_KUBE_CONTEXT"
+
+
+def _output_format_allowed(value: str) -> bool:
+    return value in _ALLOWED_OUTPUT_FORMATS or value.startswith(_ALLOWED_OUTPUT_PREFIXES)
 
 
 @tool
@@ -170,14 +187,28 @@ def kubectl_inspect() -> Tool:
 
         # 2. Refuse local kubeconfig/context overrides, indirect manifest reads, clustered
         # short flags, and Secret reads.
-        for t in tokens[1:]:
+        args = tokens[1:]
+        for i, t in enumerate(args):
             flag = t.split("=", 1)[0]
             # pflag clusters shorthands: `-Af URL` is `-A -f URL`, so a single-dash token longer
             # than its one letter can carry a manifest or server flag past the exact lookup below.
+            # This also refuses `-ojson`; write `-o json` instead.
             if flag.startswith("-") and not flag.startswith("--") and len(flag) > 2:
                 return f"Error: Combined short flags '{flag}' are prohibited."
             if flag in _DENIED_FLAGS:
                 return f"Error: Flag '{flag}' is prohibited."
+            if flag in _OUTPUT_FLAGS:
+                if "=" in t:
+                    value = t.split("=", 1)[1]
+                elif i + 1 < len(args):
+                    value = args[i + 1]
+                else:
+                    return f"Error: Flag '{flag}' needs a value."
+                if not _output_format_allowed(value):
+                    return (
+                        f"Error: Output format '{value}' is prohibited; use one of "
+                        f"{sorted(_ALLOWED_OUTPUT_FORMATS)} or an inline jsonpath=/custom-columns=."
+                    )
             if any(part in _DENIED_RESOURCES for part in re.split(r"[,/.]", t.lower())):
                 return f"Error: Reading '{t}' is prohibited."
 
@@ -189,8 +220,16 @@ def kubectl_inspect() -> Tool:
         if subcmd not in _ALLOWED_SUBCOMMANDS:
             return f"Error: Only read-only subcommands {sorted(_ALLOWED_SUBCOMMANDS)} are permitted."
 
+        context = os.environ.get(KUBE_CONTEXT_ENV, "").strip()
+        if not context:
+            return (
+                f"Error: {KUBE_CONTEXT_ENV} is not set. Set it to the kubeconfig context of the "
+                "test cluster; the tool does not run against the current context."
+            )
+        argv = [tokens[0], "--context", context, *tokens[1:]]
+
         try:
-            res = subprocess.run(tokens, capture_output=True, text=True, timeout=30)
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=30)
             out = res.stdout
             if res.stderr:
                 out += f"\nSTDERR: {res.stderr}"
@@ -210,9 +249,43 @@ def _conversation_id(sample_id: Any, epoch: int) -> str:
     return f"eval_{sample_id}_{epoch}_{uuid.uuid4().hex}"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect, turning it into an ``HTTPError``.
+
+    urllib follows redirects by default and keeps ``Authorization`` on a cross-host hop, so one
+    ``302`` would hand the bearer token to another origin. Same handler as
+    ``bench/kube_agents_bench/harness.py``; copied because importing the bench harness pulls in
+    its port-forward machinery.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+# ProxyHandler({}): the default handler honours http_proxy/https_proxy, which would send the
+# bearer token (in cleartext, for an http endpoint) to the proxy.
+_OPENER = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _check_endpoint(url: str) -> None:
+    """Refuses an endpoint that would send the bearer token in cleartext off the machine.
+
+    https is required, except for a loopback host (a kubectl port-forward).
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme == "https":
+        return
+    if parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS:
+        return
+    raise RuntimeError(
+        f"kube-agents endpoint {url!r} must use https (http is allowed only for localhost, 127.0.0.1 or [::1])"
+    )
+
+
 def _post_json(req: urllib.request.Request, timeout: float) -> Any:
     """Sends a request and returns its decoded JSON body; runs in a worker thread."""
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _OPENER.open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -247,6 +320,7 @@ def kube_agents_solver(
             url = ep.rstrip("/")
             if not url.endswith(RESPONSES_PATH):
                 url = f"{url}{RESPONSES_PATH}"
+            _check_endpoint(url)
             sample_id = getattr(state, "sample_id", getattr(state, "id", "default"))
             payload = {
                 "model": os.environ.get("AGENT_MODEL_NAME", "model-default"),

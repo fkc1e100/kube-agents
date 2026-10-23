@@ -67,8 +67,23 @@ Without an endpoint, the tasks run the given model with a read-only `kubectl_ins
 tool imports the repository's kubectl policy from `agents/platform/scripts/command_policy.py`, so run
 the suite from a full checkout, not from a copy of `evals/` alone.
 
+The tool uses your local kubeconfig, so it will not run against your current context. Set
+`EVALS_KUBE_CONTEXT` to the context of a test cluster; the tool passes `--context` itself and
+refuses every call while the variable is unset. Point it at a throwaway or test cluster, never
+production: the model chooses the `get`, `describe` and `logs` calls, and they can read every
+ConfigMap and pod log the context can see. Secrets, `-f`/`-k` manifest reads, `--template`, and any
+`-o` format other than `wide`, `name`, `json`, `yaml`, inline `jsonpath=` or inline
+`custom-columns=` are refused, because the file-based formats can print a local file such as a
+kubeconfig.
+
+```bash
+EVALS_KUBE_CONTEXT=kind-evals uv run inspect eval kube_agents_tasks.py --model google/gemini-3.5-flash-lite
+```
+
 To send the prompts to a running install instead, set `KUBE_AGENTS_ENDPOINT` (or `AGENT_API_URL`)
-to the gateway base URL and `PLATFORM_AGENT_TOKEN` to its bearer token. The solver posts each prompt
+to the gateway base URL and `PLATFORM_AGENT_TOKEN` (or `KUBE_AGENTS_TOKEN`) to its bearer token. The
+endpoint must be `https`, or `http` on `localhost`, `127.0.0.1` or `[::1]` for a port-forward. The solver ignores `http_proxy`
+and refuses redirects, so the token goes only to that endpoint. It posts each prompt
 to `/v1/responses` with a fresh conversation id. A transport failure, or a reply with no `output`
 list, is recorded as a sample error rather than scored. The solver makes one call per prompt and
 does not wait for work the front door delegates.
