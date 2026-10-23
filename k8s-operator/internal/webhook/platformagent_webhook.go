@@ -62,9 +62,9 @@ const DefaultPort = 10250
 // author reading the field error knows which line to change and why.
 const (
 	busTokenAudienceForbiddenFmt = "volume %q projects a serviceAccountToken for audience %q, which is the A2A bus token audience; the operator projects that token for the platform-agent container alone" // #nosec G101 -- Error message format, not a credential
-	busCredsSecretForbiddenFmt   = "volume %q mounts Secret %q, which the operator renders with A2A bus credentials for its own workloads; it may not be mounted by the CR"                                // #nosec G101 -- Error message format, not a credential
-	forgeCredsSecretForbiddenFmt = "volume %q mounts Secret %q, which is declared as a forge credentialsRef or caBundleRef Secret for the credential proxy alone; it may not be mounted by the CR"          // #nosec G101 -- Error message format, not a credential
-	forgeCredsEnvForbiddenFmt    = "container %q references Secret %q, which is declared as a forge credentialsRef or caBundleRef Secret for the credential proxy alone; it may not be referenced by the CR" // #nosec G101 -- Error message format, not a credential
+	busCredsSecretForbiddenFmt   = "volume %q mounts Secret %q, which the operator renders with A2A bus credentials for its own workloads; it may not be mounted by the CR"                                 // #nosec G101 -- Error message format, not a credential
+	forgeCredsSecretForbiddenFmt = "volume %q mounts Secret %q, which is declared as a forge credentialsRef Secret for the credential proxy alone; it may not be mounted by the CR"                         // #nosec G101 -- Error message format, not a credential
+	forgeCredsEnvForbiddenFmt    = "container %q references Secret %q, which is declared as a forge credentialsRef Secret for the credential proxy alone; it may not be referenced by the CR"               // #nosec G101 -- Error message format, not a credential
 )
 
 // The data volume size checks on spec.storage.size. A PersistentVolumeClaim

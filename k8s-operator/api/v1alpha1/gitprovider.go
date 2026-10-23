@@ -462,15 +462,27 @@ func (p *GitProvider) ValidateSchemeOn(host, scheme string) error {
 	return nil
 }
 
+// portProviderNames lists, sorted, the providers whose broker client and clone
+// URL accept a port, for the refusal that names them.
+func portProviderNames() []string {
+	var names []string
+	for _, name := range GitProviderNames() {
+		if gitProviders[name].AcceptsPort {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // ValidatePort reports whether a declared port is allowed. Zero means none
 // was declared. Only a forge whose provider accepts a custom port may declare
-// one: a fixed-endpoint forge's clone URLs do not carry a port.
+// one: the other providers' broker clients and clone URLs do not carry a port.
 func (p *GitProvider) ValidatePort(port int32) error {
 	if port == 0 {
 		return nil
 	}
 	if !p.AcceptsPort {
-		return fmt.Errorf("%s serves fixed endpoints; port may not be set", p.Name)
+		return fmt.Errorf("provider %s does not accept a port; only %s does", p.Name, strings.Join(portProviderNames(), ", "))
 	}
 	if port < MinForgePort || port > MaxForgePort {
 		return fmt.Errorf("port %d is outside %d-%d", port, MinForgePort, MaxForgePort)

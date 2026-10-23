@@ -1283,3 +1283,28 @@ func TestGiteaForgeValidationAndResolution(t *testing.T) {
 		t.Errorf("ForgeCredentialSecretNames() = %v, want [gitea-token]", secrets)
 	}
 }
+
+// TestValidatePortNamesTheProvidersThatAcceptOne pins the refusal's reason: a
+// self-managed GitLab is refused a port because its broker client composes no
+// port, not because it serves fixed endpoints, so the message names the
+// providers that do accept one.
+func TestValidatePortNamesTheProvidersThatAcceptOne(t *testing.T) {
+	for _, name := range []string{GitProviderGitHub, GitProviderGitLab} {
+		provider, err := LookupGitProvider(name)
+		if err != nil {
+			t.Fatalf("LookupGitProvider(%q): %v", name, err)
+		}
+		err = provider.ValidatePort(8443)
+		want := "provider " + name + " does not accept a port; only gitea does"
+		if err == nil || err.Error() != want {
+			t.Errorf("%s ValidatePort(8443) = %v, want %q", name, err, want)
+		}
+	}
+	gitea, err := LookupGitProvider(GitProviderGitea)
+	if err != nil {
+		t.Fatalf("LookupGitProvider(gitea): %v", err)
+	}
+	if err := gitea.ValidatePort(3000); err != nil {
+		t.Errorf("gitea ValidatePort(3000) = %v, want nil", err)
+	}
+}

@@ -14904,6 +14904,89 @@ class GitAllowProtocolForHttpForgeTest(unittest.TestCase):
                     self.assertEqual(1, len(captured_clone_envs))
                     self.assertEqual("https:http", captured_clone_envs[0]["GIT_ALLOW_PROTOCOL"])
 
+    @unittest.skipUnless(shutil.which("git"), "needs git")
+    def test_every_remote_verb_of_an_http_workspace_asks_for_http(self):
+        """`ls-remote`, `clone`, `fetch` and `push` all hand the runner `allow_http`.
+
+        The workspace's remote is the `http` Gitea URL, rewritten by
+        `url.insteadOf` to a local bare repository so real git answers. The
+        runner records which verbs asked for `allow_http`: the pinned-base probe
+        and the clone from `open`, then `fetch` from `commit` and `push` from
+        `push`, the last two reading `Workspace.allow_http`. The executor's
+        mapping from `allow_http` to `GIT_ALLOW_PROTOCOL=https:http` is pinned by
+        the first test in this class.
+        """
+        import content_workspace
+
+        host = "gitea.gitea.svc.cluster.local"
+        remote_prefix = f"http://{host}:3000/"
+        url = f"{remote_prefix}acme/infra.git"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plain_env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": str(root),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_AUTHOR_NAME": "Test",
+                "GIT_AUTHOR_EMAIL": "test@example.invalid",
+                "GIT_COMMITTER_NAME": "Test",
+                "GIT_COMMITTER_EMAIL": "test@example.invalid",
+            }
+
+            def plain_git(*argv, cwd):
+                subprocess.run(["git", *argv], cwd=str(cwd), env=plain_env, check=True, capture_output=True)
+
+            bare = root / "remotes" / "acme" / "infra.git"
+            bare.parent.mkdir(parents=True)
+            plain_git("init", "--quiet", "--bare", "--initial-branch=main", str(bare), cwd=root)
+            seed = root / "seed"
+            plain_git("init", "--quiet", "--initial-branch=main", str(seed), cwd=root)
+            (seed / "README.md").write_text("seed\n", encoding="utf-8")
+            plain_git("add", "README.md", cwd=seed)
+            plain_git("commit", "--quiet", "-m", "seed", cwd=seed)
+            plain_git("push", "--quiet", str(bare), "main", "main:release", cwd=seed)
+
+            asked: list[tuple[str, bool]] = []
+
+            def runner(argv, cwd, config=(), allow_http=False):
+                asked.append((argv[1], allow_http))
+                rewritten = [
+                    "git",
+                    "-c",
+                    f"url.{(root / 'remotes').as_uri()}/.insteadOf={remote_prefix}",
+                    *argv[1:],
+                ]
+                done = subprocess.run(rewritten, cwd=str(cwd), env=plain_env, capture_output=True, text=True)
+                return types.SimpleNamespace(exit_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+            agent_dir = root / "agent"
+            agent_dir.mkdir()
+            store = content_workspace.ContentWorkspaceStore(
+                root / "trees",
+                agent_dir,
+                runner,
+                credential_for=lambda _repo: providers.NoCredential(),
+                locate=lambda _repo: (f"{host}/acme/infra", url),
+                pinned_bases={(host, "acme/infra"): "release"},
+            )
+            ws = store.open(f"{host}/acme/infra")
+            self.assertTrue(ws.allow_http)
+            store.commit(
+                ws.handle,
+                "platform-agent/change",
+                "feat: a change",
+                [content_workspace.Change(content_workspace.repo_relative("manifests/mine.yaml"), b"kind: Mine\n")],
+            )
+            store.push(ws.handle, "platform-agent/change")
+
+            remote_verbs = {"ls-remote", "clone", "fetch", "push"}
+            seen = {verb for verb, _ in asked if verb in remote_verbs}
+            self.assertEqual(remote_verbs, seen)
+            for verb, allow_http in asked:
+                if verb in remote_verbs:
+                    self.assertTrue(allow_http, f"git {verb} did not ask for allow_http")
+
 
 if __name__ == "__main__":
     unittest.main()

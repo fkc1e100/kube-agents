@@ -1110,7 +1110,7 @@ gitlabNamespaceRegex and giteaNamespaceRegex, all in k8s-operator/api/v1alpha1.
 {{- end -}}
 {{- $isSelfManaged := has $provider $selfManaged -}}
 {{- if and $f.port (not $isSelfManaged) -}}
-{{- fail (printf "platformAgent.integration.forges[%d].port is set, but provider %s serves fixed endpoints" $i $provider) -}}
+{{- fail (printf "platformAgent.integration.forges[%d].port is set, but provider %s does not accept a port; only %s does" $i $provider (join ", " $selfManaged)) -}}
 {{- end -}}
 {{- if and $f.scheme (ne $f.scheme $defaultScheme) (not $isSelfManaged) -}}
 {{- fail (printf "platformAgent.integration.forges[%d].scheme is %q, but provider %s is %s only" $i $f.scheme $provider $defaultScheme) -}}

@@ -1726,8 +1726,9 @@ type ForgeSpec struct {
 	// +optional
 	Scheme string `json:"scheme,omitempty"`
 
-	// Port is the forge's port, for a self-managed forge not on the scheme's
-	// default port. It is refused for a hosted provider such as GitHub.
+	// Port is the forge's port, for a forge not on the scheme's default port.
+	// Only provider "gitea" accepts it; it is refused for every other provider,
+	// a self-managed GitLab included, whose broker client does not compose one.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
 	// +optional

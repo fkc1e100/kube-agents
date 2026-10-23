@@ -10027,8 +10027,9 @@ spec:
                             type: string
                           port:
                             description: |-
-                              Port is the forge's port, for a self-managed forge not on the scheme's
-                              default port. It is refused for a hosted provider such as GitHub.
+                              Port is the forge's port, for a forge not on the scheme's default port.
+                              Only provider "gitea" accepts it; it is refused for every other provider,
+                              a self-managed GitLab included, whose broker client does not compose one.
                             format: int32
                             maximum: 65535
                             minimum: 1
