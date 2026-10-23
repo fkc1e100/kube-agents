@@ -17,6 +17,8 @@ from credential_proxy_client import authorization_headers
 
 LOGGER = logging.getLogger("teams-relay-patch")
 DEFAULT_RELAY_READY_TIMEOUT = 120.0
+# Bot Framework caps an activity near 28 KB; both registrations use this.
+TEAMS_MAX_MESSAGE_LENGTH = 28000
 TEAMS_TRUSTED_SERVICE_HOSTS = ("smba.trafficmanager.net", "api.botframework.com")
 # Bot Framework `conversation.conversationType` -> gateway `chat_type`. The
 # memory providers treat only "dm" as single-person, so a Teams 1:1 chat
@@ -52,7 +54,12 @@ def is_trusted_service_url(service_url: str) -> bool:
 
 
 def parse_allowed_users(raw: str) -> set[str]:
-    """Parse comma-separated allowed user IDs or emails into a normalized set."""
+    """Parse comma-separated allowed user IDs into a normalized set.
+
+    Entries are matched against ``from.id``, ``from.aadObjectId`` and, if a
+    producer ever adds them, ``from.userPrincipalName`` / ``from.email``. An
+    inbound Bot Framework activity carries no UPN or email, so list Object IDs.
+    """
     if not raw:
         return set()
     return {user.strip().lower() for user in raw.split(",") if user.strip()}
@@ -423,16 +430,22 @@ def _build_teams_adapter_and_sender(
                 payload["replyToId"] = effective_thread
 
             endpoint = f"v3/conversations/{conversation_id}/activities"
-            raw = await asyncio.to_thread(
-                request,
-                "/v1/chat/teams/api",
-                {
-                    "serviceUrl": service_url,
-                    "endpoint": endpoint,
-                    "method": "POST",
-                    "payload": payload,
-                },
-            )
+            try:
+                raw = await asyncio.to_thread(
+                    request,
+                    "/v1/chat/teams/api",
+                    {
+                        "serviceUrl": service_url,
+                        "endpoint": endpoint,
+                        "method": "POST",
+                        "payload": payload,
+                    },
+                )
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                # HTTPError is a URLError. The gateway's send and standalone
+                # paths expect a failed SendResult, not an exception.
+                LOGGER.warning("Teams send to %r failed: %s", conversation_id, error)
+                return send_result_cls(success=False, error=str(error))
             raw_dict = raw if isinstance(raw, dict) else {}
             inner = (
                 raw_dict.get("response")
@@ -502,7 +515,7 @@ def _build_teams_adapter_and_sender(
             )
             if raw_service_url is not None and not is_trusted_service_url(raw_service_url):
                 LOGGER.warning(
-                    "Rejected Teams activity with untrusted serviceUrl: %s",
+                    "Rejected Teams activity with untrusted serviceUrl: %r",
                     raw_service_url,
                 )
                 return
@@ -686,7 +699,7 @@ def register_plugin(ctx: Any) -> None:
         is_connected=lambda _config=None: relay_enabled(),
         install_hint="",
         standalone_sender_fn=_standalone_sender,
-        max_message_length=28000,
+        max_message_length=TEAMS_MAX_MESSAGE_LENGTH,
     )
 
 
@@ -727,14 +740,21 @@ def install() -> None:
                 else None
             )
             if existing is None:
-                entry = platform_entry_cls(
-                    name="teams",
-                    label="Microsoft Teams",
-                    adapter_factory=lambda cfg: teams_adapter_cls(cfg),
-                    check_fn=lambda: True,
-                    is_connected=lambda _cfg=None: True,
-                    standalone_sender_fn=standalone_send,
-                )
+                entry_fields = {
+                    "name": "teams",
+                    "label": "Microsoft Teams",
+                    "adapter_factory": lambda cfg: teams_adapter_cls(cfg),
+                    "check_fn": lambda: True,
+                    "is_connected": lambda _cfg=None: True,
+                    "standalone_sender_fn": standalone_send,
+                }
+                # Match the plugin's register_platform entry so the limit does
+                # not depend on which of the two registrations Hermes keeps.
+                if "max_message_length" in getattr(
+                    platform_entry_cls, "__dataclass_fields__", {}
+                ):
+                    entry_fields["max_message_length"] = TEAMS_MAX_MESSAGE_LENGTH
+                entry = platform_entry_cls(**entry_fields)
                 singleton.register(entry)
         except Exception:
             LOGGER.warning("Teams PlatformEntry registration failed", exc_info=True)

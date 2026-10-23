@@ -22,7 +22,6 @@ spec:
         - "33333333-3333-3333-3333-333333333333"
       allowAllUsers: false
       homeChannel: "19:sample-conversation-id@thread.v2"
-      serviceUrl: "https://smba.trafficmanager.net/teams/"
       adaptiveCards: true
   harness:
     projectId: "demo-gcp-project"
