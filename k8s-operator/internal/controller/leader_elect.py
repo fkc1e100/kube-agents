@@ -79,13 +79,22 @@ LEASE_POLL_JITTER_SECONDS = 2
 # Without it a hung call would block the drain loop past the lease's expiry, and
 # Hermes would still be running when a standby starts its own.
 LEASE_API_TIMEOUT_SECONDS = 2
-# A renewal is a read and then a replace.
+# A renewal is a read and then a replace; an unconfirmed one is retried after
+# LEASE_RENEWAL_RETRY_SECONDS (client-go's RetryPeriod) rather than a full poll
+# interval, so a transient error mid-drain gets multiple attempts before the
+# renew deadline.
 LEASE_RENEWAL_MAX_SECONDS = 2 * LEASE_API_TIMEOUT_SECONDS
+LEASE_RENEWAL_RETRY_SECONDS = LEASE_API_TIMEOUT_SECONDS
+# Clock skew between nodes that the margin before a standby's takeover absorbs.
+LEASE_CLOCK_SKEW_SECONDS = 1
 # While Hermes drains, it is SIGKILLed once this long passes with no confirmed
-# renewal. The LEASE_DURATION_SECONDS - LEASE_RENEW_DEADLINE_SECONDS left before
-# a standby may take the lease covers a renewal already in flight
-# (LEASE_RENEWAL_MAX_SECONDS) and a second of clock skew between nodes, the same
-# split client-go makes between its renew deadline and lease duration.
+# renewal, and an entry renewal is attempted past this deadline only while the
+# renewal plus LEASE_CLOCK_SKEW_SECONDS can still finish inside
+# LEASE_DURATION_SECONDS. The LEASE_DURATION_SECONDS - LEASE_RENEW_DEADLINE_SECONDS
+# left before a standby may take the lease covers a renewal already in flight
+# (LEASE_RENEWAL_MAX_SECONDS) and LEASE_CLOCK_SKEW_SECONDS of clock skew between
+# nodes, the same split client-go makes between its renew deadline and lease
+# duration.
 LEASE_RENEW_DEADLINE_SECONDS = 10
 
 # Tradeoff documented explicitly per review:
@@ -202,15 +211,21 @@ def stop_hermes_holding_lease(coordination_v1):
             print(f"[{pod_name}] Hermes did not exit in time, killing...", flush=True)
             break
         # On entry, a 3s probe plus a 5-7s sleep after the main loop's renewal
-        # can already exceed LEASE_RENEW_DEADLINE_SECONDS while the 15s lease is
-        # still valid, so the first slice tries a renewal before enforcing the
-        # deadline.
-        if lease_renewed_at is None or (not first_slice and now >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS):
+        # can already reach LEASE_RENEW_DEADLINE_SECONDS while the 15s lease is
+        # still valid, so the first slice tries a renewal provided the renewal
+        # and clock skew still fit inside LEASE_DURATION_SECONDS (which is
+        # LEASE_RENEW_DEADLINE_SECONDS).
+        if lease_renewed_at is None or (
+            now + LEASE_RENEWAL_MAX_SECONDS + LEASE_CLOCK_SKEW_SECONDS > lease_renewed_at + LEASE_DURATION_SECONDS
+            if first_slice else
+            now >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS
+        ):
             print(f"[{pod_name}] Lease renewal unconfirmed past its deadline, killing Hermes...", flush=True)
             break
         first_slice = False
         # A renewal starts only if it can finish inside the budget, so the kill
         # and the release after it stay inside the pod's grace period.
+        renewed = None
         if now + LEASE_RENEWAL_MAX_SECONDS <= deadline:
             renewed = renew_held_lease(coordination_v1)
             if renewed is False:
@@ -221,9 +236,11 @@ def stop_hermes_holding_lease(coordination_v1):
         if time.monotonic() >= lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS:
             print(f"[{pod_name}] Lease renewal unconfirmed past its deadline, killing Hermes...", flush=True)
             break
-        # Wake for the next renewal, the budget, or the renew deadline,
-        # whichever comes first; a timeout of 0 still sees an exit.
-        wake_at = min(now + LEASE_POLL_INTERVAL_SECONDS, deadline, lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS)
+        # Wake for the next renewal (or retry after an unconfirmed one), the
+        # budget, or the renew deadline, whichever comes first; a timeout of 0
+        # still sees an exit.
+        next_attempt = LEASE_POLL_INTERVAL_SECONDS if renewed else LEASE_RENEWAL_RETRY_SECONDS
+        wake_at = min(now + next_attempt, deadline, lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS)
         try:
             process.wait(timeout=max(wake_at - time.monotonic(), 0))
             return
@@ -299,18 +316,21 @@ def main():
     while not is_shutting_down:
         now = datetime.now(timezone.utc)
         holder = None
+        lease_error = False
         
         try:
             lease = coordination_v1.read_namespaced_lease(name=lease_name, namespace=namespace)
             holder = lease.spec.holder_identity
             
             if holder == pod_name:
-                lease.spec.renew_time = now
+                lease.spec.renew_time = datetime.now(timezone.utc)
+                stamped_at = time.monotonic()
                 try:
                     coordination_v1.replace_namespaced_lease(name=lease_name, namespace=namespace, body=lease)
-                    lease_renewed_at = time.monotonic()
+                    lease_renewed_at = stamped_at
                 except ApiException:
                     holder = None
+                    lease_error = True
             else:
                 renew_time = lease.spec.renew_time
                 duration = lease.spec.lease_duration_seconds or LEASE_DURATION_SECONDS
@@ -325,13 +345,15 @@ def main():
                     is_expired = True
                         
                 if holder is None or is_expired:
+                    write_now = datetime.now(timezone.utc)
                     lease.spec.holder_identity = pod_name
-                    lease.spec.renew_time = now
-                    lease.spec.acquire_time = now
+                    lease.spec.renew_time = write_now
+                    lease.spec.acquire_time = write_now
                     lease.spec.lease_transitions = (lease.spec.lease_transitions or 0) + 1
+                    stamped_at = time.monotonic()
                     try:
                         coordination_v1.replace_namespaced_lease(name=lease_name, namespace=namespace, body=lease)
-                        lease_renewed_at = time.monotonic()
+                        lease_renewed_at = stamped_at
                         holder = pod_name
                     except ApiException:
                         holder = None
@@ -339,6 +361,7 @@ def main():
         except ApiException as e:
             if e.status == 404:
                 # Create lease
+                write_now = datetime.now(timezone.utc)
                 body = client.V1Lease(
                     api_version="coordination.k8s.io/v1",
                     kind="Lease",
@@ -346,19 +369,32 @@ def main():
                     spec=client.V1LeaseSpec(
                         holder_identity=pod_name,
                         lease_duration_seconds=LEASE_DURATION_SECONDS,
-                        acquire_time=now,
-                        renew_time=now,
+                        acquire_time=write_now,
+                        renew_time=write_now,
                         lease_transitions=0
                     )
                 )
+                stamped_at = time.monotonic()
                 try:
                     coordination_v1.create_namespaced_lease(namespace=namespace, body=body)
-                    lease_renewed_at = time.monotonic()
+                    lease_renewed_at = stamped_at
                     holder = pod_name
                 except ApiException:
                     holder = None
             else:
                 print(f"[LeaderElect] Error reading lease: {e}", file=sys.stderr, flush=True)
+                lease_error = True
+
+        # A transient error reading or renewing the lease while leading has not
+        # observed another holder, so keep Hermes running until the renew
+        # deadline passes without a confirmed renewal.
+        if (
+            lease_error
+            and process is not None
+            and lease_renewed_at is not None
+            and time.monotonic() < lease_renewed_at + LEASE_RENEW_DEADLINE_SECONDS
+        ):
+            holder = pod_name
 
         if holder == pod_name:
             if process is None:
