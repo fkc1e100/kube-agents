@@ -304,6 +304,9 @@ def _probe_gateway_model() -> str:
     ns = os.environ.get("KUBE_DEFAULT_NAMESPACE", "kubeagents-system").strip() or "kubeagents-system"
     url = f"http://inference-gateway.{ns}.svc.cluster.local/v1/model/info"
 
+    # The 0.5s timeout bounds the connect and the read, not the DNS lookup. A
+    # degraded cluster DNS can hold a user turn for longer, at most once per
+    # cooldown window.
     try:
         with urllib.request.urlopen(url, timeout=0.5) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))

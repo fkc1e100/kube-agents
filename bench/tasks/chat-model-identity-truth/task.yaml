@@ -54,8 +54,10 @@ verification_spec:
       # a served model id of the form `<org>/<name>` with a digit in the
       # name, which is how an openai_compatible install's block names its
       # model (`google/gemma-3-27b-it`, `meta-llama/llama-3.1-8b-instruct`).
+      # The name must start with a letter and may not be an API version, so
+      # `apps/v1` or `svc.cluster.local/v1` does not count.
       any_of_patterns:
-        - '\b[a-z][a-z0-9_.-]*/[a-z0-9._-]*[0-9][a-z0-9._:-]*'
+        - '\b[a-z][a-z0-9_.-]*/(?!v[0-9]+\b)[a-z][a-z0-9._:-]*[0-9][a-z0-9._:-]*'
       any_of_phrases:
         - "gemini"
         - "claude"
