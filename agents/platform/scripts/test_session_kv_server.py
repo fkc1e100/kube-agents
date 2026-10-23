@@ -3108,8 +3108,11 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertIn(f"`{expected_branch}`", body)
         self.assertRegex(
             expected_branch,
-            r"^platform-agent/incident-prod-us-central1-test-ns-pod-test-pod-oomkilled-[0-9a-f]{8}$",
+            r"^platform-agent/incident-prod-us-central1-test-ns-test-pod-[0-9a-f]{8}$",
         )
+        self.assertIn("keyed to this workload", body)
+        self.assertIn("do not run `submit-suggestion prepare`", body)
+        self.assertIn("push nothing", body)
         self.assertIn("**submit-suggestion**", body)
         self.assertIn("Never pass `--force` to `prepare` while another `Open GitOps PR` card is `running`", body)
         # The refusal is quoted the way vcs_client._refuse_to_discard words it.
@@ -3138,10 +3141,19 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertEqual(first, session_kv_server._incident_branch("k8s-evt-retried9", self.PAYLOAD))
         self.assertRegex(
             first,
-            r"^platform-agent/incident-prod-us-central1-test-ns-pod-test-pod-oomkilled-[0-9a-f]{8}$",
+            r"^platform-agent/incident-prod-us-central1-test-ns-test-pod-[0-9a-f]{8}$",
         )
         fallback = session_kv_server._incident_branch("", self.PAYLOAD)
         self.assertEqual(fallback, first)
+        nameless = dict(self.PAYLOAD, name="")
+        self.assertRegex(
+            session_kv_server._incident_branch(self.SESSION, nameless),
+            r"^platform-agent/incident-evt-prod-us-oom-42-[0-9a-f]{8}$",
+        )
+        self.assertRegex(
+            session_kv_server._incident_branch("", nameless),
+            r"^platform-agent/incident-prod-us-central1-test-ns-pod--oomkilled-[0-9a-f]{8}$",
+        )
         # Sibling or replaced Deployment pods share their Deployment's name on the branch,
         # the same identity the incident fold uses (_fold_key).
         replica_a = {**self.PAYLOAD, "name": "test-pod-6cfdb6b98b-zwv24"}
@@ -3191,12 +3203,38 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
             session_kv_server._incident_branch("s1", shift_a),
             session_kv_server._incident_branch("s1", shift_b),
         )
+        deploy_a = dict(self.PAYLOAD, namespace="prod", name="payments-api", kind_of_object="Deployment")
+        deploy_b = dict(self.PAYLOAD, namespace="prod-payments", name="api", kind_of_object="Deployment")
+        self.assertNotEqual(
+            session_kv_server._incident_branch("s1", deploy_a),
+            session_kv_server._incident_branch("s1", deploy_b),
+        )
         dot_name = dict(self.PAYLOAD, name="api.v2", kind_of_object="CronJob")
         dash_name = dict(self.PAYLOAD, name="api-v2", kind_of_object="CronJob")
         self.assertNotEqual(
             session_kv_server._incident_branch("s1", dot_name),
             session_kv_server._incident_branch("s1", dash_name),
         )
+
+    def test_every_incident_on_one_workload_shares_the_branch(self):
+        # The watcher opens a new session each time its window lapses on an
+        # unfixed fault, and sibling replicas carry their own pod names. All of
+        # them must land on one branch, so they revise one open pull request.
+        replica_a = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-hn9mm", reason="FailedScheduling")
+        replica_b = dict(self.PAYLOAD, kind_of_object="Pod", name="auth-service-67756c6f76-zxg5p", reason="FailedScheduling")
+        branches = {
+            session_kv_server._incident_branch("k8s-evt-aaaa1111", replica_a),
+            session_kv_server._incident_branch("k8s-evt-bbbb2222", replica_b),
+            session_kv_server._incident_branch("k8s-evt-cccc3333", dict(replica_a, reason="BackOff")),
+        }
+        self.assertEqual(len(branches), 1)
+        (shared_branch,) = branches
+        self.assertRegex(
+            shared_branch,
+            r"^platform-agent/incident-prod-us-central1-test-ns-auth-service-[0-9a-f]{8}$",
+        )
+        other = dict(replica_a, name="checkout-gateway-66d545794c-f9dd5")
+        self.assertNotIn(session_kv_server._incident_branch("k8s-evt-aaaa1111", other), branches)
 
     def test_a_long_key_is_cut_with_a_digest(self):
         from providers import validate as provider_validate
@@ -3210,6 +3248,76 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertLessEqual(len(full_b), session_kv_server.INCIDENT_BRANCH_MAX_LEN)
         self.assertEqual(provider_validate.validate_branch(full_a), full_a)
         self.assertEqual(provider_validate.validate_branch(full_b), full_b)
+        a = full_a.removeprefix("platform-agent/incident-")
+        b = full_b.removeprefix("platform-agent/incident-")
+        self.assertLessEqual(len(a), session_kv_server.INCIDENT_BRANCH_KEY_MAX_LEN)
+        self.assertNotEqual(a, b)
+        self.assertRegex(a, r"^[a-z0-9-]+$")
+
+    def test_open_pull_request_defaults_workload_window_so_concurrent_replicas_fold(self):
+        # With INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true and INCIDENT_WORKLOAD_DEDUP_SECONDS
+        # unset/0, the server still applies a 300s workload window so two replicas of one
+        # Deployment failing together do not start two concurrent PR cards sharing one
+        # branch and scratch working copy.
+        dedup_env = session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV
+        with patch.dict(os.environ, {self.ENV: "true"}, clear=False):
+            os.environ.pop(dedup_env, None)
+            self.assertEqual(
+                session_kv_server._workload_dedup_seconds(),
+                session_kv_server.INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS,
+            )
+            os.environ[dedup_env] = "0"
+            self.assertEqual(
+                session_kv_server._workload_dedup_seconds(),
+                session_kv_server.INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS,
+            )
+            with self.assertLogs(session_kv_server.logger, level="WARNING") as cm:
+                os.environ[dedup_env] = "not-an-int"
+                self.assertEqual(
+                    session_kv_server._workload_dedup_seconds(),
+                    session_kv_server.INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS,
+                )
+            self.assertTrue(any("using the 300s fallback" in line for line in cm.output), cm.output)
+            os.environ[dedup_env] = "120"
+            self.assertEqual(session_kv_server._workload_dedup_seconds(), 120)
+
+            os.environ.pop(dedup_env, None)
+            helper = TestWorkloadIncidentFold()
+            helper.setUp()
+            try:
+                first = helper._inject("auth-service-67756c6f76-hn9mm")
+                second = helper._inject("auth-service-67756c6f76-zxg5p")
+                self.assertEqual(first["status"], "injected")
+                self.assertEqual(second["status"], "folded")
+                self.assertEqual(helper.trigger.call_count, 1)
+            finally:
+                helper.tearDown()
+                helper.doCleanups()
+
+    def test_non_folding_kinds_for_one_name_do_not_share_a_branch(self):
+        # `_workload_incident_anchor` keeps a Pod/Deployment incident and an HPA
+        # with the same name as separate incidents. `_incident_branch` includes
+        # the non-Pod/Deployment kind so the two admitted sessions never file PR
+        # cards on one branch.
+        with patch.dict(os.environ, {self.ENV: "true"}, clear=False):
+            os.environ.pop(session_kv_server.INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, None)
+            helper = TestWorkloadIncidentFold()
+            helper.setUp()
+            try:
+                pod_resp = helper._inject("hpa-branch-api-6cfdb6b98b-zwv24", kind="Pod")
+                hpa_resp = helper._inject("hpa-branch-api", kind="HorizontalPodAutoscaler")
+                self.assertEqual(pod_resp["status"], "injected")
+                self.assertEqual(hpa_resp["status"], "injected")
+                self.assertEqual(helper.trigger.call_count, 2)
+                pod_payload = helper.trigger.call_args_list[0].args[2]
+                hpa_payload = helper.trigger.call_args_list[1].args[2]
+                pod_branch = session_kv_server._incident_branch("k8s-evt-kind-1", pod_payload)
+                hpa_branch = session_kv_server._incident_branch("k8s-evt-kind-2", hpa_payload)
+                self.assertNotEqual(pod_branch, hpa_branch)
+                self.assertIn("horizontalpodautoscaler", hpa_branch)
+            finally:
+                helper.tearDown()
+                helper.doCleanups()
 
     def test_drift_records_ignore_the_setting(self):
         drift = {"kind": session_kv_server.INJECT_KIND_DRIFT, "summary": "s"}

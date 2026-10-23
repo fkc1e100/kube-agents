@@ -31,7 +31,11 @@ It reports two kinds of thing, and deliberately nothing else.
    command strings, ``execute_code`` never consults them, and file indirection
    (``sqlite3 db < /tmp/fix.sql``) walks straight past them. These two queries
    are the honest replacement for an enforcement rule that cannot exist —
-   detection after the fact, with no false positives to mute.
+   detection after the fact, with no false positives to mute. A third query
+   (``MISSING_PR_CHILD_SQL``) checks the two-card incident-triage contract: a
+   completed ``Triage …`` parent whose report promised an automatic Pull Request
+   (``TRIAGE_OPEN_PR_MARKER``) must have its linked child card in ``task_links``
+   (catching a front-door turn that ended between Call 1 and Call 2).
 
    One caveat recorded so it is not mistaken for a bug in the query: the
    timeout/crash branch of the failure-limit breaker flips ``running``/``ready``
@@ -713,7 +717,7 @@ def render_stuck_cards(stuck_items: list, context: dict, home: Path, *, max_char
 
 
 def invariant_violations(conn: sqlite3.Connection) -> list:
-    """Rows that no code path in kanban_db.py can produce. Empty when healthy."""
+    """Rows that break a board or two-card triage invariant (orphan run, ghost claim, or missing follow-up PR child). Empty when healthy."""
     lines = []
     for row in conn.execute(ORPHAN_RUNS_SQL):
         lines.append(
@@ -729,7 +733,8 @@ def invariant_violations(conn: sqlite3.Connection) -> list:
         for row in conn.execute(MISSING_PR_CHILD_SQL):
             lines.append(
                 f"  missing follow-up child: task {row['id']} ({row['title']!r}) promised "
-                "an automatic Pull Request but has no linked child in task_links"
+                "an automatic Pull Request but has no linked child in task_links "
+                "(front-door turn ended between Call 1 and Call 2)"
             )
     except sqlite3.OperationalError:
         pass
@@ -897,7 +902,7 @@ def report(home: Path, *, env=None, max_chars: int | None = None, **kwargs) -> l
 
     used_chars = 40  # reserve for main() header: "kanban board health: attention required\n"
     if violations:
-        header = "Board invariant violations (a direct write to kanban.db is the usual cause):"
+        header = "Board invariant violations (direct kanban.db write or unlinked PR child):"
         lines.append(header)
         header_len = len(header) + 1
         used_chars += header_len

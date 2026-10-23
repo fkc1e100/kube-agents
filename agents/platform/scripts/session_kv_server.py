@@ -818,10 +818,40 @@ ALERT_DAILY_LIMITS = {
 # window has passed. 0, the default, turns
 # folding off; a negative or unparseable value reads as the default, the same
 # parse the daily ceilings use. Capped at a day, the watcher's own dedup window.
+INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV = "INCIDENT_WORKLOAD_DEDUP_SECONDS"
+INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS = 300
 INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS = 86400
 INCIDENT_WORKLOAD_DEDUP_SECONDS = min(
-    _alert_daily_limit("INCIDENT_WORKLOAD_DEDUP_SECONDS", 0), INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS
+    _alert_daily_limit(INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, 0), INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS
 )
+
+
+def _workload_dedup_seconds() -> int:
+    """Return the workload deduplication window in seconds (0 when disabled, capped at 86400s).
+
+    When ``INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true`` and
+    ``INCIDENT_WORKLOAD_DEDUP_SECONDS`` is unset or ``0``, defaults to
+    ``INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS`` (300s) so concurrent failing
+    replicas of one Deployment fold into one triage and pull-request session
+    rather than racing on the shared branch and scratch working copy.
+    """
+    default = INCIDENT_PR_DEFAULT_WORKLOAD_DEDUP_SECONDS if _incident_triage_opens_pull_request() else 0
+    if INCIDENT_WORKLOAD_DEDUP_SECONDS > 0:
+        return min(INCIDENT_WORKLOAD_DEDUP_SECONDS, INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS)
+    raw = os.environ.get(INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV, "").strip()
+    if not raw:
+        return default
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            f"Invalid {INCIDENT_WORKLOAD_DEDUP_SECONDS_ENV}={raw!r} (expected non-negative integer); "
+            f"{'using the 300s fallback' if default else 'disabling'}"
+        )
+        return default
+    if n <= 0:
+        return default
+    return min(n, INCIDENT_WORKLOAD_DEDUP_MAX_SECONDS)
 # A pod named like a Deployment's for display: 8-10 hex characters, then the
 # pod's own suffix (`checkout-6cfdb6b98b-zwv24` -> `checkout`). clean_workload_name
 # strips it, and so a CronJob run's pod (`report-29812345-abcde`) and a
@@ -1730,7 +1760,8 @@ def _workload_incident_anchor(
     Best-effort: a failed read returns None, so the event is announced rather
     than lost.
     """
-    if INCIDENT_WORKLOAD_DEDUP_SECONDS <= 0 or not fold_key:
+    window = _workload_dedup_seconds()
+    if window <= 0 or not fold_key:
         return None
     try:
         with closing(sqlite3.connect(SESSION_KV_DB_PATH, timeout=INCIDENT_FOLD_DB_TIMEOUT_S)) as conn:
@@ -1749,7 +1780,7 @@ def _workload_incident_anchor(
                     severity,
                     CRITICAL_SEVERITY,
                     CRITICAL_SEVERITY,
-                    f"-{INCIDENT_WORKLOAD_DEDUP_SECONDS} seconds",
+                    f"-{window} seconds",
                 ),
             ).fetchone()
     except Exception as exc:
@@ -2748,36 +2779,47 @@ def _incident_branch_workload(kind: str, raw_name: str) -> str:
 
 
 def _incident_branch(session_id: str, payload: Dict[str, Any]) -> str:
-    """The branch an incident's pull request is opened on, one per incident.
+    """The branch an incident's pull request is opened on, one per workload.
 
-    Keyed to the event's coordinates (cluster, namespace, kind, workload name
-    as ``_incident_branch_workload`` reads it, and reason) rather than the
-    per-inject ``session_id``: the watcher mints a new ``k8s-evt-<hex>`` session
-    whenever an incident's dedup window rolls over or its snapshot is lost, in
-    ``--mode=shared`` every incident shares one session, and a Deployment's
-    replicas share one branch the way they share one folded incident
-    (INCIDENT_WORKLOAD_DEDUP_SECONDS). ``session_id`` is used only when the
-    payload carries no coordinates.
+    Keyed to ``(cluster, namespace, workload)`` as ``_incident_branch_workload``
+    reads it (and ``raw_kind`` for non-Pod/Deployment kinds so same-named kinds
+    kept separate by ``_workload_incident_anchor`` never share a branch),
+    rather than the per-inject ``session_id`` or event ``reason``: the watcher
+    mints a new ``k8s-evt-<hex>`` session whenever an incident's dedup window
+    rolls over or its snapshot is lost, in ``--mode=shared`` every incident
+    shares one session, and a Deployment's replicas and cascading reasons share
+    one branch the way they share one folded incident
+    (INCIDENT_WORKLOAD_DEDUP_SECONDS). ``session_id`` (or the full coordinate
+    tuple when ``session_id`` is empty) is used only when the payload carries
+    no workload name.
 
     A short SHA-256 digest of the NUL-separated coordinate components is always
-    appended so boundary shifts (``test`` + ``ns-pod`` vs ``test-ns`` + ``pod``),
-    punctuation normalization (``api.v2`` vs ``api-v2``), and truncation at
-    ``INCIDENT_BRANCH_KEY_MAX_LEN`` cannot collide two distinct incidents onto
-    one branch, while keeping the full ref at or below ``INCIDENT_BRANCH_MAX_LEN``
-    (200 chars for the broker's ``BRANCH_RE``).
+    appended so boundary shifts (``prod`` + ``payments-api`` vs
+    ``prod-payments`` + ``api``), punctuation normalization (``api.v2`` vs
+    ``api-v2``), and truncation at ``INCIDENT_BRANCH_KEY_MAX_LEN`` cannot
+    collide two distinct workloads onto one branch, while keeping the full ref
+    at or below ``INCIDENT_BRANCH_MAX_LEN`` (200 chars for the broker's
+    ``BRANCH_RE``).
     """
+    cluster = str(payload.get("cluster") or "")
+    namespace = str(payload.get("namespace") or "")
     raw_kind = str(payload.get("kind_of_object") or payload.get("kindOfObject") or "")
     raw_name = str(payload.get("name") or "")
-    kind = raw_kind
     workload = _incident_branch_workload(raw_kind, raw_name) if raw_name else ""
-    coords = (
-        str(payload.get("cluster") or ""),
-        str(payload.get("namespace") or ""),
-        kind,
-        workload,
-        str(payload.get("reason") or ""),
-    )
-    parts: tuple[str, ...] = coords if any(coords) else (session_id,)
+    if workload:
+        if raw_kind.lower() not in ("", "pod", "deployment"):
+            parts: tuple[str, ...] = (cluster, namespace, raw_kind, workload)
+        else:
+            parts = (cluster, namespace, workload)
+    else:
+        coords = (
+            cluster,
+            namespace,
+            raw_kind,
+            raw_name,
+            str(payload.get("reason") or ""),
+        )
+        parts = (session_id,) if session_id else (coords if any(coords) else (session_id,))
     key = "-".join(parts)
     digest = hashlib.sha256("\0".join(parts).encode()).hexdigest()[:INCIDENT_BRANCH_DIGEST_LEN]
     slug = _INCIDENT_BRANCH_UNSAFE_RE.sub("-", key.lower()).strip("-")
@@ -2822,9 +2864,11 @@ def _triage_pr_task_body(payload: Dict[str, Any], session_id: str) -> str:
         f"`Open GitOps PR` card for `{branch}` (other than this card) is already `running`, do not run `submit-suggestion prepare` "
         f"and complete this card noting that the sibling card is already preparing the Pull Request.\n"
         f"3. **Open the Pull Request** for the option marked '✅ Recommended', or for the single 'Proposed fix' when there "
-        f"is only one, with the **submit-suggestion** skill, on the branch `{branch}`. Use that branch name exactly. It "
-        f"is keyed to this incident, so if a Pull Request for it is already open, `prepare` hands that one back and you "
-        f"revise it rather than opening a second. Never pass `--force` to `prepare` while another `Open GitOps PR` card "
+        f"is only one, with the **submit-suggestion** skill, on the branch `{branch}`. Use that branch name exactly. The "
+        f"branch is keyed to this workload, so if a Pull Request for it is already open (an earlier incident on the same "
+        f"workload that nobody has merged yet), `prepare` hands that one back and you revise it rather than opening a second. "
+        f"If that open Pull Request already makes the recommended change, push nothing: complete this card with its URL and "
+        f"say it is still waiting for review. Never pass `--force` to `prepare` while another `Open GitOps PR` card "
         f"is `running`; if `prepare` refuses because a copy is already there (its message reads `there is already a copy at <path> with ...` "
         f"and ends `Publish it, or re-run with --force to replace it.`) and no sibling `Open GitOps PR` card is `running`, re-run "
         f"`prepare` once with `--force` to replace the stale checkout from an interrupted attempt.\n"
@@ -6153,7 +6197,7 @@ def inject_message(
     quota_denied = False
     suppressed_today = 0
     anchor_id = None
-    with _WORKLOAD_FOLD_LOCK if INCIDENT_WORKLOAD_DEDUP_SECONDS > 0 else nullcontext():
+    with _WORKLOAD_FOLD_LOCK if _workload_dedup_seconds() > 0 else nullcontext():
         fold_key = _fold_key(object_kind, object_name)
         if not suppressed:
             anchor_id = _workload_incident_anchor(event_cluster, namespace, object_kind, fold_key, severity_label)
