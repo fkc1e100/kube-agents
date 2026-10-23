@@ -24,7 +24,7 @@ KUBECTL_TIMEOUT_SECONDS = 125
 # The sandbox's kubectl wrapper that forwards calls through the credential proxy.
 CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # Marker emitted on stderr when the credential proxy cuts output at CREDENTIAL_PROXY_MAX_OUTPUT_BYTES.
-PROXY_TRUNCATED_MARKER = "truncated"
+PROXY_TRUNCATED_MARKER = "credential proxy output truncated"
 # Optional CRD kinds: kubectl's "no such resource type" error for these means the kind is not installed.
 OPTIONAL_CRD_KEYS = frozenset({"gateways", "httproutes", "backendconfigs", "healthcheckpolicies"})
 MISSING_RESOURCE_TYPE_MARKER = "doesn't have a resource type"

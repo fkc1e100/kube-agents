@@ -2,8 +2,8 @@
 """audit_certificates.py - High-performance cert-manager and TLS certificate auditor.
 
 Discovers whether cert-manager.io CRDs exist (full, partial, or absent), audits
-Certificates, Issuers, ClusterIssuers, CertificateRequests, GKE ManagedCertificates,
-and native kubernetes.io/tls Secrets (count & namespaces) in parallel.
+Certificates, Issuers, ClusterIssuers and GKE ManagedCertificates, and counts
+CertificateRequests and native kubernetes.io/tls Secrets (count & namespaces), in parallel.
 Emits CLEAN_AUDIT_STOP: YES only when every queried kind was read and no Certificate is
 unready, expired, renewal-overdue or failing issuance, no Issuer is unready, and no
 ManagedCertificate is outside Active. Native TLS Secrets are counted, not checked for expiry; a
@@ -40,7 +40,7 @@ KUBECTL_TIMEOUT_SECONDS = 125
 # The sandbox's kubectl wrapper that forwards calls through the credential proxy.
 CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # Marker emitted on stderr when the credential proxy cuts output at CREDENTIAL_PROXY_MAX_OUTPUT_BYTES.
-PROXY_TRUNCATED_MARKER = "truncated"
+PROXY_TRUNCATED_MARKER = "credential proxy output truncated"
 # kubectl's RBAC denial text; a Forbidden Secret listing is reported as uncounted, not as unread.
 FORBIDDEN_MARKER = "forbidden"
 # How long Issuing=True may hold before a passed renewalTime counts as overdue again; a renewal
@@ -382,7 +382,7 @@ def audit_certificates(kubeconfig: str | None = None) -> int:
     print(f"- **cert-manager Status:** {crd_mode}")
     print("- **Certificates:** " + counted(("certificates",), f"{total_certs} total ({ready_certs} Ready, {len(unready_certs)} Unready/Degraded)"))
     print("- **Issuers & ClusterIssuers:** " + counted(("issuers", "clusterissuers"), f"{total_issuers} total ({ready_issuers} Ready, {len(unready_issuers)} Unready)"))
-    print("- **Active CertificateRequests:** " + counted(("certrequests",), f"{len(cr_items)}") + " | **GKE ManagedCertificates:** " + counted(("managedcerts",), f"{len(mc_items)} ({len(unhealthy_mcs)} not Active)"))
+    print("- **CertificateRequests (counted, status not checked):** " + counted(("certrequests",), f"{len(cr_items)}") + " | **GKE ManagedCertificates:** " + counted(("managedcerts",), f"{len(mc_items)} ({len(unhealthy_mcs)} not Active)"))
     print(f"- **Native TLS Secrets (`kubernetes.io/tls`):** {tls_summary_str}\n")
 
     is_clean = len(unready_certs) == 0 and len(unready_issuers) == 0

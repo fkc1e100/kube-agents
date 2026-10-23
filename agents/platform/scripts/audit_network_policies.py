@@ -4,8 +4,8 @@
 Discovers all NetworkPolicies and Namespaces concurrently, matches
 policies against namespaces, and prints a structured Markdown audit table with a
 Stop-on-Clean directive. CLEAN_AUDIT_STOP is YES only when both listings were read, every
-namespace has at least one NetworkPolicy, and no policy allows all ingress through an empty
-rule. It does not check that the cluster's network plugin enforces the policies.
+non-system namespace has a policy selecting every pod for Ingress, and no ingress rule admits
+all sources. It does not check that the cluster's network plugin enforces the policies.
 Part of kube-agents #3285.
 """
 
@@ -26,7 +26,27 @@ KUBECTL_TIMEOUT_SECONDS = 125
 # The sandbox's kubectl wrapper that forwards calls through the credential proxy.
 CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # Marker emitted on stderr when the credential proxy cuts output at CREDENTIAL_PROXY_MAX_OUTPUT_BYTES.
-PROXY_TRUNCATED_MARKER = "truncated"
+PROXY_TRUNCATED_MARKER = "credential proxy output truncated"
+
+
+# Namespaces Kubernetes and GKE create and manage; a missing policy there is listed but not a verdict gap.
+SYSTEM_NAMESPACE_PREFIXES = ("kube-", "gke-", "gmp-")
+# CIDRs that cover every IPv4 or IPv6 source.
+ALL_ADDRESSES_CIDRS = frozenset({"0.0.0.0/0", "::/0"})
+
+
+def peer_is_every_source(peer: dict) -> bool:
+    """True for a `from` peer that admits every pod in every namespace, or every address."""
+    if set(peer) == {"namespaceSelector"} and not peer["namespaceSelector"]:
+        return True
+    block = peer.get("ipBlock") or {}
+    return block.get("cidr") in ALL_ADDRESSES_CIDRS and not block.get("except")
+
+
+def rule_admits_all_sources(rule: dict) -> bool:
+    """True for an ingress rule with no `from` (all sources, on its ports if any) or an every-source peer."""
+    peers = (rule or {}).get("from") or []
+    return not peers or any(peer_is_every_source(p or {}) for p in peers)
 
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
@@ -115,8 +135,6 @@ def audit_network_policies(kubeconfig: str | None = None) -> int:
         policy_types = spec.get("policyTypes", [])
         has_ingress = "Ingress" in policy_types or "ingress" in spec
         has_egress = "Egress" in policy_types or "egress" in spec
-        # An empty ingress rule ({}) admits traffic from every source, so the policy isolates nothing.
-        allows_all_ingress = any(rule == {} for rule in spec.get("ingress", []) or [])
 
         np_by_ns.setdefault(ns, []).append({
             "name": name,
@@ -124,24 +142,34 @@ def audit_network_policies(kubeconfig: str | None = None) -> int:
             "policyTypes": policy_types,
             "has_ingress": has_ingress,
             "has_egress": has_egress,
-            "allows_all_ingress": allows_all_ingress,
+            "selects_all_pods": not pod_sel,
+            "allows_all_ingress": has_ingress and any(rule_admits_all_sources(r) for r in spec.get("ingress", []) or []),
         })
 
+    def ingress_isolated(ns: str) -> bool:
+        # Ingress isolation for the whole namespace needs a policy selecting every pod for Ingress.
+        return any(p["has_ingress"] and p["selects_all_pods"] for p in np_by_ns.get(ns, []))
+
     protected_ns = sorted(np_by_ns.keys())
-    unprotected_ns = sorted(ns for ns in all_ns if ns not in np_by_ns)
+    system_ns = [ns for ns in all_ns if ns.startswith(SYSTEM_NAMESPACE_PREFIXES)]
+    user_ns = [ns for ns in all_ns if not ns.startswith(SYSTEM_NAMESPACE_PREFIXES)]
+    unprotected_ns = [ns for ns in user_ns if ns not in np_by_ns]
+    # Has a policy, but none selects every pod for Ingress (egress-only, or a partial podSelector).
+    partial_ns = [ns for ns in user_ns if ns in np_by_ns and not ingress_isolated(ns)]
     allow_all = [(ns, p["name"]) for ns in protected_ns for p in np_by_ns[ns] if p["allows_all_ingress"]]
 
     print("## NetworkPolicy Audit Summary\n")
-    print(f"- **Total Namespaces:** {len(all_ns)}")
+    print(f"- **Total Namespaces:** {len(all_ns)} ({len(system_ns)} system namespaces, listed apart and not part of the verdict)")
     print(f"- **Namespaces Protected by NetworkPolicies:** {len(protected_ns)}")
-    print(f"- **Namespaces Without NetworkPolicies:** {len(unprotected_ns)}")
-    print(f"- **Total Active NetworkPolicies:** {len(np_items)} ({len(allow_all)} allow all ingress through an empty rule)\n")
-    if unprotected_ns or allow_all:
-        print(f"**NetworkPolicy Audit Verdict: Isolation Gaps Found** ({len(unprotected_ns)} namespaces without a NetworkPolicy, {len(allow_all)} allow-all-ingress policies).")
-        print("CLEAN_AUDIT_STOP: NO — Report the unprotected namespaces and allow-all policies below as gaps; this audit does not check that the network plugin enforces policies.\n")
+    print(f"- **Namespaces Without NetworkPolicies:** {len(unprotected_ns)} (excluding system namespaces)")
+    print(f"- **Namespaces With Policies but No Full Ingress Isolation:** {len(partial_ns)}")
+    print(f"- **Total Active NetworkPolicies:** {len(np_items)} ({len(allow_all)} admit ingress from all sources)\n")
+    if unprotected_ns or partial_ns or allow_all:
+        print(f"**NetworkPolicy Audit Verdict: Isolation Gaps Found** ({len(unprotected_ns)} namespaces without a NetworkPolicy, {len(partial_ns)} without full ingress isolation, {len(allow_all)} allow-all-ingress policies).")
+        print("CLEAN_AUDIT_STOP: NO — Report the namespaces and allow-all policies below as gaps; this audit does not check that the network plugin enforces policies.\n")
     else:
-        print("**NetworkPolicy Audit Verdict: Every Namespace Has a Policy** (no allow-all-ingress policy found; enforcement by the network plugin is not checked).")
-        print("CLEAN_AUDIT_STOP: YES — Every namespace has at least one NetworkPolicy and none allows all ingress; report this summary, say that enforcement was not checked, and call kanban_complete immediately.\n")
+        print("**NetworkPolicy Audit Verdict: Every Non-System Namespace Is Ingress-Isolated** (no allow-all-ingress policy found; enforcement by the network plugin is not checked).")
+        print("CLEAN_AUDIT_STOP: YES — Every non-system namespace has a policy selecting all pods for Ingress and none admits all sources; report this summary, say that enforcement was not checked, and call kanban_complete immediately.\n")
 
     if np_items:
         print("### Active NetworkPolicies")
@@ -156,11 +184,18 @@ def audit_network_policies(kubeconfig: str | None = None) -> int:
                 print(f"{ns:<25} {p['name']:<35} {types_str:<20} {sel_str}")
         print("")
     else:
-        print("No NetworkPolicies are currently enforced on this cluster.\n")
+        print("No NetworkPolicies exist on this cluster.\n")
 
     if unprotected_ns:
         print(f"### Unprotected Namespaces ({len(unprotected_ns)})")
-        print(", ".join(unprotected_ns))
+        print(", ".join(unprotected_ns) + "\n")
+    if partial_ns:
+        print(f"### Namespaces Without Full Ingress Isolation ({len(partial_ns)})")
+        print(", ".join(partial_ns) + "\n")
+    unprotected_system = [ns for ns in system_ns if ns not in np_by_ns]
+    if unprotected_system:
+        print(f"### System Namespaces Without NetworkPolicies ({len(unprotected_system)}; not part of the verdict)")
+        print(", ".join(unprotected_system))
 
     return 0
 

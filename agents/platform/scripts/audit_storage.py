@@ -20,13 +20,17 @@ import sys
 UNREAD_REASON_MAX_CHARS = 200
 # What a summary line prints in place of a count for a kind whose listing failed.
 UNREAD_COUNT_TEXT = "unread (listing failed; see the verdict below)"
+# A StorageClass binding mode that leaves a PVC Pending, by design, until a pod uses it.
+WAIT_FOR_FIRST_CONSUMER = "WaitForFirstConsumer"
+# Annotation the scheduler sets on a WaitForFirstConsumer PVC once a pod using it has picked a node.
+SELECTED_NODE_ANNOTATION = "volume.kubernetes.io/selected-node"
 # Per-call kubectl deadline: 60 s broker admission wait + 60 s broker kubectl run cap + 5 s margin,
 # matching cluster_preflight.sh so queued calls on the shared 8-slot sandbox pool do not time out locally.
 KUBECTL_TIMEOUT_SECONDS = 125
 # The sandbox's kubectl wrapper that forwards calls through the credential proxy.
 CREDENTIAL_PROXY_BIN = "/opt/credential-proxy/bin"
 # Marker emitted on stderr when the credential proxy cuts output at CREDENTIAL_PROXY_MAX_OUTPUT_BYTES.
-PROXY_TRUNCATED_MARKER = "truncated"
+PROXY_TRUNCATED_MARKER = "credential proxy output truncated"
 
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
@@ -115,9 +119,13 @@ def audit_storage(kubeconfig: str | None = None) -> int:
             "is_default": is_default,
         })
 
+    binding_modes = {sc["name"]: sc["binding_mode"] for sc in sc_list}
+
     # 2. Parse PVCs
     pvc_list = []
     pending_pvcs = []
+    # Pending PVCs on a WaitForFirstConsumer class that no pod has claimed yet: expected, not degraded.
+    waiting_pvcs = []
     for item in pvc_items:
         ns = item.get("metadata", {}).get("namespace", "default")
         name = item.get("metadata", {}).get("name", "")
@@ -136,7 +144,16 @@ def audit_storage(kubeconfig: str | None = None) -> int:
             "capacity": req_storage,
         }
         pvc_list.append(pvc_info)
-        if phase != "Bound":
+        annotations = item.get("metadata", {}).get("annotations", {}) or {}
+        effective_sc = sc_name or (default_sc if default_sc != "None" else "")
+        if (
+            phase == "Pending"
+            and binding_modes.get(effective_sc) == WAIT_FOR_FIRST_CONSUMER
+            and SELECTED_NODE_ANNOTATION not in annotations
+        ):
+            pvc_info["phase"] = "Pending (waiting for first consumer)"
+            waiting_pvcs.append(pvc_info)
+        elif phase != "Bound":
             pending_pvcs.append(pvc_info)
 
     # 3. Parse PVs
@@ -200,7 +217,7 @@ def audit_storage(kubeconfig: str | None = None) -> int:
         return UNREAD_COUNT_TEXT if key in unread else text
 
     print("## Kubernetes Storage Fleet Audit\n")
-    print("- **PersistentVolumeClaims (PVCs):** " + counted("pvcs", f"{total_pvcs} total ({bound_pvcs} Bound, {len(pending_pvcs)} Pending/Unbound)"))
+    print("- **PersistentVolumeClaims (PVCs):** " + counted("pvcs", f"{total_pvcs} total ({bound_pvcs} Bound, {len(waiting_pvcs)} waiting for first consumer, {len(pending_pvcs)} Pending/Unbound)"))
     print("- **PersistentVolumes (PVs):** " + counted("pvs", f"{total_pvs} total ({bound_pvs} Bound, {available_pvs} Available, {len(unhealthy_pvs)} Failed/Released)"))
     print("- **StorageClasses:** " + counted("scs", f"{total_scs} available (Default: `{default_sc}`)"))
     print("- **VolumeAttachments:** " + counted("attachments", f"{total_vas} total ({len(attachment_errors)} errors or unattached)") + "\n")

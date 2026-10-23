@@ -429,6 +429,51 @@ class TestAuditStorage(unittest.TestCase):
         self.assertIn("Storage Audit Verdict: Degradation Detected", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
 
+    def _storage(self, pvc_annotations):
+        def fake_run_kubectl_json(args, env):
+            if "pvc" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "data", "annotations": pvc_annotations},
+                            "spec": {"resources": {"requests": {"storage": "10Gi"}}},
+                            "status": {"phase": "Pending"},
+                        }
+                    ]
+                }
+            if "sc" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {
+                                "name": "standard-rwo",
+                                "annotations": {"storageclass.kubernetes.io/is-default-class": "true"},
+                            },
+                            "provisioner": "pd.csi.storage.gke.io",
+                            "volumeBindingMode": "WaitForFirstConsumer",
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        buf = io.StringIO()
+        with (
+            mock.patch.object(audit_storage, "run_kubectl_json", side_effect=fake_run_kubectl_json),
+            contextlib.redirect_stdout(buf),
+        ):
+            audit_storage.audit_storage()
+        return buf.getvalue()
+
+    def test_unclaimed_pvc_on_wait_for_first_consumer_class_is_not_degraded(self):
+        out = self._storage({})
+        self.assertIn("1 waiting for first consumer, 0 Pending/Unbound", out)
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+
+    def test_pending_pvc_with_a_selected_node_is_degraded(self):
+        out = self._storage({audit_storage.SELECTED_NODE_ANNOTATION: "node-1"})
+        self.assertIn("1 pending PVCs", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
     def test_failed_listing_is_unread_not_empty(self):
         def fake_run_kubectl_json(args, env):
             if "pvc" in args:
@@ -840,11 +885,12 @@ class TestAuditNetworkPolicies(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("- **Total Namespaces:** 3", out)
         self.assertIn("- **Namespaces Protected by NetworkPolicies:** 1", out)
-        self.assertIn("- **Namespaces Without NetworkPolicies:** 2", out)
+        self.assertIn("- **Namespaces Without NetworkPolicies:** 1", out)
         self.assertIn("Isolation Gaps Found", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
         self.assertNotIn("CLEAN_AUDIT_STOP: YES", out)
-        self.assertIn("default, kube-system", out)
+        self.assertIn("### Unprotected Namespaces (1)\ndefault", out)
+        self.assertIn("System Namespaces Without NetworkPolicies (1; not part of the verdict)\nkube-system", out)
         self.assertIn("deny-all", out)
         db_line = next(line for line in out.splitlines() if "db-only" in line)
         self.assertIn("matchExpressions", db_line)
@@ -889,6 +935,58 @@ class TestAuditNetworkPolicies(unittest.TestCase):
         self.assertIn("1 allow-all-ingress policies", out)
         self.assertIn("ALLOW-ALL INGRESS", out)
         self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_system_namespaces_without_policies_do_not_block_clean(self):
+        deny = {"podSelector": {}, "policyTypes": ["Ingress"]}
+        out = self._run_policies(self._policies(
+            ["prod", "kube-system", "kube-public", "gke-managed-system", "gmp-system"],
+            [{"metadata": {"namespace": "prod", "name": "deny"}, "spec": deny}],
+        ))
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+        self.assertIn("System Namespaces Without NetworkPolicies (4", out)
+
+    def test_egress_only_or_partial_selector_namespace_is_a_gap(self):
+        out = self._run_policies(self._policies(
+            ["egress-only", "partial"],
+            [
+                {"metadata": {"namespace": "egress-only", "name": "e"}, "spec": {"podSelector": {}, "policyTypes": ["Egress"]}},
+                {
+                    "metadata": {"namespace": "partial", "name": "db"},
+                    "spec": {"podSelector": {"matchLabels": {"tier": "db"}}, "policyTypes": ["Ingress"]},
+                },
+            ],
+        ))
+        self.assertIn("2 without full ingress isolation", out)
+        self.assertIn("egress-only, partial", out)
+        self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_every_source_peers_and_ports_only_rules_allow_all_ingress(self):
+        rules = {
+            "any-namespace": [{"from": [{"namespaceSelector": {}}]}],
+            "any-address": [{"from": [{"ipBlock": {"cidr": "0.0.0.0/0"}}]}],
+            "any-address-v6": [{"from": [{"ipBlock": {"cidr": "::/0"}}]}],
+            "ports-only": [{"ports": [{"port": 443}]}],
+        }
+        for name, ingress in rules.items():
+            with self.subTest(name):
+                out = self._run_policies(self._policies(
+                    ["prod"],
+                    [{"metadata": {"namespace": "prod", "name": name}, "spec": {"podSelector": {}, "ingress": ingress}}],
+                ))
+                self.assertIn("1 allow-all-ingress policies", out)
+                self.assertIn("CLEAN_AUDIT_STOP: NO", out)
+
+    def test_restricted_peers_do_not_allow_all_ingress(self):
+        ingress = [
+            {"from": [{"namespaceSelector": {"matchLabels": {"team": "a"}}}]},
+            {"from": [{"namespaceSelector": {}, "podSelector": {"matchLabels": {"app": "web"}}}]},
+            {"from": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": ["10.0.0.0/8"]}}]},
+        ]
+        out = self._run_policies(self._policies(
+            ["prod"],
+            [{"metadata": {"namespace": "prod", "name": "scoped"}, "spec": {"podSelector": {}, "ingress": ingress}}],
+        ))
+        self.assertIn("CLEAN_AUDIT_STOP: YES", out)
 
     def test_zero_policies_is_not_clean(self):
         out = self._run_policies(self._policies(["prod", "default"], []))
