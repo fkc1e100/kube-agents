@@ -34,6 +34,16 @@ window planning; CUJ4 and CUJ5, the scheduled and reactive re-checks) are design
 whose Scope table also says which of their evidence-scored criteria fail against
 a stock install and why.
 
+The `harness/` journeys verify read-only harness self-inspection through the
+portal: backing model and provider identity without leaking internal LiteLLM
+router aliases (`model-default` or `custom provider`), coordinator role and
+plan-and-delegate permission posture (`test_01_identity_and_permission_posture.py`),
+fleet and host cluster GCP project/region scope (`test_02_fleet_and_host_cluster_scope.py`),
+`kubeagents-system` workload/service and `kubeagents.x-k8s.io` CRD inventory
+(`test_03_harness_namespace_and_crd_inventory.py`), and CrashLoopBackOff,
+Warning event, and `platform-agent-gateway` pod log diagnostics
+(`test_04_gateway_diagnostics_and_events.py`).
+
 ## Adding a journey
 
 Add a normal pytest module at:
