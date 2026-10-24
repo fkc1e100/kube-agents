@@ -4982,7 +4982,6 @@ write_tfvars_from_state() {
     print_error "PLATFORM_AGENT_STORAGE_SIZE='${platform_agent_storage_size}' is not a whole number of Mi, Gi or Ti above zero and at most 64Ti, for example 80Gi. Fix it in install.env, or on a first install, in the value this shell exports."
     return 1
   fi
-  # Refused here for upgrade.sh and the Day-2 menu, which regenerate from
   # Refused when the web console is on and the operator has accepted an
   # unconfined cluster: the web console holds the Platform Agent's API key with
   # no login of its own, and its deny-all-ingress NetworkPolicy is the only

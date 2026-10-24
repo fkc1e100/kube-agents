@@ -4343,7 +4343,7 @@ print_no_network_policy_consequences() {
   print_info "Every NetworkPolicy this install ships is accepted by the API server and enforced by nothing:"
   print_info "  • the agent pod's ingress restriction and egress confinement (otherwise port 443 outside private ranges, and named in-cluster peers)"
   print_info "  • the shell sandbox's deny-all policy, which otherwise allows only cluster DNS and the credential proxy"
-  print_info "  • the LiteLLM gateway, GitHub token minter, Hindsight and web console policies"
+  print_info "  • the LiteLLM gateway, GitHub token minter and Hindsight policies"
   print_info "What is lost is the confinement of kube-agents' own workloads, not of yours: the sandbox that runs model-authored commands can reach anything routable in this VPC. Trusting the workloads already in this cluster is a different decision."
   print_info "Recorded as ${NETWORK_POLICY_REPORT_FIELD}=${NP_ENFORCEMENT_ABSENT_ACCEPTED} in the install report and as the ${NETWORK_POLICY_ENFORCEMENT_ANNOTATION} annotation on the PlatformAgent. To confine it later, enable Dataplane V2 or the Calico addon on the cluster and re-run the installer."
 }

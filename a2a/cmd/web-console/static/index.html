@@ -1362,12 +1362,14 @@
               </p>
               <p class="about-caption">
                 The agent opens a post in # alerts for each event-triage
-                session, and in # scheduled for each scheduled job per UTC day.
+                session; # scheduled is reserved for daily scheduled-check
+                sessions (one post per scheduled job per UTC day) and stays
+                empty until scheduled report relay persists gateway sessions.
                 Replies you send there go into that session on a chat-less
                 install; when a chat platform is enabled, those threads are
-                read-only here so replies stay in the chat thread. Slack and
-                Google Chat sessions are listed by title only and cannot be
-                opened here.
+                read-only here so replies stay in the chat thread. Slack, Google
+                Chat and A2A bridge sessions are listed by title only and cannot
+                be opened here.
               </p>
             </div>
           </aside>
@@ -1389,9 +1391,9 @@
               their own. Each thread is its own session.
             </p>
             <p>
-              A turn that calls tools can take a few minutes. The line under the
-              reply shows what the agent is doing. The agent proposes changes as
-              pull requests for you to review.
+              A turn that calls tools can take a few minutes. While it runs, a
+              status line under your message shows what the agent is doing. The
+              agent proposes changes as pull requests for you to review.
             </p>
           </div>
         </div>
@@ -1427,11 +1429,12 @@
         },
         scheduled: {
           title: "# scheduled",
-          sub: "One post per scheduled job per UTC day",
+          sub: "One post per scheduled job per UTC day (reserved; empty until scheduled report relay persists gateway sessions)",
           author: "Scheduler",
           avatar: "\u21bb",
           avatarClass: "avatar-cron",
-          empty: "No scheduled checks have run yet.",
+          empty:
+            "No scheduled check sessions yet. This channel is reserved until scheduled report relay persists gateway sessions.",
         },
       };
 
@@ -1611,6 +1614,7 @@
           (t) => !removed.has(t.id) || inflight[t.id],
         );
         const wasOnScreen = view === "thread" && activeId;
+        let retained = false;
         const merged = stored.map((t) => {
           const mine = findThread(t.id);
           if (!mine) return t;
@@ -1620,9 +1624,11 @@
           if ((t.viewedAt || 0) > (mine.viewedAt || 0)) {
             mine.viewedAt = t.viewedAt;
           }
-          mine.busyUntil = inflight[mine.id]
-            ? mine.busyUntil
-            : t.busyUntil || 0;
+          if (inflight[mine.id]) {
+            if ((t.busyUntil || 0) < (mine.busyUntil || 0)) retained = true;
+          } else {
+            mine.busyUntil = t.busyUntil || 0;
+          }
           if (!onScreen(mine.id) && t.mark > mine.mark) {
             mine.mark = t.mark;
             mine.markKnown = true;
@@ -1630,7 +1636,6 @@
           mine.unread = onScreen(mine.id) ? false : !!(mine.unread || t.unread);
           return mine;
         });
-        let retained = false;
         threads.forEach((mine) => {
           if (
             (inflight[mine.id] ||
@@ -1763,21 +1768,17 @@
       }
 
       // Shows each agent or kanban message above the mark once, then moves the
-      // mark past it. A user-role row from another tab is shown too; this tab's
-      // own typed row (skipMsg) only moves the mark.
-      function showUpdates(t, messages, skipMsg) {
+      // mark past it. A user-role row from another tab in the slice is shown too.
+      function showUpdates(t, messages) {
         (messages || []).forEach((m) => {
           if (m.id <= t.mark) return;
-          if (m === skipMsg) {
-            advanceMark(t, m.id);
-            return;
-          }
           if (m.author === "kanban") {
             deliver(t, m.content, "Specialist report", m);
             t.wakeOpen = true;
           } else if (m.role === "assistant") {
             deliver(t, m.content, "update", m);
             t.wakeOpen = false;
+            if (!inflight[t.id] && t.busyUntil) t.busyUntil = 0;
           } else if (m.role === "user") deliver(t, m.content, "You", m);
           advanceMark(t, m.id);
         });
@@ -1843,8 +1844,7 @@
               replyAt = i;
           });
         }
-        const typedMsg = turnAt >= 0 ? messages[turnAt] : null;
-        if (turnAt >= 0) showUpdates(t, messages.slice(0, turnAt), typedMsg);
+        if (turnAt >= 0) showUpdates(t, messages.slice(0, turnAt));
         // Hermes does not serialize turns on one session, so a card's wake can
         // run during this turn and land inside its range. A user row other than
         // the typed message starts such a wake; its agent reply is shown and
@@ -1856,25 +1856,21 @@
             : turnAt < 0 && replyAt >= 0
               ? messages.slice(0, replyAt)
               : [];
-        if (midTurnSlice.length > 0) {
-          let inWake = !!t.wakeOpen;
-          t.wakeOpen = false;
-          midTurnSlice.forEach((m) => {
-            if (m.role === "user") {
-              inWake = true;
-              if (m.author === "kanban" && m.id > t.mark)
-                deliver(t, m.content, "Specialist report", m);
-            } else if (inWake && m.role === "assistant") {
-              if (m.id > t.mark) deliver(t, m.content, "update", m);
-              inWake = false;
-            }
-          });
-        } else {
-          t.wakeOpen = false;
-        }
+        let inWake = !!t.wakeOpen;
+        midTurnSlice.forEach((m) => {
+          if (m.role === "user") {
+            inWake = true;
+            if (m.author === "kanban" && m.id > t.mark)
+              deliver(t, m.content, "Specialist report", m);
+          } else if (inWake && m.role === "assistant") {
+            if (m.id > t.mark) deliver(t, m.content, "update", m);
+            inWake = false;
+          }
+        });
+        t.wakeOpen = inWake;
         if (replyAt >= 0) {
           advanceMark(t, messages[replyAt].id);
-          showUpdates(t, messages.slice(replyAt + 1), typedMsg);
+          showUpdates(t, messages.slice(replyAt + 1));
         } else if (hasReply) {
           advanceMark(t, replyId);
         }
@@ -1898,7 +1894,7 @@
         });
         if (turnAt < 0) return;
         if (t.markKnown) {
-          showUpdates(t, messages.slice(0, turnAt), messages[turnAt]);
+          showUpdates(t, messages.slice(0, turnAt));
         }
         advanceMark(t, messages[turnAt].id);
       }
@@ -1932,6 +1928,14 @@
           lastMsg.role === "user" &&
           lastMsg.author === "kanban"
         );
+        if (
+          !inflight[t.id] &&
+          t.busyUntil &&
+          lastMsg &&
+          lastMsg.role === "assistant"
+        ) {
+          t.busyUntil = 0;
+        }
         if (transcript) advanceMark(t, transcript.latest_id);
         saveThreads();
         threadsChanged();
@@ -2211,6 +2215,215 @@
             idx = i;
         });
         return idx;
+      }
+
+      // Reads a response body that may not be JSON (a proxy error page, a
+      // port-forward that dropped) without reporting it as a network failure.
+      async function readBody(resp) {
+        const text = await resp.text();
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          return { detail: text.trim() || resp.statusText };
+        }
+      }
+
+      // The text a refused turn shows. Another writer's turn running on an
+      // agent session is not a failure, so it reads as plain advice.
+      function failureText(status, data) {
+        if (status === 409 && data.error === "agent_busy") return data.detail;
+        return `Request failed (HTTP ${status}): ${data.detail || data.error || "no detail"}`;
+      }
+
+      // The turn without a live status, for a console older than the stream
+      // route.
+      async function runTurnPlain(body) {
+        try {
+          const resp = await fetch("/api/chat", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              [CONSOLE_HEADER]: "1",
+            },
+            body,
+          });
+          const data = await readBody(resp);
+          if (resp.ok)
+            return {
+              reply: data.reply || "",
+              beforeId: data.before_id,
+              replyId: data.reply_id,
+            };
+          return {
+            error: failureText(resp.status, data),
+            errorCode: data.error || "",
+          };
+        } catch (err) {
+          return {
+            error:
+              "Could not reach the web console. Is the port-forward still running? " +
+              err.message,
+          };
+        }
+      }
+
+      // Runs one turn on a session through the stream route, updating its
+      // status line as events arrive. Falls back to /api/chat when the stream
+      // route is not there or the request fails before any response.
+      async function runTurn(id, text) {
+        const body = JSON.stringify({ message: text, session_id: id });
+        let resp;
+        try {
+          resp = await fetch("/api/chat/stream", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              [CONSOLE_HEADER]: "1",
+            },
+            body,
+          });
+        } catch (err) {
+          return runTurnPlain(body);
+        }
+        if (resp.status === 404 || resp.status === 405) {
+          // An agent session the server does not know is also a 404, with a
+          // JSON body naming it. Only a missing route falls back.
+          const data = await readBody(resp);
+          if (data.error === "session_not_found")
+            return {
+              error: `Request failed (HTTP 404): ${data.detail}`,
+              errorCode: data.error,
+            };
+          return runTurnPlain(body);
+        }
+        if (
+          !resp.ok ||
+          !(resp.headers.get("Content-Type") || "").startsWith(
+            "text/event-stream",
+          )
+        ) {
+          const data = await readBody(resp);
+          return {
+            error: failureText(resp.status, data),
+            errorCode: data.error || "",
+          };
+        }
+        let result = null;
+        try {
+          await readSSE(resp.body, (name, data) => {
+            if (name === "status" && typeof data.text === "string")
+              setStatus(id, data.text);
+            else if (name === "step" && data && typeof data.id === "string")
+              addStep(id, data);
+            else if (name === "delta" && data && typeof data.text === "string")
+              appendDelta(id, data.text);
+            else if (name === "reply")
+              result = {
+                reply: data.reply || "",
+                beforeId: data.before_id,
+                replyId: data.reply_id,
+              };
+            else if (name === "error")
+              result = {
+                error: `Request failed: ${data.detail || data.error || "no detail"}`,
+                errorCode: data.error || "",
+              };
+          });
+        } catch (err) {
+          if (!result) {
+            // The console keeps reading the agent's turn after the page loses
+            // it, so the run finishes and its reply lands in the session.
+            result = {
+              error:
+                "The connection to the web console broke off. The agent is still finishing this turn; its reply will appear in this thread once the turn finishes. " +
+                err.message,
+            };
+          }
+        }
+        return (
+          result || {
+            error: "The web console closed the stream without a reply.",
+          }
+        );
+      }
+
+      async function submitMessage(text) {
+        text = (text || "").trim();
+        if (!text) return;
+        let t = findThread(activeId);
+        if (!t) {
+          t = addThread(newSessionId(), "", false);
+          activeId = t.id;
+          sessionStorage.setItem(ACTIVE_KEY, t.id);
+          clearStream();
+        }
+        if (inflight[t.id] || isThreadBusy(t)) return;
+        if (!t.started) clearStream();
+        if (!t.title) t.title = threadTitle(text);
+        t.started = true;
+        t.updated = nowSeconds();
+        t.busyUntil = nowSeconds() + 900;
+        const turn = startInflight(t.id, text);
+        saveThreads();
+        appendMessage("user", text);
+        showPending("centre", t.id);
+        threadsChanged();
+
+        let turnInProgressElsewhere = false;
+        try {
+          const outcome = await runTurn(t.id, text);
+          if (outcome.errorCode === "turn_in_progress")
+            turnInProgressElsewhere = true;
+          const meta =
+            turn.steps && turn.steps.length > 0
+              ? {
+                  steps: turn.steps.slice(),
+                  elapsed: Math.max(
+                    1,
+                    Math.round(nowSeconds() - turn.startedAt),
+                  ),
+                  reply: outcome.reply || "",
+                  replyId: outcome.replyId,
+                }
+              : null;
+          if (meta && outcome.error === undefined) lastTurnMeta[t.id] = meta;
+          if (pending.centre && pending.centre.id === t.id)
+            removePending("centre");
+          if (findThread(t.id)) {
+            if (outcome.error === undefined) {
+              deliver(
+                t,
+                outcome.reply || "(The agent returned an empty reply.)",
+                "",
+                null,
+                meta,
+              );
+              await settleAfterReply(
+                t,
+                text,
+                outcome.reply,
+                outcome.beforeId,
+                outcome.replyId,
+              );
+            } else {
+              if (onScreen(t.id)) {
+                appendMessage("agent", outcome.error, "error");
+              } else {
+                (notices[t.id] = notices[t.id] || []).push(outcome.error);
+                t.unread = true;
+                saveThreads();
+              }
+              await reconcileTurnErrorMark(t, text);
+            }
+          }
+        } finally {
+          delete inflight[t.id];
+          if (!turnInProgressElsewhere) {
+            t.busyUntil = 0;
+          }
+          saveThreads();
+          threadsChanged();
+        }
       }
 
       // ---- End of thread state. ----
@@ -2685,7 +2898,11 @@
       }
 
       function updateComposer() {
-        const busy = !!(activeId && inflight[activeId]);
+        const activeThread = activeId ? findThread(activeId) : null;
+        const busy = !!(
+          activeId &&
+          (inflight[activeId] || isThreadBusy(activeThread))
+        );
         $("btn-send").disabled = busy;
         document.querySelectorAll(".chip").forEach((c) => {
           c.disabled = busy;
@@ -3009,6 +3226,7 @@
         pane.id = "";
         paneToken++;
         pending.side = null;
+        $("side-input").value = "";
         $("side-pane").hidden = true;
         $("panes").classList.remove("with-side");
         renderFeed(false);
@@ -3024,6 +3242,9 @@
 
       async function openPost(id) {
         const post = findPost(id);
+        if (pane.mode !== "post" || pane.id !== id) {
+          $("side-input").value = "";
+        }
         openSide("post");
         pane.id = id;
         pane.latestId = null;
@@ -3171,6 +3392,7 @@
         openSide("about");
         pane.id = "";
         paneToken++;
+        $("side-input").value = "";
         $("side-title").innerText = "About this agent";
         $("side-sub").innerText = "Model, cluster and identity";
         renderAbout();
@@ -3219,6 +3441,9 @@
         const t = findThread(id);
         if (!t) return;
         const token = ++switchToken;
+        if (view !== "thread" || activeId !== id) {
+          $("prompt-input").value = "";
+        }
         activeId = id;
         view = "thread";
         sessionStorage.setItem(ACTIVE_KEY, id);
@@ -3266,206 +3491,16 @@
       function newChat() {
         const blank = threads.find((t) => !t.started && !inflight[t.id]);
         const t = blank || addThread(newSessionId(), "", false);
+        $("prompt-input").value = "";
         selectThread(t.id);
         $("prompt-input").focus();
       }
 
-      // Reads a response body that may not be JSON (a proxy error page, a
-      // port-forward that dropped) without reporting it as a network failure.
-      async function readBody(resp) {
-        const text = await resp.text();
-        try {
-          return JSON.parse(text);
-        } catch (e) {
-          return { detail: text.trim() || resp.statusText };
-        }
-      }
-
-      // The text a refused turn shows. Another writer's turn running on an
-      // agent session is not a failure, so it reads as plain advice.
-      function failureText(status, data) {
-        if (status === 409 && data.error === "agent_busy") return data.detail;
-        return `Request failed (HTTP ${status}): ${data.detail || data.error || "no detail"}`;
-      }
-
-      // The turn without a live status, for a console older than the stream
-      // route.
-      async function runTurnPlain(body) {
-        try {
-          const resp = await fetch("/api/chat", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [CONSOLE_HEADER]: "1",
-            },
-            body,
-          });
-          const data = await readBody(resp);
-          if (resp.ok)
-            return {
-              reply: data.reply || "",
-              beforeId: data.before_id,
-              replyId: data.reply_id,
-            };
-          return { error: failureText(resp.status, data) };
-        } catch (err) {
-          return {
-            error:
-              "Could not reach the web console. Is the port-forward still running? " +
-              err.message,
-          };
-        }
-      }
-
-      // Runs one turn on a session through the stream route, updating its
-      // status line as events arrive. Falls back to /api/chat when the stream
-      // route is not there or the request fails before any response.
-      async function runTurn(id, text) {
-        const body = JSON.stringify({ message: text, session_id: id });
-        let resp;
-        try {
-          resp = await fetch("/api/chat/stream", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              [CONSOLE_HEADER]: "1",
-            },
-            body,
-          });
-        } catch (err) {
-          return runTurnPlain(body);
-        }
-        if (resp.status === 404 || resp.status === 405) {
-          // An agent session the server does not know is also a 404, with a
-          // JSON body naming it. Only a missing route falls back.
-          const data = await readBody(resp);
-          if (data.error === "session_not_found")
-            return { error: `Request failed (HTTP 404): ${data.detail}` };
-          return runTurnPlain(body);
-        }
-        if (
-          !resp.ok ||
-          !(resp.headers.get("Content-Type") || "").startsWith(
-            "text/event-stream",
-          )
-        ) {
-          return { error: failureText(resp.status, await readBody(resp)) };
-        }
-        let result = null;
-        try {
-          await readSSE(resp.body, (name, data) => {
-            if (name === "status" && typeof data.text === "string")
-              setStatus(id, data.text);
-            else if (name === "step" && data && typeof data.id === "string")
-              addStep(id, data);
-            else if (name === "delta" && data && typeof data.text === "string")
-              appendDelta(id, data.text);
-            else if (name === "reply")
-              result = {
-                reply: data.reply || "",
-                beforeId: data.before_id,
-                replyId: data.reply_id,
-              };
-            else if (name === "error")
-              result = {
-                error: `Request failed: ${data.detail || data.error || "no detail"}`,
-              };
-          });
-        } catch (err) {
-          if (!result) {
-            // The console keeps reading the agent's turn after the page loses
-            // it, so the run finishes and its reply lands in the session.
-            result = {
-              error:
-                "The connection to the web console broke off. The agent is still finishing this turn; its reply will appear in this thread once the turn finishes. " +
-                err.message,
-            };
-          }
-        }
-        return (
-          result || {
-            error: "The web console closed the stream without a reply.",
-          }
-        );
-      }
-
-      async function submitMessage(text) {
-        text = (text || "").trim();
-        if (!text) return;
-        let t = findThread(activeId);
-        if (!t) {
-          t = addThread(newSessionId(), "", false);
-          activeId = t.id;
-          sessionStorage.setItem(ACTIVE_KEY, t.id);
-          clearStream();
-        }
-        if (inflight[t.id]) return;
-        if (!t.started) clearStream();
-        if (!t.title) t.title = threadTitle(text);
-        t.started = true;
-        t.updated = nowSeconds();
-        t.busyUntil = nowSeconds() + 900;
-        const turn = startInflight(t.id, text);
-        saveThreads();
-        appendMessage("user", text);
-        showPending("centre", t.id);
-        threadsChanged();
-
-        try {
-          const outcome = await runTurn(t.id, text);
-          const meta =
-            turn.steps && turn.steps.length > 0
-              ? {
-                  steps: turn.steps.slice(),
-                  elapsed: Math.max(
-                    1,
-                    Math.round(nowSeconds() - turn.startedAt),
-                  ),
-                  reply: outcome.reply || "",
-                  replyId: outcome.replyId,
-                }
-              : null;
-          if (meta && outcome.error === undefined) lastTurnMeta[t.id] = meta;
-          if (pending.centre && pending.centre.id === t.id)
-            removePending("centre");
-          if (findThread(t.id)) {
-            if (outcome.error === undefined) {
-              deliver(
-                t,
-                outcome.reply || "(The agent returned an empty reply.)",
-                "",
-                null,
-                meta,
-              );
-              await settleAfterReply(
-                t,
-                text,
-                outcome.reply,
-                outcome.beforeId,
-                outcome.replyId,
-              );
-            } else {
-              if (onScreen(t.id)) {
-                appendMessage("agent", outcome.error, "error");
-              } else {
-                (notices[t.id] = notices[t.id] || []).push(outcome.error);
-                t.unread = true;
-                saveThreads();
-              }
-              await reconcileTurnErrorMark(t, text);
-            }
-          }
-        } finally {
-          delete inflight[t.id];
-          t.busyUntil = 0;
-          saveThreads();
-          threadsChanged();
-        }
-      }
-
       function sendFromInput() {
         const input = $("prompt-input");
-        if (activeId && inflight[activeId]) return;
+        const activeThread = activeId ? findThread(activeId) : null;
+        if (activeId && (inflight[activeId] || isThreadBusy(activeThread)))
+          return;
         const text = input.value;
         input.value = "";
         submitMessage(text);
@@ -3487,8 +3522,8 @@
         }
       }
 
-      // Slack and Google Chat sessions, by title only. The server refuses
-      // their transcripts, so the rows are not links.
+      // Slack, Google Chat and A2A bridge sessions, by title only. The server
+      // refuses their transcripts, so the rows are not links.
       async function fetchChatList() {
         let data;
         try {

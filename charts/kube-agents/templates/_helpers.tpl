@@ -714,7 +714,8 @@ Takes a dict of field name to value.
 The model LiteLLM serves as model-default: litellm.modelDefaultName, or the
 provider's default when that is empty. litellm.yaml renders it into the gateway
 config and web-console.yaml shows it in the console banner, so the two cannot
-name different models. Fails on a provider the table does not know.
+name different models. Fails on a malformed provider slug, or on a provider
+outside the default-model table when modelDefaultName is empty.
 
 Takes the root context.
 */}}

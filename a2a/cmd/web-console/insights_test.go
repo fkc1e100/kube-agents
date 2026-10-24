@@ -274,4 +274,16 @@ func TestInsightsDoesNotCacheFailedOrCancelledUsageRead(t *testing.T) {
 	if second.Error != "" || second.ReplicasRead != 1 || second.InputTokens != 150 {
 		t.Errorf("second usage after DNS recovery = %+v, want fresh healthy read", second)
 	}
+
+	// A read whose caller context is already cancelled when currentUsage
+	// finishes must not be stored in the cache.
+	sCancel := insightsServer(cfg, &fakeResolver{addrs: []string{"10.0.0.1"}}, map[string]string{"10.0.0.1": replicaMetrics(1)}, nil)
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel()
+	if u := sCancel.currentUsage(ctxCancel); u.ReplicasRead != 1 {
+		t.Fatalf("cancelled usage read = %+v, want ReplicasRead=1 from fake", u)
+	}
+	if !sCancel.usage.readAt.IsZero() {
+		t.Errorf("cancelled usage read was cached at %v, want readAt zero", sCancel.usage.readAt)
+	}
 }

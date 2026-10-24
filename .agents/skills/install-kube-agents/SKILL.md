@@ -394,7 +394,8 @@ kubectl exec -it deployment/platform-agent-gateway -n kubeagents-system -c platf
   reached via the `kubectl port-forward svc/kube-agents-web-console -n kubeagents-system 8080:8080`
   command the installer prints.)
 - Say what the operator does not get until they enable a platform: scheduled reports and
-  alert-driven triage are delivered to chat only, and the first-run inventory report waits on a
+  alert-driven triage are not delivered to chat (though alert-driven triage sessions appear in
+  `# alerts` when `--enable-web-console` is enabled), and the first-run inventory report waits on a
   human connecting over chat — read it with
   `kubectl exec platform-agent-shell-0 -n kubeagents-system -c shell -- cat /opt/data/INVENTORY.md`
   (the report is on the shell sandbox pod, not the agent pod).

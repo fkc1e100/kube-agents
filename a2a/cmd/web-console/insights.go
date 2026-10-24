@@ -125,13 +125,13 @@ type insightsResponse struct {
 	Cluster  clusterInfo  `json:"cluster"`
 }
 
-// usageCache holds the last usage read. refresh serializes reads, so
-// concurrent requests wait for one fetch instead of each starting their own.
+// usageCache holds the last usage read. mu serializes reads and protects value
+// and readAt, so concurrent requests wait for one fetch instead of each
+// starting their own.
 type usageCache struct {
-	refresh sync.Mutex
-	mu      sync.Mutex
-	value   usageInfo
-	readAt  time.Time
+	mu     sync.Mutex
+	value  usageInfo
+	readAt time.Time
 }
 
 func (s *server) handleInsights(w http.ResponseWriter, r *http.Request) {
@@ -159,21 +159,15 @@ func (s *server) currentUsage(ctx context.Context) usageInfo {
 	if s.cfg.LiteLLMPeersHost == "" {
 		return usageInfo{Error: errUsageDisabled}
 	}
-	s.usage.refresh.Lock()
-	defer s.usage.refresh.Unlock()
 	s.usage.mu.Lock()
+	defer s.usage.mu.Unlock()
 	if !s.usage.readAt.IsZero() && time.Since(s.usage.readAt) < usageCacheTTL {
-		v := s.usage.value
-		s.usage.mu.Unlock()
-		return v
+		return s.usage.value
 	}
-	s.usage.mu.Unlock()
 
 	v := s.readUsage(ctx)
 	if v.ReplicasRead > 0 && ctx.Err() == nil {
-		s.usage.mu.Lock()
 		s.usage.value, s.usage.readAt = v, time.Now()
-		s.usage.mu.Unlock()
 	}
 	return v
 }

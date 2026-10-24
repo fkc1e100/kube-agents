@@ -46,7 +46,7 @@ limitations under the License.
 // reply has been returned. The page polls GET /api/sessions/{id}/messages for
 // those, through a route limited to this console's own session IDs.
 //
-// Two read-only routes sit beside the chat. GET /api/insights (insights.go)
+// Three read-only routes sit beside the chat. GET /api/insights (insights.go)
 // returns the model, LiteLLM's token and spend counters, the agent's identity
 // as recorded at install, and the cluster. GET /api/sessions/{id}/transcript
 // (activity.go) returns the text of an event triage, scheduled check or
@@ -55,8 +55,8 @@ limitations under the License.
 // triage sessions as #alerts and the scheduled checks as #scheduled.
 //
 // POST /api/chat/stream (stream.go) runs the same turn as POST /api/chat and
-// relays one status line per agent step as server-sent events, then the
-// reply. The page falls back to /api/chat when the route is missing.
+// relays status, step and delta events as server-sent events, then the reply.
+// The page falls back to /api/chat when the route is missing.
 package main
 
 import (
@@ -108,9 +108,11 @@ const (
 	// (session_kv_server.py's _start_agent_turn): a diagnostic turn that
 	// calls tools routinely runs for minutes.
 	turnTimeout = 300 * time.Second
-	// serverWriteTimeout must outlast a turn, or the server cuts the response
-	// off while Hermes is still answering.
-	serverWriteTimeout   = turnTimeout + 30*time.Second
+	// serverWriteTimeout must outlast /api/chat's whole handler, not only the
+	// turn: latestMessageID and createSession run before runTurn and
+	// replyMessageID after it, each on its own timeout, before the reply is
+	// written. The stream route sets a later per-response deadline instead.
+	serverWriteTimeout   = turnTimeout + sessionCreateTimeout + 2*messagesTimeout + 30*time.Second
 	serverReadTimeout    = 30 * time.Second
 	serverHeaderTimeout  = 10 * time.Second
 	serverIdleTimeout    = 120 * time.Second
@@ -128,7 +130,7 @@ const (
 	agentBusyWindow = 10 * time.Minute
 	// agentBusyPageLimit is how many of the newest messages the busy check
 	// reads.
-	agentBusyPageLimit = 5
+	agentBusyPageLimit = 1
 	agentBusyDetail    = "The agent is still working on this thread; try again once it has answered, or after the 10-minute window passes."
 
 	// maxRequestBodyBytes bounds a chat request. A turn is a typed message,

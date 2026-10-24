@@ -428,11 +428,11 @@ func TestChatStreamCeilingInterruptsTheRun(t *testing.T) {
 	})
 }
 
-func TestChatStreamDropsReasoningThatEchoesTheReply(t *testing.T) {
+func TestChatStreamDropsReasoningAfterReplyStarts(t *testing.T) {
 	fake, h := setup(t)
 	fake.mu.Lock()
-	// The order seen on a cluster: the reply starts streaming, then the same
-	// text arrives again as _thinking progress, then the reply.
+	// The order seen on a cluster: the reply starts streaming, then reasoning
+	// progress arrives again, then the reply completes.
 	fake.stream = "event: run.started\ndata: {}\n\n" +
 		"event: tool.progress\ndata: {\"tool_name\": \"_thinking\", \"delta\": \"Check the pods.\"}\n\n" +
 		"event: assistant.delta\ndata: {\"delta\": \"There are eight pods \"}\n\n" +
@@ -450,22 +450,6 @@ func TestChatStreamDropsReasoningThatEchoesTheReply(t *testing.T) {
 	want := []string{statusSending, statusStarted, "Thinking: Check the pods.", statusWriting}
 	if strings.Join(statuses, "|") != strings.Join(want, "|") {
 		t.Errorf("status lines = %q, want %q", statuses, want)
-	}
-}
-
-func TestEchoesReply(t *testing.T) {
-	for _, tc := range []struct {
-		thought, written string
-		want             bool
-	}{
-		{"There are  eight", "There are eight pods", true},
-		{"Check the pods", "There are eight pods", false},
-		{"anything", "", false},
-		{"", "text", false},
-	} {
-		if got := echoesReply(tc.thought, tc.written); got != tc.want {
-			t.Errorf("echoesReply(%q, %q) = %v, want %v", tc.thought, tc.written, got, tc.want)
-		}
 	}
 }
 

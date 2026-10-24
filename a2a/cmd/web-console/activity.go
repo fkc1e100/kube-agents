@@ -77,18 +77,19 @@ const (
 	summaryMaxRunes = 140
 	ellipsis        = "…"
 	// summaryCacheMaxEntries bounds the summary cache. Past it, entries for
-	// sessions the current request did not list are dropped. The recent list
-	// and the two channels list different sessions, so a smaller cap would
-	// evict one list's entries on every refresh of another.
+	// sessions the current request did not list are dropped. The two channels
+	// list different sessions, so a smaller cap would evict one channel's
+	// entries on every refresh of the other.
 	summaryCacheMaxEntries = 500
 
 	// transcriptMaxRows is how many text rows a transcript returns, newest
 	// kept, oldest first.
 	transcriptMaxRows = 200
 	transcriptTimeout = 5 * time.Second
-	// scheduledReportMarker prefixes user messages posted by a scheduled relay
-	// turn into an existing cron-... session, so later sub-daily runs are
-	// distinguished from a console user's reply.
+	// scheduledReportMarker is reserved to prefix user messages posted into an
+	// existing cron-... gateway session when #3928 connects relay_cron_report to
+	// gateway sessions, so sub-daily runs are distinguished from a console
+	// user's reply.
 	scheduledReportMarker = "[scheduled]"
 )
 
@@ -98,11 +99,12 @@ var (
 	// and refuses anything that could change the upstream path.
 	transcriptIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
-	// The session IDs session_kv_server.py mints. create_session makes an
-	// event triage ID from eight hex digits of a UUID; _session_id makes a
-	// scheduled ID from cron-<slug>-<YYYYMMDD>. Under spec.mode: next,
-	// hermes-bridge creates chat sessions over the gateway API with IDs
-	// prefixed a2a-ctx-.
+	// The session IDs session_kv_server.py builds. create_session makes an
+	// event triage ID from eight hex digits of a UUID; _cron_report_session_id
+	// builds the cron-<slug>-<YYYYMMDD> shape (no gateway session is created
+	// under that ID since #2742; scheduledIDPattern and kindScheduled are
+	// reserved for it pending #3928). Under spec.mode: next, hermes-bridge
+	// creates chat sessions over the gateway API with IDs prefixed a2a-ctx-.
 	eventTriageIDPattern      = regexp.MustCompile(`^k8s-evt-[0-9a-f]{8}$`)
 	scheduledIDPattern        = regexp.MustCompile(`^cron-[a-z0-9_-]{1,80}-[0-9]{8}$`)
 	a2aBridgeSessionIDPattern = regexp.MustCompile(`^a2a-ctx-[A-Za-z0-9_.:-]+$`)
@@ -130,11 +132,12 @@ var (
 
 // classifySession sorts a session into the list's groups. The console's own
 // IDs come first, then any session whose source is not the gateway API (a
-// chat platform), so a Slack session can never be read as event triage
-// because of its title. An empty source is unknown and lands in Other. An
-// event triage or scheduled session needs both an ID in the shape
-// session_kv_server.py mints and the exact title it gives that ID, so a
-// session whose title only starts like one is Other.
+// chat platform) or whose ID carries hermes-bridge's a2a-ctx- prefix, so a
+// chat session can never be read as event triage because of its title. An
+// empty source is unknown and lands in Other. An event triage or scheduled
+// session needs both an ID in the shape session_kv_server.py builds and the
+// exact title Triage <id>, so a session whose title only starts like one is
+// Other.
 func classifySession(id, source, title string) string {
 	switch {
 	case sessionIDPattern.MatchString(id):
@@ -275,8 +278,9 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 	return out, true
 }
 
-// stripScheduledMarker removes a leading [scheduled] marker line written by a
-// scheduled relay turn and reports whether it was present.
+// stripScheduledMarker removes a leading [scheduled] marker line (reserved for
+// sub-daily scheduled relay posts under #3928) and reports whether it was
+// present.
 func stripScheduledMarker(text string) (string, bool) {
 	trimmed := strings.TrimLeft(text, " \t\r\n")
 	if rest, ok := strings.CutPrefix(trimmed, scheduledReportMarker); ok {

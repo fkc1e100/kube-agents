@@ -15,10 +15,9 @@ and the install-time identity, a headless Service the console resolves to find
 every LiteLLM replica, and the model helper both templates share so the banner
 names the model LiteLLM serves.
 
-`helm` is not installed on the runner that executes this suite, so this reads
-the templates and the schema rather than a real render, the way
-test_chart_topology_spread.py does. The render tests at the end run only where
-helm is installed.
+Reads the templates and the schema directly so the structural checks run even
+when `helm` is not installed, and runs real `helm template` renders when `helm`
+is on `PATH` (as on CI).
 
 Run:
   python3 -m unittest discover -s tests -p 'test_chart_web_console.py' -v

@@ -1058,12 +1058,17 @@ func TestPageHarnessCoversThreadsUnreadStatusStepsTimerAndCards(t *testing.T) {
 	end := strings.Index(src, "// Builds one message row.")
 	renderStart := strings.Index(src, "let threadsHtml = \"\";")
 	renderEnd := strings.Index(src, "function showView(name)")
+	compStart := strings.Index(src, "function updateComposer()")
+	compEnd := strings.Index(src, "let chatPlatform =")
+	paneStart := strings.Index(src, "const pane = { mode: null, id: \"\", latestId: null };")
+	paneEnd := strings.Index(src, "// Slack, Google Chat and A2A bridge sessions")
 	enterStart := strings.Index(src, "function onEnter(input, send)")
 	enterEnd := strings.Index(src, "$(\"btn-send\").addEventListener")
-	if start < 0 || end <= start || renderStart < 0 || renderEnd <= renderStart || enterStart < 0 || enterEnd <= enterStart {
-		t.Fatal("index.html is missing the thread-state, renderThreads, or onEnter slice markers")
+	if start < 0 || end <= start || renderStart < 0 || renderEnd <= renderStart || compStart < 0 || compEnd <= compStart || paneStart < 0 || paneEnd <= paneStart || enterStart < 0 || enterEnd <= enterStart {
+		t.Fatal("index.html is missing the thread-state, renderThreads, updateComposer, pane, or onEnter slice markers")
 	}
-	slice := src[start:end] + "\n" + src[renderStart:renderEnd] + "\n" + src[enterStart:enterEnd]
+	slice := src[start:end] + "\n" + src[renderStart:renderEnd] + "\n" + src[compStart:compEnd] + "\n" + src[enterStart:enterEnd]
+	paneSlice := src[paneStart:paneEnd]
 
 	cmd := exec.Command("node", "--input-type=module", "-e", `
 import assert from "node:assert/strict";
@@ -1071,6 +1076,7 @@ import vm from "node:vm";
 import crypto from "node:crypto";
 
 const scriptSource = `+strconv.Quote(slice)+`;
+const paneSource = `+strconv.Quote(paneSlice)+`;
 
 function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   const local = new Map(Object.entries(initialLocal));
@@ -1096,6 +1102,10 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     TextDecoder,
     crypto: crypto.webcrypto,
     encodeURIComponent,
+    CONSOLE_HEADER: "X-Kube-Agents-Console",
+    pending: { centre: null, side: null },
+    showPending: () => {},
+    removePending: () => {},
     localStorage: {
       getItem: k => (local.has(k) ? local.get(k) : null),
       setItem: (k, v) => local.set(k, String(v)),
@@ -1106,7 +1116,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
       setItem: (k, v) => session.set(k, String(v)),
       removeItem: k => session.delete(k),
     },
-    document: { getElementById: () => ({}) },
+    document: { getElementById: () => ({}), querySelectorAll: () => [] },
+    $: id => ctx.document.getElementById(id),
     fetch: fetchImpl || (async () => ({ ok: false, status: 503 })),
     appendMessage: (author, text, tag, ts, card, meta) => {
       appended.push({ author, text, tag, ts, card, meta });
@@ -1451,6 +1462,65 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     ctxPrePolled.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
     [{ author: "agent", text: "wake reply", tag: "update" }]
   );
+
+  // When a kanban wake user row lands inside midTurnSlice after any earlier wake
+  // reply (or when midTurnSlice is empty after a pre-polled wake) and the wake's
+  // assistant reply has not yet been written when Turn 1 settles, t.wakeOpen must
+  // remain true across Turn 1 and deliver the wake's reply in Turn 2's midTurnSlice.
+  const idCarry = "web-console-" + "c".repeat(32);
+  let carryStep = 0;
+  const ctxCarry = makeHarness(async () => {
+    carryStep++;
+    if (carryStep === 1) {
+      // Turn 1 settleAfterReply: midTurnSlice has [11 user kanban] with no reply yet,
+      // and post-reply slice is empty.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          latest_id: 12,
+          messages: [
+            { id: 10, role: "user", author: "user", content: "turn 1" },
+            { id: 11, role: "user", author: "kanban", content: "[kanban] Task t_5 completed." },
+            { id: 12, role: "assistant", author: "agent", content: "turn 1 reply" },
+          ],
+        }),
+      };
+    }
+    // Turn 2 settleAfterReply: the wake's assistant reply (id: 14) lands inside
+    // Turn 2's midTurnSlice before Turn 2's own reply (id: 15).
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 15,
+        messages: [
+          { id: 13, role: "user", author: "user", content: "turn 2" },
+          { id: 14, role: "assistant", author: "agent", content: "delayed wake reply from turn 1" },
+          { id: 15, role: "assistant", author: "agent", content: "turn 2 reply" },
+        ],
+      }),
+    };
+  });
+  vm.runInContext(
+    "const tc = addThread(" + JSON.stringify(idCarry) + ", 'carry', true);" +
+    "activateThread(tc, { latest_id: 9, messages: [] });",
+    ctxCarry
+  );
+  ctxCarry.getState().appended.length = 0;
+  await vm.runInContext("settleAfterReply(tc, 'turn 1', 'turn 1 reply', 9, 12)", ctxCarry);
+  assert.equal(vm.runInContext("tc.wakeOpen", ctxCarry), true, "wakeOpen must stay true when midTurnSlice ends in an unanswered kanban wake");
+  assert.deepEqual(
+    ctxCarry.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [{ author: "kanban", text: "[kanban] Task t_5 completed.", tag: "Specialist report" }]
+  );
+  ctxCarry.getState().appended.length = 0;
+  await vm.runInContext("settleAfterReply(tc, 'turn 2', 'turn 2 reply', 12, 15)", ctxCarry);
+  assert.equal(vm.runInContext("tc.wakeOpen", ctxCarry), false, "wakeOpen closes once the wake reply lands in Turn 2");
+  assert.deepEqual(
+    ctxCarry.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [{ author: "agent", text: "delayed wake reply from turn 1", tag: "update" }]
+  );
 }
 
 // 6. loadSeen and updateChannel: first-visit seeding across both channels even
@@ -1510,7 +1580,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 102)", ctx), "The agent started working · 2 s");
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 104)", ctx), "Waiting for the model · 4 s");
 
-  // Running tool step stays on Running even after 3s.
+  // Running tool step stays on Running even after 3s, and a Thinking status while
+  // a tool step is still running also does not switch to Waiting for the model (!runningStep guard).
   vm.runInContext(
     "addStep('s1', { id: 'kubectl_get#1', kind: 'tool', title: 'Running kubectl_get', detail: 'pods', state: 'running' });" +
     "setStatus('s1', 'Running kubectl_get: pods');" +
@@ -1518,6 +1589,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     ctx
   );
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 110)", ctx), "Running kubectl_get: pods · 10 s");
+  vm.runInContext("setStatus('s1', 'Thinking: checking pods'); inflight.s1.lastEventAt = 104;", ctx);
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 110)", ctx), "Thinking: checking pods · 10 s");
 
   // Failed tool step transitions to Waiting for the model after 3s.
   vm.runInContext(
@@ -1529,7 +1602,7 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 111)", ctx), "kubectl_get failed · 11 s");
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 114)", ctx), "Waiting for the model · 14 s");
 
-  // Thinking status also transitions to Waiting for the model after 3s.
+  // Thinking status also transitions to Waiting for the model after 3s once no tool step is running.
   vm.runInContext(
     "setStatus('s1', 'Thinking: check events');" +
     "inflight.s1.lastEventAt = 114;",
@@ -1537,7 +1610,7 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   );
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 118)", ctx), "Waiting for the model · 18 s");
 
-  // Once deltaText is streaming, it does not switch back to Waiting for the model.
+  // Once deltaText is streaming, neither Writing reply… nor a late Thinking status switches to Waiting for the model (!turn.deltaText guard).
   vm.runInContext(
     "setStatus('s1', 'Writing reply…'); appendDelta('s1', 'All '); appendDelta('s1', 'healthy.');" +
     "inflight.s1.lastEventAt = 118;",
@@ -1545,6 +1618,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   );
   assert.equal(vm.runInContext("inflight.s1.deltaText", ctx), "All healthy.");
   assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 125)", ctx), "Writing reply… · 25 s");
+  vm.runInContext("setStatus('s1', 'Thinking: late'); inflight.s1.lastEventAt = 118;", ctx);
+  assert.equal(vm.runInContext("formatStatusWithTimer(inflight.s1, 125)", ctx), "Thinking: late · 25 s");
 }
 
 // 9. matchTurnMetaIndex and activateThread attach step summary only to the turn's own reply row.
@@ -1731,23 +1806,129 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   );
 }
 
-// 13. busyUntil blocks removeThread across tabs and mergeStoredThreads never
-// resurrects a removed thread in localStorage.
+// 13. busyUntil blocks removeThread, updateComposer, and submitMessage across tabs,
+// survives a 409 turn_in_progress race, clears on reload once an assistant reply
+// arrives, and mergeStoredThreads never resurrects a removed thread in localStorage.
 {
   const idBusy = "web-console-" + "a".repeat(32);
   const tabA = makeHarness();
-  const tabB = makeHarness();
+  let tabBFetches = 0;
+  const tabB = makeHarness(async () => {
+    tabBFetches++;
+    return { ok: false, status: 503 };
+  });
+  const btnSendB = { disabled: false };
+  const chipB = { disabled: false };
+  tabB.document.getElementById = id => (id === "btn-send" ? btnSendB : {});
+  tabB.document.querySelectorAll = sel => (sel === ".chip" ? [chipB] : []);
+
   vm.runInContext(
     "const tb = addThread(" + JSON.stringify(idBusy) + ", 'Busy chat', true);" +
     "tb.busyUntil = nowSeconds() + 900; startInflight(tb.id, 'hi'); saveThreads();",
     tabA
   );
   const storedBusy = tabA.getState().local.get("kube-agents-web-console-threads");
-  vm.runInContext("mergeStoredThreads(" + JSON.stringify(storedBusy) + ")", tabB);
+  vm.runInContext(
+    "mergeStoredThreads(" + JSON.stringify(storedBusy) + ");" +
+    "activeId = " + JSON.stringify(idBusy) + "; view = 'thread'; updateComposer();",
+    tabB
+  );
+  assert.equal(btnSendB.disabled, true, "updateComposer must disable #btn-send in Tab B when busyUntil is active");
+  assert.equal(chipB.disabled, true, "updateComposer must disable .chip in Tab B when busyUntil is active");
   assert.equal(
     vm.runInContext("removeThread(" + JSON.stringify(idBusy) + ")", tabB),
     false,
     "Tab B must refuse removeThread while Tab A's turn has busyUntil set"
+  );
+  await vm.runInContext("submitMessage('second prompt from tab B')", tabB);
+  assert.equal(tabBFetches, 0, "submitMessage must refuse to send while isThreadBusy(t) is true");
+  assert.ok(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil > nowSeconds()", tabB),
+    "blocked submitMessage must not clear busyUntil"
+  );
+
+  // Race: Tab B starts submitMessage before receiving Tab A's busyUntil, gets HTTP 409
+  // turn_in_progress while merging Tab A's busyUntil, and must not zero busyUntil in finally.
+  const tabRace = makeHarness(async () => {
+    // Simulate Tab A's storage event landing while Tab B's request is in flight.
+    vm.runInContext("mergeStoredThreads(" + JSON.stringify(storedBusy) + ")", tabRace);
+    const body = "event: error\ndata: " + JSON.stringify({ error: "turn_in_progress", message: "A turn is already running." }) + "\n\n";
+    let readDone = false;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: h => (h.toLowerCase() === "content-type" ? "text/event-stream" : "") },
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readDone) return { done: true, value: undefined };
+            readDone = true;
+            return { done: false, value: new TextEncoder().encode(body) };
+          },
+        }),
+      },
+    };
+  });
+  tabRace.TextEncoder = TextEncoder;
+  vm.runInContext(
+    "const tr = addThread(" + JSON.stringify(idBusy) + ", 'Busy chat', true);" +
+    "tr.mark = 1; tr.markKnown = true; activeId = tr.id; view = 'thread';",
+    tabRace
+  );
+  await vm.runInContext("submitMessage('racing prompt')", tabRace);
+  assert.ok(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil > nowSeconds()", tabRace),
+    "submitMessage finally must not clear busyUntil when server returns turn_in_progress"
+  );
+
+  // And if storage ever carries busyUntil: 0 while Tab A still has inflight[idBusy],
+  // Tab A's mergeStoredThreads preserves its higher busyUntil and re-saves it to localStorage.
+  const staleZeroBusy = JSON.stringify([
+    { id: idBusy, title: "Busy chat", mark: 1, markKnown: true, updated: 100, busyUntil: 0, unread: false, started: true },
+  ]);
+  tabA.getState().local.set("kube-agents-web-console-threads", staleZeroBusy);
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(staleZeroBusy) + ")", tabA);
+  const resavedByA = JSON.parse(tabA.getState().local.get("kube-agents-web-console-threads"));
+  assert.ok(resavedByA[0].busyUntil > 0, "Tab A must re-save its active busyUntil when storage had busyUntil: 0");
+
+  // Reloading mid-turn leaves busyUntil in localStorage with no local inflight entry.
+  // Once the assistant reply arrives via pollThread or activateThread, busyUntil is cleared.
+  const tabReloadPoll = makeHarness(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      latest_id: 5,
+      messages: [{ id: 5, role: "assistant", author: "agent", content: "turn finished after reload" }],
+    }),
+  }));
+  vm.runInContext(
+    "mergeStoredThreads(" + JSON.stringify(storedBusy) + ");" +
+    "const tp = findThread(" + JSON.stringify(idBusy) + "); tp.mark = 4; tp.markKnown = true;" +
+    "activeId = tp.id; view = 'thread';",
+    tabReloadPoll
+  );
+  assert.ok(vm.runInContext("isThreadBusy(findThread(" + JSON.stringify(idBusy) + "))", tabReloadPoll));
+  await vm.runInContext("pollThread(findThread(" + JSON.stringify(idBusy) + "))", tabReloadPoll);
+  assert.equal(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil", tabReloadPoll),
+    0,
+    "showUpdates must clear busyUntil once the assistant reply arrives after a mid-turn reload"
+  );
+
+  const tabReloadActivate = makeHarness();
+  vm.runInContext(
+    "mergeStoredThreads(" + JSON.stringify(storedBusy) + ");" +
+    "const ta = findThread(" + JSON.stringify(idBusy) + ");" +
+    "activateThread(ta, { latest_id: 6, messages: [" +
+    "  { id: 5, role: 'user', author: 'user', content: 'hi' }," +
+    "  { id: 6, role: 'assistant', author: 'agent', content: 'done' }" +
+    "] });",
+    tabReloadActivate
+  );
+  assert.equal(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil", tabReloadActivate),
+    0,
+    "activateThread must clear busyUntil when the transcript ends with an assistant reply"
   );
 
   // Even if another tab writes idBusy to REMOVED_KEY and clears THREADS_KEY while
@@ -1770,6 +1951,92 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     JSON.stringify([idBusy]),
     "Tab A must not delete idBusy from REMOVED_KEY"
   );
+}
+
+// 14. Switching posts or threads clears unsent composer drafts (#side-input and #prompt-input).
+{
+  const ctx = makeHarness(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ latest_id: 1, messages: [] }),
+  }));
+  const els = new Map();
+  const getEl = id => {
+    if (!els.has(id)) {
+      els.set(id, {
+        value: "",
+        textContent: "",
+        innerHTML: "",
+        hidden: false,
+        disabled: false,
+        style: {},
+        classList: { add() {}, remove() {}, toggle() {} },
+        focus() {},
+        querySelector: () => null,
+        appendChild() {},
+        replaceChildren() {},
+        content: { cloneNode: () => ({}) },
+        scrollTop: 0,
+        scrollHeight: 0,
+      });
+    }
+    return els.get(id);
+  };
+  ctx.document.getElementById = getEl;
+  ctx.document.querySelectorAll = () => [];
+  ctx.document.createElement = () => ({ appendChild() {}, classList: { add() {}, remove() {} } });
+  ctx.CHANNELS = {
+    alerts: { title: "# alerts", sub: "", empty: "" },
+    scheduled: { title: "# scheduled", sub: "", empty: "" },
+  };
+  ctx.VIEW_KEY = "kube-agents-web-console-view";
+  ctx.ACTIVE_KEY = "kube-agents-web-console-active";
+  ctx.chatPlatform = "";
+  ctx.postSubject = p => p.id;
+  ctx.messageRow = () => ({});
+  ctx.renderRail = () => {};
+  ctx.renderFeed = () => {};
+  ctx.updateSideComposer = () => {};
+  ctx.showIntro = () => {};
+  ctx.showView = name => { vm.runInContext("view = " + JSON.stringify(name), ctx); };
+  vm.runInContext(paneSource, ctx);
+
+  // Opening a post, typing a draft in #side-input, and switching to another post clears #side-input.
+  vm.runInContext("channelPosts.alerts = [{ id: 'k8s-evt-1', kind: 'event_triage' }, { id: 'k8s-evt-2', kind: 'event_triage' }];", ctx);
+  await vm.runInContext("openPost('k8s-evt-1')", ctx);
+  getEl("side-input").value = "draft for evt-1";
+  await vm.runInContext("openPost('k8s-evt-1')", ctx);
+  assert.equal(getEl("side-input").value, "draft for evt-1", "re-clicking the same post preserves the draft");
+  await vm.runInContext("openPost('k8s-evt-2')", ctx);
+  assert.equal(getEl("side-input").value, "", "switching to another post must clear #side-input");
+
+  getEl("side-input").value = "draft before close";
+  vm.runInContext("closeSide()", ctx);
+  assert.equal(getEl("side-input").value, "", "closing the side pane must clear #side-input");
+
+  await vm.runInContext("openPost('k8s-evt-1')", ctx);
+  getEl("side-input").value = "draft before about";
+  vm.runInContext("openAbout()", ctx);
+  assert.equal(getEl("side-input").value, "", "switching the side pane to About must clear #side-input");
+
+  // Switching threads or clicking + New chat clears #prompt-input.
+  const t1 = "web-console-" + "1".repeat(32);
+  const t2 = "web-console-" + "2".repeat(32);
+  vm.runInContext(
+    "addThread(" + JSON.stringify(t1) + ", 'T1', true);" +
+    "addThread(" + JSON.stringify(t2) + ", 'T2', true);",
+    ctx
+  );
+  await vm.runInContext("selectThread(" + JSON.stringify(t1) + ")", ctx);
+  getEl("prompt-input").value = "unsent draft on T1";
+  await vm.runInContext("selectThread(" + JSON.stringify(t1) + ")", ctx);
+  assert.equal(getEl("prompt-input").value, "unsent draft on T1", "re-selecting the same active thread preserves the draft");
+  await vm.runInContext("selectThread(" + JSON.stringify(t2) + ")", ctx);
+  assert.equal(getEl("prompt-input").value, "", "switching to another thread must clear #prompt-input");
+
+  getEl("prompt-input").value = "unsent draft before newChat";
+  vm.runInContext("newChat()", ctx);
+  assert.equal(getEl("prompt-input").value, "", "newChat() must clear #prompt-input");
 }
 `)
 	out, err := cmd.CombinedOutput()

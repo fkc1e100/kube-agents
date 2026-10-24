@@ -277,15 +277,13 @@ func (s *server) openTurnStream(ctx context.Context, sid, msg string) (*http.Res
 //
 // Hermes reports reasoning as `_thinking` progress. Some models stream the
 // reply itself that way once they start writing it, so after the first
-// assistant.delta no reasoning line is shown, and none whose text the reply
-// so far already starts with.
+// assistant.delta no reasoning line is shown.
 func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (string, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, bufio.MaxScanTokenSize), maxUpstreamBodyBytes)
 	var (
 		name, lastStatus, reply, upstreamMsg string
 		data                                 []string
-		written                              strings.Builder
 		haveReply, done, writing             bool
 		toolCounts                           = map[string]int{}
 		openTools                            = map[string][]stepEvent{}
@@ -376,12 +374,11 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 			}
 		case hermesAssistantDelta:
 			writing = true
-			written.WriteString(ev.Delta)
 			if ev.Delta != "" {
 				out.send(eventDelta, deltaEvent{Text: ev.Delta})
 			}
 		case hermesToolProgress:
-			if ev.ToolName == hermesThinkingTool && (writing || echoesReply(ev.Delta, written.String())) {
+			if ev.ToolName == hermesThinkingTool && writing {
 				return
 			}
 			if ev.ToolName == hermesThinkingTool {
@@ -437,14 +434,6 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 		return "", errors.New(upstreamMsg)
 	}
 	return "", errors.New(errNoReply)
-}
-
-// echoesReply reports whether a reasoning excerpt is the start of the reply
-// written so far, compared with whitespace collapsed.
-func echoesReply(thought, written string) bool {
-	t := strings.Join(strings.Fields(thought), " ")
-	w := strings.Join(strings.Fields(written), " ")
-	return t != "" && w != "" && strings.HasPrefix(w, t)
 }
 
 // statusLine is the one-line status for a Hermes event, or "" for an event
