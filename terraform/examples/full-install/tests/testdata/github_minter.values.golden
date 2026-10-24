@@ -92,6 +92,7 @@
     - "roles/compute.viewer"
     - "roles/container.clusterViewer"
     - "roles/container.viewer"
+    - "roles/gkehub.viewer"
     - "roles/iam.securityReviewer"
     - "roles/iam.serviceAccountUser"
     - "roles/logging.viewer"
