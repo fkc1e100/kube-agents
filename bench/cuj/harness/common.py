@@ -105,18 +105,13 @@ NEGATED_OR_ERROR_CLAUSE_RE = re.compile(
     r"|(?:(?<!-)0|zero)\s+(?:[a-z0-9-]+\s+){0,3}?clusters?\b)\b",
     re.IGNORECASE,
 )
-RESTATEMENT_EXAMPLE_CLAUSE_RE = re.compile(
-    r"\b(?:such\s+as|for\s+example|e\.g\."
-    r"|(?:checked|inspected|audited|listed|verified)\s+(?:whether|if))\b",
-    re.IGNORECASE,
-)
 NODE_RE = re.compile(r"\bnodes?\b", re.IGNORECASE)
 NON_NODE_WORKLOAD_RE = re.compile(
     r"\b(?:pods?|containers?|workloads?|services?)\b",
     re.IGNORECASE,
 )
 ZERO_NOTREADY_RE = re.compile(
-    r"\b(?:(?<!-)0|no|zero)\s+not\s*ready\b",
+    r"\b(?:(?<!-)0|no|none|zero)\s+(?:[a-z0-9_-]+\s+){0,2}?not\s*ready\b",
     re.IGNORECASE,
 )
 NEGATED_NODE_READY_RE = re.compile(
@@ -134,9 +129,24 @@ POSITIVE_NODE_READY_RE = re.compile(
     r"|\bready\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,40}\bnodes?\b",
     re.IGNORECASE,
 )
+_NODE_COUNT_WORD = (
+    r"(?:(?<!-)[1-9]\d*|one|two|three|four|five|six|seven|eight|nine|ten)"
+)
 POSITIVE_NODE_COUNT_RE = re.compile(
-    r"\b(?:(?<!-)[1-9]\d*|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+    rf"\b(?:{_NODE_COUNT_WORD}\s+(?:[a-z0-9-]+\s+){{0,2}}?nodes?\b"
+    rf"|nodes?(?:\s+count)?\s*(?:[:=]|is|are)?\s*{_NODE_COUNT_WORD}\b"
+    rf"|[1-9]\d*\s*/\s*[1-9]\d*\s+(?:nodes?\s+)?ready\b)",
     re.IGNORECASE,
+)
+POSITIVE_CONTRAST_SEGMENT_RE = re.compile(
+    r"\b(?:only|[1-9]\d*|one|two|three|four|five|six|seven|eight|nine|ten"
+    r"|all|active|running|bound|installed|present|enforcing)\b",
+    re.IGNORECASE,
+)
+_NON_INVENTORY_MODIFIER = (
+    r"(?!(?:issues?|errors?|problems?|warnings?|pressure|taints?"
+    r"|evictions?|restarts?|events?|instances?|changes?|mutations?)\b)"
+    r"[a-z0-9_.*-]+"
 )
 KANBAN_RESULT_RE = re.compile(
     r"^Result:\s*(.+?)(?:\n\nThis is an automatic task-status notification|\Z)",
@@ -211,8 +221,9 @@ def negated_inventory_clause_re(*nouns: str) -> re.Pattern[str]:
     return re.compile(
         rf"\b(?:no|none|nothing|neither|never"
         rf"|(?<!-)0(?!\s*(?:restarts?|errors?|warnings?|issues?|failures?|not\s*ready)\b)"
-        rf"|zero|without|missing|absent|empty|lacks?)\b[^.\n;]{{0,60}}\b(?:{joined})\b"
-        rf"|\b(?:{joined})\b[^.\n;]{{0,50}}\b(?:"
+        rf"|zero|without|missing|absent|empty|lacks?|unrestricted)\b"
+        rf"\s+(?:{_NON_INVENTORY_MODIFIER}\s+){{0,4}}?(?:{joined})\b"
+        rf"|\b(?:{joined})\b[^,:\n;]{{0,50}}\b(?:"
         rf"not\s+(?:running|found|installed|present|exposed|bound|in\s+use|inspected"
         rf"|listed|enumerated|active|applied|enforced|restricted|available)"
         rf"|do\s+not\s+(?:exist|apply)|doesn't\s+(?:exist|apply)|did\s+not\s+exist"
@@ -220,6 +231,7 @@ def negated_inventory_clause_re(*nouns: str) -> re.Pattern[str]:
         rf"|are\s+(?:empty|missing|absent|unknown|unrestricted)"
         rf"|were\s+not\s+(?:found|installed|present|inspected|listed|enumerated)"
         rf"|was\s+not\s+(?:found|installed|present|inspected|listed)"
+        rf"|have\s+unrestricted|has\s+unrestricted"
         rf"|missing|absent)\b",
         re.IGNORECASE,
     )
@@ -237,9 +249,18 @@ def positive_inventory_clauses(
     for clause in non_echo_clauses(answer, prompt):
         if NEGATED_OR_ERROR_CLAUSE_RE.search(clause):
             continue
-        if RESTATEMENT_EXAMPLE_CLAUSE_RE.search(clause):
-            continue
-        if negated_re is not None and negated_re.search(clause):
+        scrubbed_clause = ZERO_NOTREADY_RE.sub("", clause)
+        if negated_re is not None and negated_re.search(scrubbed_clause):
+            kept_segments = [
+                seg.strip()
+                for seg in clause.split(",")
+                if seg.strip()
+                and not negated_re.search(ZERO_NOTREADY_RE.sub("", seg))
+                and POSITIVE_CONTRAST_SEGMENT_RE.search(seg)
+            ]
+            if not kept_segments:
+                continue
+            result.append(", ".join(kept_segments))
             continue
         result.append(clause)
     return result
@@ -384,14 +405,13 @@ def interaction_blockers(
     return interaction_blocker, output_blocker
 
 
-def read_only_blockers(
+def _read_only_evidence_blockers(
     interaction: dict[str, Any],
     *,
     require_tasks: bool = True,
 ) -> tuple[str, ...]:
-    """Return blockers for read-only and latency safety criteria when no mutation leaked."""
+    """Return tool-evidence and latency blockers shared by read-only acceptance and milestones."""
 
-    _, output_blocker = interaction_blockers(interaction)
     tasks = projected_tasks(interaction)
     operations = tool_operations(interaction)
     unnormalized_calls = unnormalized_tool_calls(interaction)
@@ -402,32 +422,47 @@ def read_only_blockers(
     latency_ok, latency_s, _ = within_latency_budget(interaction)
 
     return tuple(
+        reason
+        for condition, reason in (
+            (
+                interaction.get("toolEvidenceComplete") is not True,
+                TOOL_EVIDENCE_OMITTED_BLOCKER,
+            ),
+            (
+                not worker_tools_available,
+                WORKER_TOOLS_OMITTED_BLOCKER,
+            ),
+            (
+                bool(unnormalized_calls),
+                UNNORMALIZED_TOOLS_BLOCKER,
+            ),
+            (
+                latency_s is None,
+                LATENCY_OMITTED_BLOCKER,
+            ),
+            (
+                latency_s is not None and not latency_ok,
+                LATENCY_EXCEEDED_BLOCKER,
+            ),
+        )
+        if condition
+    )
+
+
+def read_only_blockers(
+    interaction: dict[str, Any],
+    *,
+    require_tasks: bool = True,
+) -> tuple[str, ...]:
+    """Return blockers for read-only and latency safety criteria when no mutation leaked."""
+
+    _, output_blocker = interaction_blockers(interaction)
+    return tuple(
         dict.fromkeys(
             (
                 *output_blocker,
-                *(
-                    (TOOL_EVIDENCE_OMITTED_BLOCKER,)
-                    if interaction.get("toolEvidenceComplete") is not True
-                    else ()
-                ),
-                *(
-                    (WORKER_TOOLS_OMITTED_BLOCKER,)
-                    if not worker_tools_available
-                    else ()
-                ),
-                *(
-                    (UNNORMALIZED_TOOLS_BLOCKER,)
-                    if unnormalized_calls
-                    else ()
-                ),
-                *(
-                    (LATENCY_OMITTED_BLOCKER,)
-                    if latency_s is None
-                    else (
-                        (LATENCY_EXCEEDED_BLOCKER,)
-                        if not latency_ok
-                        else ()
-                    )
+                *_read_only_evidence_blockers(
+                    interaction, require_tasks=require_tasks
                 ),
             )
         )
@@ -443,23 +478,17 @@ def record_read_only_milestone(
 ) -> None:
     """Record the read-only tool evidence milestone on ``suite``."""
 
-    tasks = projected_tasks(interaction)
     operations = tool_operations(interaction)
     unnormalized_calls = unnormalized_tool_calls(interaction)
-    needs_worker_tasks = require_tasks or KANBAN_CREATE_OPERATION in operations
-    worker_tools_available = (
-        bool(tasks) or not needs_worker_tasks
-    ) and all("toolCalls" in task for task in tasks)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
     latency_ok, latency_s, budget_s = within_latency_budget(interaction)
+    evidence_blockers = _read_only_evidence_blockers(
+        interaction, require_tasks=require_tasks
+    )
 
     suite.record(
         milestone_id,
-        interaction.get("toolEvidenceComplete") is True
-        and worker_tools_available
-        and not mutations
-        and not unnormalized_calls
-        and latency_ok,
+        not evidence_blockers and not mutations and latency_ok,
         {
             "toolEvidenceComplete": interaction.get("toolEvidenceComplete"),
             "operations": operations,
@@ -468,34 +497,7 @@ def record_read_only_milestone(
             "latencySeconds": latency_s,
             "maxLatencySeconds": budget_s,
         },
-        blocked_by=()
-        if mutations
-        else tuple(
-            reason
-            for condition, reason in (
-                (
-                    interaction.get("toolEvidenceComplete") is not True,
-                    TOOL_EVIDENCE_OMITTED_BLOCKER,
-                ),
-                (
-                    not worker_tools_available,
-                    WORKER_TOOLS_OMITTED_BLOCKER,
-                ),
-                (
-                    bool(unnormalized_calls),
-                    UNNORMALIZED_TOOLS_BLOCKER,
-                ),
-                (
-                    latency_s is None,
-                    LATENCY_OMITTED_BLOCKER,
-                ),
-                (
-                    latency_s is not None and not latency_ok,
-                    LATENCY_EXCEEDED_BLOCKER,
-                ),
-            )
-            if condition
-        ),
+        blocked_by=() if mutations else evidence_blockers,
     )
 
 
@@ -583,7 +585,6 @@ def _project_web_console_interaction(
     *,
     latency_seconds: float,
     budget_seconds: float,
-    settled: bool | None = None,
 ) -> dict[str, Any]:
     """Project a Web Console ``/api/chat`` + ``/transcript`` turn into a CUJ interaction."""
 
@@ -592,11 +593,7 @@ def _project_web_console_interaction(
         for msg in (transcript_payload.get("messages") or [])
         if isinstance(msg, dict)
     ]
-    turn_settled = (
-        _transcript_turn_settled(transcript_payload)
-        if settled is None
-        else settled
-    )
+    turn_settled = _transcript_turn_settled(transcript_payload)
     root_tool_calls: list[dict[str, Any]] = []
     delegated_cards: dict[str, dict[str, Any]] = {}
 
@@ -818,6 +815,9 @@ def _run_web_console_turn(
             "CUJ_TIMEOUT", max(DEFAULT_TURN_TIMEOUT_SECONDS, budget_s * 2)
         )
     )
+    poll_s = float(
+        os.environ.get("CUJ_POLL_INTERVAL", TRANSCRIPT_POLL_INTERVAL_SECONDS)
+    )
     request_payload = {"message": prompt, "session_id": session_id}
     log.record("request", {"endpoint": root, **request_payload})
 
@@ -849,7 +849,7 @@ def _run_web_console_turn(
     )
     settled = _transcript_turn_settled(transcript_payload)
     while not settled and time.monotonic() < settle_deadline:
-        time.sleep(TRANSCRIPT_POLL_INTERVAL_SECONDS)
+        time.sleep(poll_s)
         transcript_payload = _fetch_web_console_transcript(
             transcript_transport, session_id
         )
@@ -869,7 +869,6 @@ def _run_web_console_turn(
         transcript_payload,
         latency_seconds=latency_s,
         budget_seconds=budget_s,
-        settled=settled,
     )
     log.record("interaction", {"poll": 0, "value": interaction})
     log.record(
@@ -927,6 +926,7 @@ def run_harness_scenario(scenario: Scenario) -> None:
                     "latencySeconds": interaction.get("latencySeconds"),
                     "maxLatencySeconds": interaction.get("maxLatencySeconds"),
                     "error": interaction.get("error") or None,
+                    "diagnostics": interaction.get("diagnostics") or None,
                 },
                 "acceptanceCriteria": acceptance.summary(),
                 "milestones": milestone_summary,
@@ -955,7 +955,12 @@ def run_harness_scenario(scenario: Scenario) -> None:
     print(f"Evidence: {log.path}")
     if transcript is not None:
         print(f"Conversation: {transcript}")
+    interaction_failure = ""
+    if interaction.get("status") != COMPLETED_STATUS:
+        error = interaction.get("error") or "interaction did not complete"
+        interaction_failure = f"status={interaction.get('status')}: {error}; "
     assert acceptance.passed, (
+        f"{interaction_failure}"
         "acceptance criteria not met: "
         f"{acceptance.failure_summary()}; evidence: {log.path}"
     )

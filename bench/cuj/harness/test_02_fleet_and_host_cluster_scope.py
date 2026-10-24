@@ -56,22 +56,23 @@ GCP_LOCATION_RE = re.compile(
     re.IGNORECASE,
 )
 CLUSTER_SCOPE_RE = re.compile(r"\b(?:clusters?|fleet|host)\b", re.IGNORECASE)
-AGENT_PROFILE_NAME_RE = re.compile(
-    r"\bcluster-[a-z0-9-]+\b",
+AGENT_PROFILE_REF_RE = re.compile(
+    r"\b(?:agent\s+)?profile\s+[`'\"]?cluster-[a-z0-9-]+[`'\"]?\b"
+    r"|\bcluster-[a-z0-9-]+-(?:us|europe|asia|northamerica|southamerica|australia|me|africa)-[a-z]+\d+(?:-[a-z])?\b",
     re.IGNORECASE,
 )
-NON_CLUSTER_HYPHENATED_RE = re.compile(
-    r"\b(?:in-scope|out-of-scope|read-only|kube-agents|kubeagents-system"
-    r"|plan-and-delegate|front-door|non-error|non-zero|multi-cluster)\b",
-    re.IGNORECASE,
-)
-HYPHENATED_IDENTIFIER_RE = re.compile(
-    r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b",
+KNOWN_CLUSTER_NAME_RE = re.compile(
+    r"\b(?:platform-agent-host|cymbal-shops|openrl-gpu-hub"
+    r"|ka-webconsole-[a-z0-9-]+|gke-[a-z0-9-]+"
+    r"|[a-z0-9]+(?:-[a-z0-9]+)*-cluster(?:-[a-z0-9-]+)?"
+    r"|cluster-[a-z0-9-]+)\b",
     re.IGNORECASE,
 )
 ADJACENT_CLUSTER_NAME_RE = re.compile(
-    r"\b(?:host\s+)?clusters?(?:\s+(?:is|are|include|includes|named))?\s*[:=]?\s*"
-    r"[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?\b",
+    r"\b(?:host\s+)?clusters?(?:\s+(?:is|are|include|includes|named|called))?\s*[:=]?\s*"
+    r"[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?\b"
+    r"|\b[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?\s*"
+    r"(?:\(\s*host\s+cluster\s*\)|\s+is\s+the\s+host\s+cluster\b|\s+host\s+cluster\b)",
     re.IGNORECASE,
 )
 CLUSTER_STOPWORDS = frozenset(
@@ -81,39 +82,77 @@ CLUSTER_STOPWORDS = frozenset(
         "all",
         "and",
         "are",
+        "called",
+        "check",
+        "checked",
         "confirm",
+        "confirmed",
+        "control-plane",
         "current",
         "currently",
+        "discovered",
+        "exist",
+        "exists",
         "fleet",
         "for",
+        "found",
         "from",
         "gcp",
         "gke",
         "has",
         "have",
         "host",
+        "identified",
         "identify",
+        "in-scope",
         "include",
         "includes",
+        "inspected",
+        "into",
+        "is",
+        "kube-agents",
+        "kubeagents-system",
         "list",
         "listed",
+        "located",
         "location",
+        "multi-cluster",
         "name",
         "named",
+        "node-pool",
         "none",
+        "non-error",
+        "non-zero",
         "only",
+        "out-of-scope",
+        "plan-and-delegate",
+        "present",
         "project",
         "projects",
+        "read-only",
         "region",
+        "reported",
         "running",
         "scope",
+        "single",
         "that",
         "the",
+        "their",
+        "there",
+        "these",
         "this",
+        "those",
+        "two",
+        "three",
+        "uses",
+        "using",
         "visible",
         "was",
         "were",
+        "which",
         "with",
+        "within",
+        "workload-identity",
     }
 )
 
@@ -199,18 +238,18 @@ def _reported_clusters(
     for clause in clauses:
         if not CLUSTER_SCOPE_RE.search(clause):
             continue
-        cleaned = AGENT_PROFILE_NAME_RE.sub(" ", clause)
+        cleaned = AGENT_PROFILE_REF_RE.sub(" ", clause)
         if project_re is not None:
             cleaned = project_re.sub(" ", cleaned)
         cleaned = GCP_LOCATION_RE.sub(" ", cleaned)
-        cleaned = NON_CLUSTER_HYPHENATED_RE.sub(" ", cleaned)
-        for match in HYPHENATED_IDENTIFIER_RE.finditer(cleaned):
+        for match in KNOWN_CLUSTER_NAME_RE.finditer(cleaned):
             token = match.group(0).casefold()
             if token not in CLUSTER_STOPWORDS:
                 found.add(token)
         for match in ADJACENT_CLUSTER_NAME_RE.finditer(cleaned):
-            token = match.group(1).casefold()
-            if token not in CLUSTER_STOPWORDS:
+            raw_token = match.group(1) or match.group(2) or ""
+            token = raw_token.casefold()
+            if token and token not in CLUSTER_STOPWORDS:
                 found.add(token)
     return sorted(found)
 
@@ -234,14 +273,9 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
         raw_input,
         "clusters?",
         "fleet",
-        "host",
-        "project",
-        "scope",
-        "region",
-        "location",
     )
     positive_text = "\n".join(positive_clauses)
-    scrubbed_positive = AGENT_PROFILE_NAME_RE.sub("", positive_text)
+    scrubbed_positive = AGENT_PROFILE_REF_RE.sub("", positive_text)
 
     project_re = (
         re.compile(

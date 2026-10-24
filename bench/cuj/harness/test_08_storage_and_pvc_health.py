@@ -48,21 +48,39 @@ StorageClass in both the task completion summary and the full result. Do \
 not create, modify, or delete any cluster resources."""
 
 PVC_NAME_RE = re.compile(
-    r"\b(?:platform-agent-[a-z0-9-]+|[a-z0-9]+(?:-[a-z0-9]+)+-pvc|pvc-[a-z0-9-]+)\b",
+    r"\b(?:"
+    r"platform-agent-(?!host\b)(?:"
+    r"(?:gateway|shell|credential-proxy|sandbox)-(?:pvc|data|storage|workspaces?)[a-z0-9-]*"
+    r"|(?!gateway\b|shell\b|credential-proxy\b|sandbox\b)[a-z0-9-]+"
+    r")"
+    r"|[a-z0-9]+(?:-[a-z0-9]+)+-pvc"
+    r"|pvc-[a-z0-9-]+"
+    r")\b",
     re.IGNORECASE,
 )
 BOUND_STATUS_RE = re.compile(
     r"(?<!not\s)\bbound\b",
     re.IGNORECASE,
 )
+NEGATED_UNBOUND_PHRASE_RE = re.compile(
+    r"\b(?:no|none|neither|without|(?<!-)0|zero)\b[^,:\n;]{0,35}"
+    r"\b(?:pending|lost|unbound|released|failed)\b"
+    r"(?:\s*(?:,|or|and|nor)\s*(?:pending|lost|unbound|released|failed)\b)*",
+    re.IGNORECASE,
+)
 UNBOUND_STATUS_RE = re.compile(
     r"\b(?:pending|lost|unbound|released|failed)\b"
-    r"|\b(?:not|no|none|nothing|never|(?<!-)0|zero|isn't|aren't|wasn't|weren't)\b[^.;\n]{0,40}\bbound\b"
+    r"|\b(?:not|no|none|nothing|never|(?<!-)0|zero|isn't|aren't|wasn't|weren't)\b[^,:\n;]{0,40}\bbound\b"
     r"|\bbound\s*[:=]\s*(?:false|no|0|unknown|none)\b",
     re.IGNORECASE,
 )
 STORAGE_CLASS_OR_CAPACITY_RE = re.compile(
-    r"\b(?:standard-rwx|standard-rwo|premium-rwo|standard|\d+(?:\.\d+)?\s*(?:gi|mi|gb|ti))\b",
+    r"\b(?:"
+    r"standard-rwx|standard-rwo|premium-rwo|balanced-rwo"
+    r"|(?:storage\s*class|class)\s*(?:is\s+|[:=]\s*)?[`'\"]?standard[`'\"]?"
+    r"|standard\s+storage\s*class"
+    r"|\d+(?:\.\d+)?\s*(?:gi|mi|ti|ki|gib|mib|tib|kib|gb|mb|tb|kb)"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -135,6 +153,11 @@ MILESTONES = (
 )
 
 
+def _has_unbound_status(clause: str) -> bool:
+    scrubbed = NEGATED_UNBOUND_PHRASE_RE.sub(" ", clause)
+    return bool(UNBOUND_STATUS_RE.search(scrubbed))
+
+
 def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     _, output_blocker = interaction_blockers(interaction)
     ro_blockers = read_only_blockers(interaction)
@@ -150,9 +173,6 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
         raw_input,
         "pvcs?",
         "persistentvolumeclaims?",
-        "storage",
-        "storageclass(?:es)?",
-        "volumes?",
         "claims?",
     )
     positive_text = "\n".join(positive_clauses)
@@ -164,11 +184,10 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     has_pvc = bool(PVC_NAME_RE.search(positive_text)) and not refusal
     has_bound = (
         any(
-            BOUND_STATUS_RE.search(clause)
-            and not UNBOUND_STATUS_RE.search(clause)
+            BOUND_STATUS_RE.search(clause) and not _has_unbound_status(clause)
             for clause in positive_clauses
         )
-        and not any(UNBOUND_STATUS_RE.search(clause) for clause in all_clauses)
+        and not any(_has_unbound_status(clause) for clause in all_clauses)
         and not refusal
     )
     storage_details = sorted(

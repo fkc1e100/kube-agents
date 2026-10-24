@@ -47,13 +47,26 @@ kubeagents-system) and their Active phase status in both the task completion \
 summary and the full result. Do not create, modify, or delete any cluster \
 resources."""
 
+NON_DEFAULT_NS_PHRASE_RE = re.compile(
+    r"\bby\s+default\b|\(\s*default\s*\)",
+    re.IGNORECASE,
+)
 CORE_NAMESPACE_RE = re.compile(
-    r"(?<!\bby\s)\bdefault\b(?!\s+(?:node\s+)?(?:pool|service\s*account|storage\s*class|backend|route|policy|mode|config\w*|setting\w*|value\w*)\b)"
+    r"(?<![a-z0-9_-])\bdefault\b(?![-_][a-z0-9])"
+    r"(?!\s+(?:node\s+)?(?:pool|service\s*account|storage\s*class|backend|route|policy|mode|config\w*|setting\w*|value\w*|profile)\b)"
     r"|\bkube-system\b",
     re.IGNORECASE,
 )
 HARNESS_NAMESPACE_RE = re.compile(r"\bkubeagents-system\b", re.IGNORECASE)
-ACTIVE_PHASE_RE = re.compile(r"\bactive\b", re.IGNORECASE)
+ACTIVE_PHASE_RE = re.compile(
+    r"\bactive\b(?!\s+namespaces?\b)",
+    re.IGNORECASE,
+)
+PROCEDURAL_NS_RESTATEMENT_RE = re.compile(
+    r"\A\s*(?:i|we)\s+(?:listed|checked|inspected|queried|verified)\s+"
+    r"(?:whether|if|the\s+active\s+namespaces)\b[^:]*\Z",
+    re.IGNORECASE,
+)
 
 ACCEPTANCE_CRITERIA = (
     AcceptanceCriterion(
@@ -132,24 +145,30 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = positive_inventory_clauses(
-        answer,
-        raw_input,
-        "namespaces?",
-        "default",
-        "kube-system",
-        "kubeagents-system",
-        "active",
-        "phase",
-    )
+    positive_clauses = [
+        clause
+        for clause in positive_inventory_clauses(
+            answer,
+            raw_input,
+            "namespaces?",
+            "default",
+            "kube-system",
+            "kubeagents-system",
+        )
+        if not PROCEDURAL_NS_RESTATEMENT_RE.search(clause)
+    ]
     positive_text = "\n".join(positive_clauses)
+    scrubbed_default_text = NON_DEFAULT_NS_PHRASE_RE.sub(" ", positive_text)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
     refusal = has_clarification_or_refusal(answer)
 
     core_found = sorted(
-        {m.group(0).casefold() for m in CORE_NAMESPACE_RE.finditer(positive_text)}
+        {
+            m.group(0).casefold()
+            for m in CORE_NAMESPACE_RE.finditer(scrubbed_default_text)
+        }
     )
     has_core = {"default", "kube-system"}.issubset(core_found) and not refusal
     has_harness_ns = bool(HARNESS_NAMESPACE_RE.search(positive_text)) and not refusal

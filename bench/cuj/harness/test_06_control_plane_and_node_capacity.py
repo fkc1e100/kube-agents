@@ -144,15 +144,12 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     positive_clauses = positive_inventory_clauses(
         answer,
         raw_input,
-        "versions?",
         "nodes?",
-        "ready",
         "cpu",
         "vcpus?",
         "cores?",
         "millicores?",
         "memory",
-        "allocatable",
         "capacity",
     )
     positive_text = "\n".join(positive_clauses)

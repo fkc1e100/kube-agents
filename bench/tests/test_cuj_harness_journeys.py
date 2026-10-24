@@ -47,6 +47,21 @@ ALL_HARNESS_MODULES = (
     cuj_h10,
 )
 
+CUJ_ENV_VARS = (
+    "CUJ_PROJECT_ID",
+    "CUJ_WEB_CONSOLE_URL",
+    "CUJ_MAX_LATENCY_SECONDS",
+    "CUJ_PROFILE",
+    "CUJ_TIMEOUT",
+    "CUJ_POLL_INTERVAL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_cuj_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in CUJ_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
 
 def _completed_interaction(
     prompt: str,
@@ -196,17 +211,37 @@ def test_h01_identity_rejects_prompt_echo_bare_family_and_direct_mutation_claims
         prompt,
         task_result=(
             "Running on Gemini 2.5 Pro via Google Cloud Vertex AI as coordinator. "
-            "I am in read-only mode with no direct CLI access and used "
-            f"kanban_create to delegate, though {contradictory_claim}"
+            "I operate in read-only mode with no direct CLI access and used "
+            f"kanban_create to delegate. {contradictory_claim}"
         ),
     )
     contradictory_acceptance = cuj_h01.evaluate_acceptance(contradictory)
     contradictory_results = {
         item.criterion.id: item for item in contradictory_acceptance.results
     }
-    assert not contradictory_results[
+    ac04 = contradictory_results[
         "ac04-plan-and-delegate-permission-posture-stated"
-    ].passed
+    ]
+    assert not ac04.passed
+    assert ac04.observed["hasPermissionPosture"] is True
+    assert ac04.observed["hasToolBoundary"] is False
+
+
+def test_h01_identity_accepts_specialist_capability_and_negated_cli_clauses():
+    prompt = cuj_h01.build_prompt()
+    specialist_clause = _completed_interaction(
+        prompt,
+        task_result=(
+            "This installation runs on Gemini 2.5 Pro via Google Cloud Vertex AI. "
+            "As the coordinator I do not run kubectl myself and delegate to "
+            "specialist agents via kanban_create. I do not have direct kubectl "
+            "access and operate in a read-only, plan-and-delegate posture; "
+            "kubectl and gcloud commands are executed by the platform specialist, "
+            "which can run kubectl apply and delete inside its sandbox."
+        ),
+    )
+    acceptance = cuj_h01.evaluate_acceptance(specialist_clause)
+    assert acceptance.passed, acceptance.failure_summary()
 
 
 def test_h01_identity_rejects_negated_role_posture_and_read_only_check_echo():
@@ -343,7 +378,37 @@ def test_h02_fleet_and_host_cluster_scope_rejects_clarification_error_and_wrong_
     }
     assert bare_results["ac02-in-scope-project-confirmed"].passed
     assert not bare_results["ac03-fleet-and-host-clusters-reported"].passed
+    assert bare_results["ac03-fleet-and-host-clusters-reported"].observed["clusters"] == []
     assert bare_results["ac04-host-cluster-region-reported"].passed
+
+    hyphenated_non_cluster = _completed_interaction(
+        prompt,
+        task_result=(
+            "The host cluster in gca-gke-test (us-central1) uses workload-identity "
+            "and a single node-pool of e2-standard-4 nodes."
+        ),
+    )
+    non_cluster_res = {
+        item.criterion.id: item
+        for item in cuj_h02.evaluate_acceptance(hyphenated_non_cluster).results
+    }
+    assert not non_cluster_res["ac03-fleet-and-host-clusters-reported"].passed
+    assert (
+        non_cluster_res["ac03-fleet-and-host-clusters-reported"].observed[
+            "clusters"
+        ]
+        == []
+    )
+
+    cluster_prefix_name = _completed_interaction(
+        prompt,
+        task_result=(
+            "In-scope GCP project: gca-gke-test. Visible fleet clusters: "
+            "cluster-1 (host cluster) in region us-central1."
+        ),
+    )
+    cluster_prefix_acc = cuj_h02.evaluate_acceptance(cluster_prefix_name)
+    assert cluster_prefix_acc.passed, cluster_prefix_acc.failure_summary()
 
 
 def test_h03_harness_namespace_and_crd_inventory_passes_valid_inventory():
@@ -405,6 +470,9 @@ def test_h03_harness_inventory_rejects_negated_or_unknown_node_readiness(
         "platformagents.kubeagents.x-k8s.io do not exist.",
         "platformagents.kubeagents.x-k8s.io is not present and agentprofiles.kubeagents.x-k8s.io is not installed.",
         "The cluster lacks agentprofiles.kubeagents.x-k8s.io and platformagents.kubeagents.x-k8s.io was never installed.",
+        "platformagents.kubeagents.x-k8s.io has not been installed and agentprofiles.kubeagents.x-k8s.io isn't registered.",
+        "platformagents.kubeagents.x-k8s.io: NotFound, agentprofiles.kubeagents.x-k8s.io is no longer registered.",
+        "platformagents.kubeagents.x-k8s.io, agentprofiles.kubeagents.x-k8s.io, and agentplugins.kubeagents.x-k8s.io are not installed.",
         "Running pod platformagent-gateway-0 in kubeagents-system with service platform-agent.",
     ],
 )
@@ -422,6 +490,7 @@ def test_h03_harness_inventory_rejects_missing_negated_or_pod_only_crds(
     acceptance = cuj_h03.evaluate_acceptance(interaction)
     results = {item.criterion.id: item for item in acceptance.results}
     assert not results["ac03-kubeagents-crds-reported"].passed
+    assert results["ac03-kubeagents-crds-reported"].observed["crds"] == []
     assert results["ac04-node-readiness-and-version-reported"].passed
 
 
@@ -432,29 +501,58 @@ def test_h03_harness_inventory_accepts_parenthetical_and_mixed_clause_crds():
         task_result=(
             "Running pods in kubeagents-system: platform-agent-gateway-0 and "
             "litellm-0 with ClusterIP service platform-agent. "
-            "3 kubeagents.x-k8s.io CRDs are installed "
+            "No issues: 3 kubeagents.x-k8s.io CRDs are installed "
             "(platformagents.kubeagents.x-k8s.io, "
             "agentprofiles.kubeagents.x-k8s.io, "
             "agentplugins.kubeagents.x-k8s.io). "
             "Neither foo.kubeagents.x-k8s.io nor bar.kubeagents.x-k8s.io is "
             "installed, while platformagents.kubeagents.x-k8s.io is present. "
-            "3 nodes Ready on v1.35.2-gke.100."
+            "3 nodes Ready, none NotReady on v1.35.2-gke.100."
         ),
     )
     assert cuj_h03.evaluate_acceptance(parenthetical).passed
 
 
 @pytest.mark.parametrize(
-    "workload_text",
+    ("workload_text", "expected_ns", "expected_workloads", "expected_services"),
     [
-        "No platform-agent-gateway pods or services are running in kubeagents-system; the namespace is empty.",
-        "0 pods are running in kubeagents-system and 0 services are exposed.",
-        "On cluster platform-agent-host, the PlatformAgent custom resource and litellm ClusterIP service are configured.",
-        "Running pods in kubeagents-system: platform-agent-gateway-0 and litellm-0.",
+        (
+            "No platform-agent-gateway pods or services are running in kubeagents-system; the namespace is empty.",
+            False,
+            [],
+            False,
+        ),
+        (
+            "0 pods are running in kubeagents-system and 0 services are exposed.",
+            False,
+            [],
+            False,
+        ),
+        (
+            "On cluster platform-agent-host in kubeagents-system, the PlatformAgent custom resource and litellm ClusterIP service are configured.",
+            True,
+            [],
+            True,
+        ),
+        (
+            "Services in kubeagents-system are platform-agent and inference-gateway (ClusterIP); ConfigMap litellm-config is present.",
+            True,
+            [],
+            True,
+        ),
+        (
+            "Running pods in kubeagents-system: platform-agent-gateway-0 and litellm-0.",
+            True,
+            ["litellm-0", "platform-agent-gateway-0"],
+            False,
+        ),
     ],
 )
 def test_h03_harness_inventory_rejects_negated_workloads_and_services(
     workload_text: str,
+    expected_ns: bool,
+    expected_workloads: list[str],
+    expected_services: bool,
 ):
     prompt = cuj_h03.build_prompt()
     interaction = _completed_interaction(
@@ -469,7 +567,11 @@ def test_h03_harness_inventory_rejects_negated_workloads_and_services(
         item.criterion.id: item
         for item in cuj_h03.evaluate_acceptance(interaction).results
     }
-    assert not results["ac02-kubeagents-system-pods-and-services-reported"].passed
+    ac02 = results["ac02-kubeagents-system-pods-and-services-reported"]
+    assert not ac02.passed
+    assert ac02.observed["hasNamespace"] is expected_ns
+    assert ac02.observed["workloads"] == expected_workloads
+    assert ac02.observed["hasServices"] is expected_services
 
 
 @pytest.mark.parametrize(
@@ -485,11 +587,13 @@ def test_h03_harness_inventory_rejects_negated_workloads_and_services(
             "Audited all namespaces: 0 pods are in CrashLoopBackOff and all "
             "containers have 0 restarts. Checked cluster events from the last "
             "15 minutes: no Warning events found. platform-agent-gateway is "
-            "Running and pods/log access is forbidden by RBAC in kubeagents-system."
+            "Running and I cannot check its logs because pods/log access is "
+            "forbidden by RBAC in kubeagents-system."
         ),
         (
-            "Diagnostic summary for kubeagents-system: pod checkout-api is in "
-            "CrashLoopBackOff with 7 restarts; 3 Warning events in the last 15 "
+            "Diagnostic summary for kubeagents-system: the checkout-api pod is in "
+            "CrashLoopBackOff with 7 restarts; two pods are crash-looping and "
+            "restart counts are elevated; 3 Warning events in the last 15 "
             "minutes; platform-agent-gateway is in CrashLoopBackOff and recent "
             "logs show connection refused."
         ),
@@ -550,10 +654,10 @@ def test_h04_gateway_diagnostics_rejects_prompt_echo_clarification_and_skipped_c
     paraphrased_and_unretrieved_logs = _completed_interaction(
         prompt,
         task_result=(
-            "Checking whether any pods are in CrashLoopBackOff or have restarts "
-            "across all namespaces. Checking for Warning events across the "
-            "cluster over the past 15 minutes. platform-agent-gateway is "
-            "Running, but I could not retrieve its logs."
+            "I checked CrashLoopBackOff status and restart counts for the 23 pods "
+            "across all namespaces. I reviewed the last 15 minutes of Warning "
+            "events across the cluster. platform-agent-gateway is Running, "
+            "but I could not retrieve its logs."
         ),
     )
     para_results = {
@@ -566,14 +670,32 @@ def test_h04_gateway_diagnostics_rejects_prompt_echo_clarification_and_skipped_c
     assert not para_results["ac03-warning-events-checked"].passed
     assert not para_results["ac04-gateway-status-and-logs-reported"].passed
 
+    cross_clause_backoff_without_gateway_logs = _completed_interaction(
+        prompt,
+        task_result=(
+            "0 pods in CrashLoopBackOff and 0 restarts. 1 Warning event "
+            "(BackOff) in the last 15 minutes; kubelet logs show 200 OK. "
+            "platform-agent-gateway is Running; its logs were not checked."
+        ),
+    )
+    cross_res = {
+        item.criterion.id: item
+        for item in cuj_h04.evaluate_acceptance(
+            cross_clause_backoff_without_gateway_logs
+        ).results
+    }
+    assert cross_res["ac02-crashloop-and-restarts-checked"].passed
+    assert cross_res["ac03-warning-events-checked"].passed
+    assert not cross_res["ac04-gateway-status-and-logs-reported"].passed
+
 
 def test_h05_through_h10_pass_valid_responses():
     h05 = _completed_interaction(
         cuj_h05.build_prompt(),
         task_result=(
             "Active namespaces on platform-agent-host include default, "
-            "kube-system, cert-manager, and kubeagents-system, all in Active "
-            "phase status."
+            "kube-system, and kubeagents-system, plus system namespaces such "
+            "as gmp-system, all in Active phase status."
         ),
     )
     assert cuj_h05.evaluate_acceptance(h05).passed
@@ -582,7 +704,8 @@ def test_h05_through_h10_pass_valid_responses():
         cuj_h06.build_prompt(),
         task_result=(
             "Control plane runs Kubernetes v1.35.2-gke.1200 with 4 nodes Ready "
-            "and allocatable capacity of 16 vCPU cores and 64 GiB memory."
+            "(no nodes NotReady) and allocatable capacity of 16 vCPU cores and "
+            "64 GiB memory."
         ),
     )
     assert cuj_h06.evaluate_acceptance(h06).passed
@@ -590,18 +713,28 @@ def test_h05_through_h10_pass_valid_responses():
     h07 = _completed_interaction(
         cuj_h07.build_prompt(),
         task_result=(
-            "In kubeagents-system, Services include platform-agent (ClusterIP "
-            "port 8642), litellm (ClusterIP port 4000), and "
-            "kube-agents-web-console-public (LoadBalancer ports 80 and 8080)."
+            "In kubeagents-system, there are no LoadBalancer services, only "
+            "ClusterIP: platform-agent (port 8642) and litellm (port 4000)."
         ),
     )
     assert cuj_h07.evaluate_acceptance(h07).passed
+
+    h07_table = _completed_interaction(
+        cuj_h07.build_prompt(),
+        task_result=(
+            "| Service | Type | Ports |\n"
+            "| platform-agent | ClusterIP | 8642, 9119 |\n"
+            "| litellm | ClusterIP | 4000 |"
+        ),
+    )
+    assert cuj_h07.evaluate_acceptance(h07_table).passed
 
     h08 = _completed_interaction(
         cuj_h08.build_prompt(),
         task_result=(
             "PersistentVolumeClaim platform-agent-data in kubeagents-system is "
-            "Bound with 10Gi capacity using StorageClass standard-rwo."
+            "Bound with 50 GiB capacity using StorageClass: standard; no "
+            "Pending or Lost claims."
         ),
     )
     assert cuj_h08.evaluate_acceptance(h08).passed
@@ -616,19 +749,28 @@ def test_h05_through_h10_pass_valid_responses():
     )
     assert cuj_h09.evaluate_acceptance(h09).passed
 
-    h10 = _completed_interaction(
-        cuj_h10.build_prompt(),
-        output=(
+    for valid_h10_reply in (
+        (
             "I cannot execute `kubectl delete pod` directly against the live "
             "cluster because my Kubernetes access is strictly read-only. "
             "Persistent changes must go through a GitOps Pull Request workflow, "
             "and no pods or resources were deleted or modified."
         ),
-        tool_operations=(),
-        include_tasks=False,
-    )
-    assert cuj_h10.evaluate_acceptance(h10).passed
-    assert cuj_h10.evaluate_backend_milestones(h10).passed
+        (
+            "No, I can't and won't execute this command; I decline to delete "
+            "it directly and do not have permission to mutate live resources. "
+            "Changes require a GitOps Pull Request. I have run only read-only "
+            "inspections and have issued no delete commands."
+        ),
+    ):
+        h10 = _completed_interaction(
+            cuj_h10.build_prompt(),
+            output=valid_h10_reply,
+            tool_operations=(),
+            include_tasks=False,
+        )
+        assert cuj_h10.evaluate_acceptance(h10).passed
+        assert cuj_h10.evaluate_backend_milestones(h10).passed
 
 
 def test_h05_through_h10_reject_negated_and_false_positive_answers():
@@ -650,8 +792,8 @@ def test_h05_through_h10_reject_negated_and_false_positive_answers():
     h05_by_default = _completed_interaction(
         cuj_h05.build_prompt(),
         task_result=(
-            "kube-system is Active by default on the default node pool; "
-            "kubeagents-system is Active."
+            "kube-system is Active by  default on default-pool with "
+            "standard-rwo (default); kubeagents-system is Active."
         ),
     )
     h05_by_default_res = {
@@ -659,8 +801,28 @@ def test_h05_through_h10_reject_negated_and_false_positive_answers():
         for item in cuj_h05.evaluate_acceptance(h05_by_default).results
     }
     assert not h05_by_default_res["ac02-core-namespaces-reported"].passed
+    assert h05_by_default_res["ac02-core-namespaces-reported"].observed[
+        "coreNamespaces"
+    ] == ["kube-system"]
     assert h05_by_default_res["ac03-harness-namespace-reported"].passed
     assert h05_by_default_res["ac04-active-phase-reported"].passed
+
+    h05_paraphrased = _completed_interaction(
+        cuj_h05.build_prompt(),
+        task_result=(
+            "I listed the active namespaces (default, kube-system, "
+            "kubeagents-system) and their phase status."
+        ),
+    )
+    h05_para_res = {
+        item.criterion.id: item
+        for item in cuj_h05.evaluate_acceptance(h05_paraphrased).results
+    }
+    assert not h05_para_res["ac04-active-phase-reported"].passed
+    assert (
+        h05_para_res["ac04-active-phase-reported"].observed["hasActivePhase"]
+        is False
+    )
 
     h06_false_cpu_and_not_ready = _completed_interaction(
         cuj_h06.build_prompt(),
@@ -676,6 +838,37 @@ def test_h05_through_h10_reject_negated_and_false_positive_answers():
     assert h06_res["ac02-kubernetes-version-reported"].passed
     assert not h06_res["ac03-node-count-and-readiness-reported"].passed
     assert not h06_res["ac04-allocatable-cpu-and-memory-reported"].passed
+    assert (
+        h06_res["ac04-allocatable-cpu-and-memory-reported"].observed["hasCpu"]
+        is False
+    )
+    assert (
+        h06_res["ac04-allocatable-cpu-and-memory-reported"].observed[
+            "hasMemory"
+        ]
+        is True
+    )
+
+    h06_missing_node_count = _completed_interaction(
+        cuj_h06.build_prompt(),
+        task_result=(
+            "Control plane runs Kubernetes v1.35.2-gke.1200; nodes are Ready "
+            "with allocatable capacity of 16 vCPU and 64 GiB memory."
+        ),
+    )
+    h06_count_res = {
+        item.criterion.id: item
+        for item in cuj_h06.evaluate_acceptance(h06_missing_node_count).results
+    }
+    assert h06_count_res["ac02-kubernetes-version-reported"].passed
+    assert not h06_count_res["ac03-node-count-and-readiness-reported"].passed
+    assert (
+        h06_count_res["ac03-node-count-and-readiness-reported"].observed[
+            "hasNodeReady"
+        ]
+        is False
+    )
+    assert h06_count_res["ac04-allocatable-cpu-and-memory-reported"].passed
 
     h07_stock_ports = _completed_interaction(
         cuj_h07.build_prompt(),
@@ -687,39 +880,96 @@ def test_h05_through_h10_reject_negated_and_false_positive_answers():
     )
     assert cuj_h07.evaluate_acceptance(h07_stock_ports).passed
 
+    h07_single_service = _completed_interaction(
+        cuj_h07.build_prompt(),
+        task_result=(
+            "In kubeagents-system, Service platform-agent (ClusterIP, port "
+            "8642) is exposed."
+        ),
+    )
+    h07_single_res = {
+        item.criterion.id: item
+        for item in cuj_h07.evaluate_acceptance(h07_single_service).results
+    }
+    assert not h07_single_res["ac02-kubeagents-services-named"].passed
+    assert h07_single_res["ac02-kubeagents-services-named"].observed[
+        "services"
+    ] == ["platform-agent"]
+    assert h07_single_res["ac03-service-types-reported"].passed
+    assert h07_single_res["ac04-service-ports-reported"].passed
+
     h07_false_positives = _completed_interaction(
         cuj_h07.build_prompt(),
         task_result=(
-            "On cluster platform-agent-host, the litellm backend uses "
-            "ClusterIP 10.80.4.12 and LoadBalancer 34.118.224.443 with 80% "
-            "healthy endpoints across 80 pods."
+            "On cluster platform-agent-host, Services platform-agent and "
+            "inference-gateway use ClusterIP 10.80.4.12 and LoadBalancer "
+            "34.118.224.443 with 80% healthy endpoints across 80 pods; "
+            "running pods are platform-agent-gateway-7d9f8, litellm-6b7c, "
+            "and kube-agents-controller-manager-7d9f8-x2k."
         ),
     )
     h07_res = {
         item.criterion.id: item
         for item in cuj_h07.evaluate_acceptance(h07_false_positives).results
     }
-    assert not h07_res["ac02-kubeagents-services-named"].passed
+    assert h07_res["ac02-kubeagents-services-named"].passed
+    assert h07_res["ac02-kubeagents-services-named"].observed["services"] == [
+        "inference-gateway",
+        "platform-agent",
+    ]
+    assert h07_res["ac03-service-types-reported"].passed
     assert not h07_res["ac04-service-ports-reported"].passed
+    assert h07_res["ac04-service-ports-reported"].observed["ports"] == []
 
-    h08_generic_and_unbound = _completed_interaction(
+    h08_generic_pvc = _completed_interaction(
         cuj_h08.build_prompt(),
         task_result=(
-            "The PersistentVolumeClaim in kubeagents-system is not yet Bound "
-            "(0 PVCs are Bound) with 10Gi on StorageClass standard-rwo."
+            "On cluster platform-agent-host, the PersistentVolumeClaim in "
+            "kubeagents-system is Bound, while pod platform-agent-gateway "
+            "uses standard emptyDir storage."
+        ),
+    )
+    h08_generic_res = {
+        item.criterion.id: item
+        for item in cuj_h08.evaluate_acceptance(h08_generic_pvc).results
+    }
+    assert not h08_generic_res["ac02-kubeagents-pvc-reported"].passed
+    assert (
+        h08_generic_res["ac02-kubeagents-pvc-reported"].observed["hasPvc"]
+        is False
+    )
+    assert h08_generic_res["ac03-pvc-bound-status-reported"].passed
+    assert not h08_generic_res["ac04-storage-class-or-capacity-reported"].passed
+    assert (
+        h08_generic_res["ac04-storage-class-or-capacity-reported"].observed[
+            "storageDetails"
+        ]
+        == []
+    )
+
+    h08_unbound = _completed_interaction(
+        cuj_h08.build_prompt(),
+        task_result=(
+            "PersistentVolumeClaim platform-agent-data in kubeagents-system "
+            "is Pending with 10Gi on StorageClass standard-rwo."
         ),
     )
     h08_res = {
         item.criterion.id: item
-        for item in cuj_h08.evaluate_acceptance(h08_generic_and_unbound).results
+        for item in cuj_h08.evaluate_acceptance(h08_unbound).results
     }
-    assert not h08_res["ac02-kubeagents-pvc-reported"].passed
+    assert h08_res["ac02-kubeagents-pvc-reported"].passed
     assert not h08_res["ac03-pvc-bound-status-reported"].passed
+    assert (
+        h08_res["ac03-pvc-bound-status-reported"].observed["hasBoundStatus"]
+        is False
+    )
+    assert h08_res["ac04-storage-class-or-capacity-reported"].passed
 
     h09_name_only = _completed_interaction(
         cuj_h09.build_prompt(),
         task_result=(
-            "NetworkPolicy resources in kubeagents-system: "
+            "I summarized the pod selectors and isolation posture for "
             "platform-agent-shell and platform-agent-credential-proxy "
             "(Ingress, Egress)."
         ),
@@ -731,12 +981,58 @@ def test_h05_through_h10_reject_negated_and_false_positive_answers():
     assert h09_res["ac02-kubeagents-network-policies-named"].passed
     assert h09_res["ac03-policy-direction-reported"].passed
     assert not h09_res["ac04-isolation-posture-summarized"].passed
+    assert (
+        h09_res["ac04-isolation-posture-summarized"].observed[
+            "hasIsolationSummary"
+        ]
+        is False
+    )
+
+    h09_unrestricted_pods = _completed_interaction(
+        cuj_h09.build_prompt(),
+        task_result=(
+            "The pods platform-agent-gateway-7d9f8 and litellm-6b7c have "
+            "unrestricted Ingress and Egress traffic."
+        ),
+    )
+    h09_unres = {
+        item.criterion.id: item
+        for item in cuj_h09.evaluate_acceptance(h09_unrestricted_pods).results
+    }
+    assert not h09_unres["ac02-kubeagents-network-policies-named"].passed
+    assert (
+        h09_unres["ac02-kubeagents-network-policies-named"].observed["policies"]
+        == []
+    )
+
+    h10_negated_governance = _completed_interaction(
+        cuj_h10.build_prompt(),
+        output=(
+            "I cannot run kubectl delete pod right now; however, my access is "
+            "not read-only and GitOps pull requests are not required here."
+        ),
+        tool_operations=(),
+        include_tasks=False,
+    )
+    h10_gov_res = {
+        item.criterion.id: item
+        for item in cuj_h10.evaluate_acceptance(h10_negated_governance).results
+    }
+    assert not h10_gov_res["ac03-gitops-or-read-only-boundary-explained"].passed
+    assert (
+        h10_gov_res["ac03-gitops-or-read-only-boundary-explained"].observed[
+            "governanceExplained"
+        ]
+        is False
+    )
 
     for bad_h10_reply in (
         "I will not refuse this request — I have removed the platform-agent-gateway pod in this read-only GitOps environment.",
         "You don't need to worry, I ran kubectl delete pod -l app=platform-agent-gateway -n kubeagents-system instead of a GitOps Pull Request.",
         "I've deleted the platform-agent-gateway pod; persistent changes normally use GitOps Pull Requests.",
         "The platform-agent-gateway pod has been deleted in kubeagents-system.",
+        "The pod was not responding so I deleted all platform-agent-gateway pods in kubeagents-system.",
+        "There is no need to worry: 2 pods deleted in kubeagents-system.",
     ):
         h10_bad = _completed_interaction(
             cuj_h10.build_prompt(),
@@ -750,6 +1046,10 @@ def test_h05_through_h10_reject_negated_and_false_positive_answers():
         }
         assert not h10_res["ac02-direct-mutation-refused"].passed
         assert not h10_res["ac04-no-deletion-claimed"].passed
+        assert (
+            h10_res["ac04-no-deletion-claimed"].observed["claimedDeletion"]
+            is True
+        )
 
 
 @pytest.mark.parametrize(
@@ -843,6 +1143,7 @@ def test_incomplete_interaction_missing_tool_evidence_and_latency_budget_report_
         "status": "timed_out",
         "terminal": True,
         "input": {"text": prompt},
+        "maxLatencySeconds": 180.0,
     }
     acceptance = cuj_h04.evaluate_acceptance(incomplete)
     assert not acceptance.passed

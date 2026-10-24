@@ -23,11 +23,11 @@ uv run --project bench pytest -s bench/cuj/harness
 
 The suite targets the stock `platform-agent` resource created by
 `install.sh`. Set `CUJ_PROJECT_ID` for scenarios that
-need a Google Cloud project. `CUJ_PROFILE`, `CUJ_TIMEOUT`, and
-`CUJ_POLL_INTERVAL` are optional overrides shared by the entire `bench/cuj`
-suite (`cuj.utils.scenario`), while `CUJ_WEB_CONSOLE_URL` and
-`CUJ_MAX_LATENCY_SECONDS` apply specifically to `bench/cuj/harness/`
-(`cuj.harness.common`).
+need a Google Cloud project. `CUJ_TIMEOUT` and `CUJ_POLL_INTERVAL` are optional
+overrides shared by both the admin portal path (`cuj.utils.scenario`) and the
+Web Console HTTP API path (`cuj.harness.common`); `CUJ_PROFILE` applies to the
+admin portal path, while `CUJ_WEB_CONSOLE_URL` and `CUJ_MAX_LATENCY_SECONDS`
+apply specifically to `bench/cuj/harness/` (`cuj.harness.common`).
 Pytest reports every journey independently using its normal test discovery.
 Before running a journey, `test_00_agent_responsive.py` requires the configured
 agent to be discoverable and complete a minimal `READY` interaction through the
@@ -55,7 +55,13 @@ a stock install and why.
 The `harness/` journeys (`test_01` through `test_10`, detailed in
 [`harness/EVAL.md`](harness/EVAL.md)) verify read-only harness
 self-inspection, response quality, and turn latency (`CUJ_MAX_LATENCY_SECONDS`,
-default `180s`):
+default `180s`). As in `obtainability/`, each journey's `ac05-*-remains-read-only`
+criterion requires complete normalized tool-call evidence (`toolEvidenceComplete=True`
+and worker `toolCalls`); when run through the stock admin portal path or a
+Web Console transcript that does not project worker `toolCalls`, `ac01`–`ac04`
+score the live response while `ac05` records `FAILED` (`missing proof:
+portal interaction projection omits toolEvidenceComplete` or `portal task
+projection omits worker toolCalls`):
 
 1. `test_01_identity_and_permission_posture.py` — Backing LLM model and cloud
    provider without leaking internal LiteLLM router aliases (`model-default` or

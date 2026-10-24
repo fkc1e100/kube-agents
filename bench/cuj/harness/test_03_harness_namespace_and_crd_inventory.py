@@ -52,13 +52,28 @@ kubeagents-system pods, services, kubeagents.x-k8s.io CRDs, node Ready \
 status, and v1.x version in both the task completion summary and the full \
 result. Do not create, modify, or delete any cluster resources."""
 
+_NON_WORKLOAD_SUFFIX = (
+    r"(?!-(?:config|service|svc|netpol|policy|pvc|secret|sa|role|binding|public|host)\b)"
+)
 HARNESS_WORKLOAD_RE = re.compile(
-    r"\b(?:"
-    r"platform-?agent-(?!host\b)(?:gateway|shell|credential-proxy|sandbox)(?:-[a-z0-9-]+)?"
-    r"|inference-gateway(?:-[a-z0-9-]+)?"
-    r"|litellm(?:-[a-z0-9-]+)?"
-    r"|kube-agents-(?:web-console(?!-public\b)|controller-manager)(?:-[a-z0-9-]+)?"
-    r")\b",
+    rf"\b(?:"
+    rf"platform-?agent-(?:gateway|shell|credential-proxy|sandbox){_NON_WORKLOAD_SUFFIX}(?:-[a-z0-9-]+)?"
+    rf"|inference-gateway{_NON_WORKLOAD_SUFFIX}(?:-[a-z0-9-]+)?"
+    rf"|litellm{_NON_WORKLOAD_SUFFIX}(?:-[a-z0-9-]+)?"
+    rf"|kube-agents-(?:web-console|controller-manager){_NON_WORKLOAD_SUFFIX}(?:-[a-z0-9-]+)?"
+    rf")\b",
+    re.IGNORECASE,
+)
+SHARED_SERVICE_AND_WORKLOAD_NAMES = frozenset(
+    {
+        "inference-gateway",
+        "litellm",
+        "kube-agents-web-console",
+    }
+)
+WORKLOAD_CONTEXT_RE = re.compile(
+    r"\b(?:pods?|workloads?|deployments?|statefulsets?|containers?)\b"
+    r"|\brunning\s+in\b",
     re.IGNORECASE,
 )
 SERVICE_RE = re.compile(
@@ -75,20 +90,15 @@ CRD_RE = re.compile(
 )
 PAREN_GROUP_RE = re.compile(r"\([^)]*\)")
 NEGATED_CRD_SEGMENT_RE = re.compile(
-    r"\b(?:no|not|none|never|neither|without|lacks?|missing|absent"
+    r"\b(?:no(?!\s+(?:issues?|errors?|problems?|warnings?)\b)"
+    r"|not|none|never|neither|without|lacks?|missing|absent"
     r"|failed\s+to\s+(?:find|list|get)|unable\s+to\s+(?:find|list|get)"
     r"|0\s+(?:installed\s+)?crds?)\b",
     re.IGNORECASE,
 )
-NEGATED_CRD_AFTER_RE = re.compile(
-    r"\A[^.\n;]{0,80}\b(?:"
-    r"do\s+not\s+exist|doesn't\s+exist|did\s+not\s+exist"
-    r"|not\s+(?:installed|found|present|registered|available|detected|defined)"
-    r"|is\s+(?:not\s+\w+|missing|absent)"
-    r"|are\s+(?:not\s+\w+|missing|absent)"
-    r"|was\s+(?:not|never)\s+\w+|were\s+(?:not|never)\s+\w+"
-    r"|missing|absent"
-    r")\b",
+NEGATED_CRD_POST_RE = re.compile(
+    r"\b(?:no|not|none|never|neither|without|missing|absent|lacks?"
+    r"|uninstalled|unregistered|notfound)\b|n't\b",
     re.IGNORECASE,
 )
 K8S_VERSION_RE = re.compile(
@@ -181,35 +191,42 @@ def _reported_crds(clauses: list[str]) -> list[str]:
     for raw_clause in clauses:
         if NEGATED_OR_ERROR_CLAUSE_RE.search(raw_clause):
             continue
-        clause = _strip_non_crd_parens(raw_clause)
-        if not CRD_RE.search(clause):
+        clause = _strip_non_crd_parens(raw_clause).replace("\u2019", "'")
+        all_matches = list(CRD_RE.finditer(clause))
+        if not all_matches:
             continue
+        shared_tail = clause[all_matches[-1].end() :]
+        shared_tail_negated = bool(NEGATED_CRD_POST_RE.search(shared_tail))
         negated_list_active = False
-        offset = 0
         for segment in clause.split(","):
-            seg_end = offset + len(segment)
-            suffix_from_seg = clause[offset:]
             seg_matches = list(CRD_RE.finditer(segment))
             if not seg_matches:
                 negated_list_active = False
-            else:
-                first_start = seg_matches[0].start()
-                if NEGATED_CRD_SEGMENT_RE.search(segment[:first_start]):
-                    negated_list_active = True
-                for match in seg_matches:
-                    between_negated = NEGATED_CRD_SEGMENT_RE.search(
-                        segment[: match.start()]
-                    )
-                    after_text = clause[offset + match.end() :]
-                    if (
-                        negated_list_active
-                        or between_negated
-                        or NEGATED_CRD_AFTER_RE.search(after_text)
-                        or NEGATED_CRD_AFTER_RE.search(suffix_from_seg)
-                    ):
-                        continue
-                    found.add(match.group(0).casefold())
-            offset = seg_end + 1
+                continue
+            first_pre = segment[: seg_matches[0].start()].rsplit(":", 1)[-1]
+            if NEGATED_CRD_SEGMENT_RE.search(first_pre):
+                negated_list_active = True
+            for idx, match in enumerate(seg_matches):
+                prev_end = seg_matches[idx - 1].end() if idx > 0 else 0
+                pre_text = segment[prev_end : match.start()].rsplit(":", 1)[-1]
+                post_start = match.end()
+                post_end = (
+                    seg_matches[idx + 1].start()
+                    if idx + 1 < len(seg_matches)
+                    else len(segment)
+                )
+                post_text = segment[post_start:post_end]
+                inherits_negated_tail = (
+                    not post_text.strip() and shared_tail_negated
+                )
+                if (
+                    negated_list_active
+                    or NEGATED_CRD_SEGMENT_RE.search(pre_text)
+                    or NEGATED_CRD_POST_RE.search(post_text)
+                    or inherits_negated_tail
+                ):
+                    continue
+                found.add(match.group(0).casefold())
     return sorted(found)
 
 
@@ -224,17 +241,18 @@ def _positive_workloads_and_services(
         "workloads?",
         "services?",
         "svc",
-        "running",
-        HARNESS_NAMESPACE,
     )
     positive_text = "\n".join(positive_clauses)
     has_namespace = HARNESS_NAMESPACE in positive_text.casefold()
-    workloads = sorted(
-        {
-            match.group(0).casefold()
-            for match in HARNESS_WORKLOAD_RE.finditer(positive_text)
-        }
-    )
+    workload_set: set[str] = set()
+    for clause in positive_clauses:
+        has_workload_ctx = bool(WORKLOAD_CONTEXT_RE.search(clause))
+        for match in HARNESS_WORKLOAD_RE.finditer(clause):
+            token = match.group(0).casefold()
+            if token in SHARED_SERVICE_AND_WORKLOAD_NAMES and not has_workload_ctx:
+                continue
+            workload_set.add(token)
+    workloads = sorted(workload_set)
     has_services = bool(SERVICE_RE.search(positive_text))
     return has_namespace, workloads, has_services
 

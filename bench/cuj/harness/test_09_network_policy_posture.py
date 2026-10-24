@@ -46,17 +46,32 @@ both the task completion summary and the full result. Do not create, modify, \
 or delete any cluster resources."""
 
 NETPOL_NAME_RE = re.compile(
-    r"\b(?:platform-agent-(?:shell|credential-proxy|gateway|sandbox)[a-z0-9-]*"
-    r"|litellm[a-z0-9-]*|kube-agents-[a-z0-9-]+)\b",
+    r"\b(?:"
+    r"platform-agent-(?:shell|credential-proxy|gateway|sandbox)"
+    r"(?:-(?:netpol|network-policy|policy|isolation|egress|ingress))?(?!-[a-z0-9])"
+    r"|litellm-(?:netpol|network-policy|policy|isolation|egress|ingress)(?!-[a-z0-9])"
+    r"|kube-agents-[a-z0-9-]+-(?:netpol|network-policy|policy)"
+    r")\b",
+    re.IGNORECASE,
+)
+UNRESTRICTED_NETPOL_CLAUSE_RE = re.compile(
+    r"\b(?:unrestricted|not\s+isolated|no\s+(?:network\s+)?isolation)\b",
     re.IGNORECASE,
 )
 POLICY_DIRECTION_RE = re.compile(
     r"\b(?:ingress|egress)\b",
     re.IGNORECASE,
 )
+PROMPT_PHRASE_SCRUB_RE = re.compile(
+    r"(?<!\bsandbox\s)(?<!\btargeted\s)\bpod\s+selectors?\b"
+    r"|\b(?:network\s+)?isolation\s+posture\b",
+    re.IGNORECASE,
+)
 ISOLATION_SUMMARY_RE = re.compile(
-    r"\b(?:selectors?|podselector|matchlabels|traffic|isolat\w*|allow\w*"
-    r"|restrict\w*|deny|denies|blocks?|egress\s+to|ingress\s+from)\b"
+    r"\b(?:podselector|matchlabels|traffic|allow\w*|restrict\w*"
+    r"|deny|denies|denied|blocks?|blocked|enforc\w*|selects?|targets?"
+    r"|sandbox\s+pod\s+selectors?|egress\s+to|ingress\s+from"
+    r"|isolat\w*\s+(?:traffic|pods?|egress|ingress|workloads?|sandboxes?))\b"
     r"|\bapp(?:\.kubernetes\.io/name)?\s*=",
     re.IGNORECASE,
 )
@@ -138,17 +153,17 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = positive_inventory_clauses(
-        answer,
-        raw_input,
-        "networkpolic(?:y|ies)",
-        "netpols?",
-        "polic(?:y|ies)",
-        "ingress",
-        "egress",
-        "selectors?",
-        "isolat\\w*",
-    )
+    positive_clauses = [
+        clause
+        for clause in positive_inventory_clauses(
+            answer,
+            raw_input,
+            "networkpolic(?:y|ies)",
+            "netpols?",
+            "polic(?:y|ies)",
+        )
+        if not UNRESTRICTED_NETPOL_CLAUSE_RE.search(clause)
+    ]
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
@@ -164,7 +179,9 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
             for m in POLICY_DIRECTION_RE.finditer(positive_text)
         }
     )
-    summary_text = NETPOL_NAME_RE.sub(" ", positive_text)
+    summary_text = PROMPT_PHRASE_SCRUB_RE.sub(
+        " ", NETPOL_NAME_RE.sub(" ", positive_text)
+    )
     has_summary = bool(ISOLATION_SUMMARY_RE.search(summary_text)) and not refusal
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)

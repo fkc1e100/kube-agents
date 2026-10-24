@@ -80,9 +80,12 @@ DELEGATION_RE = re.compile(
 )
 NEGATED_POSTURE_CLAUSE_RE = re.compile(
     r"\b(?:do\s+not|don't|does\s+not|doesn't|did\s+not|didn't|is\s+not|isn't"
-    r"|are\s+not|aren't|am\s+not|not|never|neither|without)\b[^.\n;]{0,40}"
+    r"|are\s+not|aren't|am\s+not|not|never|neither|without)\s+"
+    r"(?:(?:operate|act|run|work|function|serve|use|delegate)\s+"
+    r"(?:in\s+|as\s+|via\s+|to\s+)?)?"
+    r"(?:(?:a|an|the)\s+)?"
     r"\b(?:read[- ]only|plan[- ]and[- ]delegate|plan[- ]only|non[- ]mutating"
-    r"|a\s+coordinator|coordinator|planning\s+agent|orchestrat\w*"
+    r"|coordinator|planning\s+agent|orchestrat\w*"
     r"|delegat\w*|kanban(?:_create)?|list_agents|specialist\s+agents?)\b",
     re.IGNORECASE,
 )
@@ -100,6 +103,8 @@ NO_DIRECT_CLI_RE = re.compile(
     r"\b(?:(?:no|without)\s+direct\s+(?:kubectl|gcloud|cli|cluster|cloud"
     r"|infrastructure|terminal|shell|write|mutation|access|tools|credentials)"
     r"|cannot\s+(?:mutate|modify|run\s+kubectl)"
+    r"|do\s+not\s+(?:run\s+kubectl|have\s+direct\s+(?:kubectl|gcloud|cli|access))"
+    r"|don't\s+(?:run\s+kubectl|have\s+direct\s+(?:kubectl|gcloud|cli|access))"
     r"|no\s+infrastructure\s+tools"
     r"|no\s+write\s+(?:access|permissions?|tools?|capabilities)"
     r"|no\s+(?:local\s+)?(?:terminal|kubectl|gcloud|credentials)"
@@ -108,7 +113,8 @@ NO_DIRECT_CLI_RE = re.compile(
 )
 DIRECT_MUTATION_CLAIM_RE = re.compile(
     r"(?<!not\s)(?<!cannot\s)(?<!never\s)\b(?:"
-    r"(?:can|able\s+to)\s+(?:also\s+|directly\s+|freely\s+)*"
+    r"(?:i|we|the\s+front[- ]door(?:\s+agent|\s+coordinator)?|kage)\s+"
+    r"(?:(?:am|are|is)\s+)?(?:can|able\s+to)\s+(?:also\s+|directly\s+|freely\s+)*"
     r"(?:(?:run|execute|invoke|perform|issue)\s+)?(?:kubectl\s+)?"
     r"(?:apply|delete|patch|create(?!\s+(?:a\s+)?(?:kanban|tasks?|cards?|plans?|delegation)\b)"
     r"|exec|scale|edit|replace|mutate|modify)\b"
@@ -212,7 +218,9 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     answer = answer_text(interaction)
     clauses = non_echo_clauses(answer, raw_input)
     non_echo_text = "\n".join(clauses)
-    unquoted_non_echo = re.sub(r"[`'\"]", "", non_echo_text)
+    unquoted_non_echo = re.sub(r'[`"]+', "", non_echo_text).replace(
+        "\u2019", "'"
+    )
     positive_posture_clauses = [
         clause
         for clause in clauses

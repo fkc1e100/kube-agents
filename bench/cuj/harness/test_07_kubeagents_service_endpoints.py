@@ -47,9 +47,16 @@ resources."""
 
 HARNESS_SERVICE_NAME_RE = re.compile(
     r"\b(?:platform-agent(?:-credential-proxy|-shell|-gateway)?(?!-[a-z0-9])"
-    r"|(?<!the\s)litellm(?!\s+(?:backend|proxy|model|alias|config\w*)\b)"
-    r"|inference-gateway(?!-[a-z0-9])"
-    r"|kube-agents-(?:web-console(?:-public)?|controller-manager-[a-z0-9-]+))\b",
+    r"|(?<!the\s)litellm(?!-[a-z0-9])(?!\s+(?:backend|proxy|model|alias|config\w*|pods?)\b)"
+    r"|inference-gateway(?!-[a-z0-9])(?!\s+pods?\b)"
+    r"|kube-agents-(?:web-console(?:-public)?(?!-[a-z0-9])"
+    r"|controller-manager-(?:metrics-)?service(?!-[a-z0-9])))\b",
+    re.IGNORECASE,
+)
+POD_ONLY_CLAUSE_RE = re.compile(r"\bpods?\b", re.IGNORECASE)
+SERVICE_CLAUSE_CONTEXT_RE = re.compile(
+    r"\b(?:services?|svc|clusterip|loadbalancer|nodeport|headless|ports?|endpoints?)\b"
+    r"|\b\d+/(?:tcp|udp)\b",
     re.IGNORECASE,
 )
 SERVICE_TYPE_RE = re.compile(
@@ -145,9 +152,17 @@ MILESTONES = (
 
 def _reported_ports(clauses: list[str]) -> list[str]:
     found: set[str] = set()
+    header_port_context = False
     for clause in clauses:
         scrubbed = IPV4_OR_NON_PORT_NUMBER_RE.sub(" ", clause)
-        if not PORT_CONTEXT_RE.search(scrubbed):
+        has_local_port_ctx = bool(PORT_CONTEXT_RE.search(scrubbed))
+        if has_local_port_ctx:
+            header_port_context = True
+        has_service_row_ctx = bool(
+            HARNESS_SERVICE_NAME_RE.search(scrubbed)
+            and (SERVICE_TYPE_RE.search(scrubbed) or header_port_context)
+        )
+        if not (has_local_port_ctx or has_service_row_ctx):
             continue
         for match in SERVICE_PORT_RE.finditer(scrubbed):
             found.add(match.group(0))
@@ -163,22 +178,20 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = positive_inventory_clauses(
-        answer,
-        raw_input,
-        "services?",
-        "svc",
-        "ports?",
-        "endpoints?",
-        "clusterip",
-        "loadbalancer",
-        "nodeport",
-        "headless",
-        "platform-agent",
-        "litellm",
-        "inference-gateway",
-        "kube-agents-web-console",
-    )
+    positive_clauses = [
+        clause
+        for clause in positive_inventory_clauses(
+            answer,
+            raw_input,
+            "services?",
+            "svc",
+            "endpoints?",
+        )
+        if not (
+            POD_ONLY_CLAUSE_RE.search(clause)
+            and not SERVICE_CLAUSE_CONTEXT_RE.search(clause)
+        )
+    ]
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
