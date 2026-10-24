@@ -1347,31 +1347,47 @@ func pageJS(t *testing.T, names ...string) string {
 	var out strings.Builder
 	for _, name := range names {
 		found := false
-		for _, head := range []string{"\n    function " + name + "(", "\n    async function " + name + "("} {
-			start := strings.Index(page, head)
-			if start < 0 {
-				continue
+		for _, indent := range []string{"    ", "      "} {
+			for _, head := range []string{"\n" + indent + "function " + name + "(", "\n" + indent + "async function " + name + "("} {
+				start := strings.Index(page, head)
+				if start < 0 {
+					continue
+				}
+				closeTok := "\n" + indent + "}\n"
+				end := strings.Index(page[start+1:], closeTok)
+				if end < 0 {
+					t.Fatalf("function %s has no closing brace", name)
+				}
+				out.WriteString(page[start+1 : start+1+end+len(closeTok)])
+				found = true
+				break
 			}
-			end := strings.Index(page[start+1:], "\n    }\n")
-			if end < 0 {
-				t.Fatalf("function %s has no closing brace", name)
+			if found {
+				break
 			}
-			out.WriteString(page[start+1 : start+1+end+len("\n    }\n")])
-			found = true
-			break
 		}
 		if found {
 			continue
 		}
-		for _, head := range []string{"\n    const " + name + " = ", "\n    let " + name + " = "} {
-			start := strings.Index(page, head)
-			if start < 0 {
-				continue
+		for _, indent := range []string{"    ", "      "} {
+			for _, head := range []string{"\n" + indent + "const " + name + " =", "\n" + indent + "let " + name + " ="} {
+				start := strings.Index(page, head)
+				if start < 0 {
+					continue
+				}
+				end := strings.Index(page[start+1:], ";\n")
+				if end < 0 {
+					end = strings.Index(page[start+1:], "\n")
+					out.WriteString(page[start+1:start+1+end] + "\n")
+				} else {
+					out.WriteString(page[start+1 : start+1+end+len(";\n")])
+				}
+				found = true
+				break
 			}
-			end := strings.Index(page[start+1:], "\n")
-			out.WriteString(page[start+1:start+1+end] + "\n")
-			found = true
-			break
+			if found {
+				break
+			}
 		}
 		if !found {
 			t.Fatalf("index.html has no top-level %s", name)
@@ -1470,7 +1486,7 @@ console.log(JSON.stringify([
 	}
 	// Switching the kind keeps a body the operator typed:
 	// renderFeedbackPreview replaces only a template body.
-	handler := pageSnippet(t, `$("feedback-kind-bar").addEventListener("click"`, "\n    });\n")
+	handler := pageSnippet(t, `$("feedback-kind-bar").addEventListener("click"`, "\n      });\n")
 	if strings.Contains(handler, `.value = ""`) || strings.Contains(handler, `template = "1"`) {
 		t.Errorf("the feedback kind bar resets the Details body:\n%s", handler)
 	}
@@ -1609,12 +1625,12 @@ func TestPageUpgradeCommandsUseDocumentedUpgradeScriptAndBundle(t *testing.T) {
 // Entry points that send into or write to the centre stream must make it
 // visible and must not hand a request to a thread that has a turn running.
 func TestPageEntryPointsReachAVisibleIdleThread(t *testing.T) {
-	ask := pageSnippet(t, `if (ask) ask.addEventListener("click"`, "\n      });\n")
+	ask := pageSnippet(t, `ask.addEventListener("click"`, "\n          });\n")
 	if !strings.Contains(ask, `if (view !== "thread" || inflight[activeId]) newChat();`) {
 		t.Errorf("Ask the agent can send into a busy thread:\n%s", ask)
 	}
 	palette := pageSnippet(t, `sub: c.local ? "Action" : "Prompt",`, "handleSlashCommand(c.token, \"centre\");")
-	for _, want := range []string{"else newChat();", `PALETTE_STREAM_COMMANDS.has(c.local) && view !== "thread"`} {
+	for _, want := range []string{"else newChat();", "PALETTE_STREAM_COMMANDS.has(c.local)", `view !== "thread"`} {
 		if !strings.Contains(palette, want) {
 			t.Errorf("palette command run is missing %q:\n%s", want, palette)
 		}
@@ -1652,7 +1668,7 @@ func TestPageUsageEmailDoesNotAskForAMissingJob(t *testing.T) {
 // Every catalog entry's SKILL.md link and "Lives at" line must point at a
 // file in the tree.
 func TestSkillCatalogPointsAtSkillsInTheTree(t *testing.T) {
-	entry := regexp.MustCompile(`\{ name: "([a-z0-9-]+)", cat: "[a-z]+", (agent: "cluster", )?desc:`)
+	entry := regexp.MustCompile(`\{\s*name:\s*"([a-z0-9-]+)",\s*cat:\s*"[a-z]+",\s*(agent:\s*"cluster",\s*)?desc:`)
 	matches := entry.FindAllStringSubmatch(pageSource(t), -1)
 	if len(matches) < 40 {
 		t.Fatalf("found %d SKILL_CATALOG entries; the pattern no longer matches the catalog", len(matches))

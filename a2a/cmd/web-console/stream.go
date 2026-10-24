@@ -363,8 +363,6 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 					}
 					out.send(eventStep, st)
 				}
-			} else if overflowTools[ev.ToolName] > 0 {
-				overflowTools[ev.ToolName]--
 			} else if queue := openTools[ev.ToolName]; len(queue) > 0 {
 				st := queue[0]
 				openTools[ev.ToolName] = queue[1:]
@@ -377,6 +375,8 @@ func relayTurnStream(ctx context.Context, body io.Reader, out *sseWriter) (strin
 					st.Title = "Finished " + tool
 				}
 				out.send(eventStep, st)
+			} else if overflowTools[ev.ToolName] > 0 {
+				overflowTools[ev.ToolName]--
 			}
 		case hermesAssistantDelta:
 			writing = true

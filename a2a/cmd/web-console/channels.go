@@ -20,11 +20,9 @@ limitations under the License.
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"net/http"
-	"slices"
 )
 
 const (
@@ -41,20 +39,9 @@ var channelKinds = map[string]string{
 	"scheduled": kindScheduled,
 }
 
-func sessionActivityTime(s recentSession) float64 {
-	if s.LastActive != nil {
-		return *s.LastActive
-	}
-	if s.StartedAt != nil {
-		return *s.StartedAt
-	}
-	return 0
-}
-
 // handleChannelPosts lists a channel's newest posts, newest activity first.
-// It reads only sessions the gateway API or Hermes' cron scheduler created,
-// so a chat platform's session never reaches a channel even when its title
-// looks like one.
+// It reads only sessions the gateway API created, so a chat platform's
+// session never reaches a channel even when its title looks like one.
 func (s *server) handleChannelPosts(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	kind, ok := channelKinds[name]
@@ -68,19 +55,6 @@ func (s *server) handleChannelPosts(w http.ResponseWriter, r *http.Request) {
 	if failure != nil {
 		writeError(w, failure.status, failure.code, failure.message)
 		return
-	}
-	if kind == kindScheduled {
-		cronListed, cronFailure := s.listSessions(ctx, fmt.Sprintf("/api/sessions?source=%s&limit=%d", sourceCron, channelListLimit))
-		if cronFailure != nil {
-			writeError(w, cronFailure.status, cronFailure.code, cronFailure.message)
-			return
-		}
-		if len(cronListed) > 0 {
-			listed = append(listed, cronListed...)
-			slices.SortStableFunc(listed, func(a, b recentSession) int {
-				return cmp.Compare(sessionActivityTime(b), sessionActivityTime(a))
-			})
-		}
 	}
 	posts := make([]recentSession, 0, channelPostsLimit)
 	for _, sess := range listed {

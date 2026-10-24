@@ -483,12 +483,16 @@ func TestChatStreamStepPairingAndCap(t *testing.T) {
 	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_describe\", \"tool_call_id\": \"c2\", \"preview\": \"pod/b\"}\n\n")
 	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_describe\", \"tool_call_id\": \"c2\", \"preview\": \"secret-output\"}\n\n")
 	b.WriteString("event: tool.failed\ndata: {\"tool_name\": \"kubectl_describe\", \"call_id\": \"c1\", \"error\": \"boom\"}\n\n")
-	// Push past maxStepsPerTurn; a tool started after the cap is not emitted on start or completion.
+	// Start a keyless tool before the cap, then push past maxStepsPerTurn and
+	// start a second keyless call of the same tool that overflows the cap.
+	// The first completion must close the pre-cap step in FIFO order.
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_logs\", \"preview\": \"pod/pre\"}\n\n")
 	for i := 0; i < maxStepsPerTurn+5; i++ {
 		b.WriteString("event: tool.progress\ndata: {\"tool_name\": \"_thinking\", \"delta\": \"step\"}\n\n")
 	}
-	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_logs\", \"call_id\": \"over1\", \"preview\": \"pod/c\"}\n\n")
-	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_logs\", \"call_id\": \"over1\", \"preview\": \"secret-output\"}\n\n")
+	b.WriteString("event: tool.started\ndata: {\"tool_name\": \"kubectl_logs\", \"preview\": \"pod/over\"}\n\n")
+	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_logs\", \"preview\": \"secret-output\"}\n\n")
+	b.WriteString("event: tool.completed\ndata: {\"tool_name\": \"kubectl_logs\", \"preview\": \"secret-output\"}\n\n")
 	b.WriteString("event: assistant.completed\ndata: {\"content\": \"done\"}\n\nevent: done\ndata: {}\n\n")
 	fake.mu.Lock()
 	fake.stream = b.String()
@@ -521,6 +525,8 @@ func TestChatStreamStepPairingAndCap(t *testing.T) {
 		"kubectl_describe#2:running:pod/b",
 		"kubectl_describe#2:done:pod/b",
 		"kubectl_describe#1:failed:pod/a",
+		"kubectl_logs#1:running:pod/pre",
+		"kubectl_logs#1:done:pod/pre",
 	}
 	if strings.Join(updates, "|") != strings.Join(wantUpdates, "|") {
 		t.Errorf("tool step updates = %q, want %q", updates, wantUpdates)

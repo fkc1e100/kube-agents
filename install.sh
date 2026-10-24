@@ -4645,26 +4645,6 @@ check_existing_cluster_node_pools_preflight() {
   fi
 }
 
-is_existing_cluster_network_policy_satisfied() {
-  local project_id="$1" cluster_name="$2" region="$3"
-  [ "${TFVARS_CREATE_CLUSTER:-true}" = "false" ] || return 0
-
-  local cluster_info
-  cluster_info=$(trap - ERR; gcloud container clusters describe "$cluster_name" \
-    --location="$region" --project="$project_id" \
-    --format="csv[no-heading](status,networkConfig.datapathProvider,networkPolicy.enabled)" 2>/dev/null || echo "")
-  local status="" dp_provider="" legacy_np=""
-  if [ -n "$cluster_info" ]; then
-    IFS=',' read -r status dp_provider legacy_np <<< "$cluster_info" || true
-  fi
-  if [ -z "$status" ]; then
-    return 2
-  fi
-  [ "$dp_provider" != "ADVANCED_DATAPATH" ] || return 0
-  [ "$legacy_np" = "True" ] || [ "$legacy_np" = "true" ] || return 1
-  return 0
-}
-
 check_existing_cluster_network_policy_preflight() {
   local project_id="$1" cluster_name="$2" region="$3"
   # A cluster this run creates comes up on Dataplane V2.

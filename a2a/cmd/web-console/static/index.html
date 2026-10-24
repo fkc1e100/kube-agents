@@ -4017,10 +4017,15 @@
           mark: typeof t.mark === "number" ? t.mark : 0,
           markKnown: !!t.markKnown,
           updated: typeof t.updated === "number" ? t.updated : nowSeconds(),
+          busyUntil: typeof t.busyUntil === "number" ? t.busyUntil : 0,
           unread: !!t.unread,
           unreadFrom: typeof t.unreadFrom === "number" ? t.unreadFrom : 0,
           started: !!t.started,
         };
+      }
+
+      function isThreadBusy(t) {
+        return !!(t && (inflight[t.id] || (t.busyUntil || 0) > nowSeconds()));
       }
 
       function parseThreads(raw) {
@@ -4089,6 +4094,9 @@
           if (t.title) mine.title = t.title;
           if (t.updated > mine.updated) mine.updated = t.updated;
           if (t.started) mine.started = true;
+          mine.busyUntil = inflight[mine.id]
+            ? mine.busyUntil
+            : t.busyUntil || 0;
           mine.unread = onScreen(mine.id) ? false : t.unread;
           if (mine.unread && !mine.unreadFrom) mine.unreadFrom = t.unreadFrom;
           return mine;
@@ -4141,8 +4149,9 @@
 
       // Removes a thread from this list only. The agent's session stays.
       function removeThread(id) {
-        if (inflight[id]) return false;
-        threads = threads.filter((t) => t.id !== id);
+        const t = findThread(id);
+        if (inflight[id] || isThreadBusy(t)) return false;
+        threads = threads.filter((item) => item.id !== id);
         delete notices[id];
         if (activeId === id) activeId = threads[0] ? threads[0].id : "";
         saveThreads();
@@ -4324,6 +4333,28 @@
           showUpdates(t, messages.slice(replyAt + 1));
         }
         advanceMark(t, data.latest_id);
+      }
+
+      // When a turn fails or the stream breaks after the user message was sent,
+      // Hermes may already have recorded the user row in state.db. Advance the
+      // mark past that user row (while showing any earlier updates before it)
+      // so the next poll does not display the user's own prompt a second time;
+      // leave any later rows unmarked for the next poll once the turn finishes.
+      async function reconcileTurnErrorMark(t, typed) {
+        const data = await fetchNewMessages(t);
+        if (!data) return;
+        const messages = data.messages || [];
+        const same = (a, b) => (a || "").trim() === (b || "").trim();
+        let turnAt = -1;
+        messages.forEach((m, i) => {
+          if (turnAt >= 0 || m.id <= t.mark) return;
+          if (m.role === "user" && same(m.content, typed)) turnAt = i;
+        });
+        if (turnAt < 0) return;
+        if (t.markKnown) {
+          showUpdates(t, messages.slice(0, turnAt));
+        }
+        advanceMark(t, messages[turnAt].id);
       }
 
       // Puts a thread on screen from its transcript: clears its dot, renders
@@ -5220,7 +5251,7 @@
             const classes = ["rail-item"];
             if (onScreen(t.id)) classes.push("active");
             if (t.unread) classes.push("unread");
-            const busy = !!inflight[t.id];
+            const busy = isThreadBusy(t);
             const dot = busy
               ? `<span class="thread-dot busy" title="A turn is running"></span>`
               : t.unread
@@ -6010,6 +6041,7 @@
         if (!t.title) t.title = threadTitle(text);
         t.started = true;
         t.updated = nowSeconds();
+        t.busyUntil = nowSeconds() + 900;
         const turn = startInflight(t.id, text);
         saveThreads();
         appendMessage("user", text);
@@ -6025,6 +6057,8 @@
               }
             : null;
         delete inflight[t.id];
+        t.busyUntil = 0;
+        saveThreads();
         if (pending.centre && pending.centre.id === t.id)
           removePending("centre");
         if (findThread(t.id)) {
@@ -6038,13 +6072,16 @@
               meta,
             );
             await settleAfterReply(t, text, outcome.reply);
-          } else if (onScreen(t.id)) {
-            appendMessage("agent", outcome.error, "error");
           } else {
-            (notices[t.id] = notices[t.id] || []).push(outcome.error);
-            if (!t.unread && t.markKnown) t.unreadFrom = t.mark;
-            t.unread = true;
-            saveThreads();
+            if (onScreen(t.id)) {
+              appendMessage("agent", outcome.error, "error");
+            } else {
+              (notices[t.id] = notices[t.id] || []).push(outcome.error);
+              if (!t.unread && t.markKnown) t.unreadFrom = t.mark;
+              t.unread = true;
+              saveThreads();
+            }
+            await reconcileTurnErrorMark(t, text);
           }
         }
         threadsChanged();

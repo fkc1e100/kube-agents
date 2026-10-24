@@ -57,9 +57,6 @@ const (
 	// gateway API: the event watcher's triage sessions, scheduled checks, and
 	// this console's. Slack and Google Chat sessions carry their own source.
 	sourceAPIServer = "api_server"
-	// sourceCron is the Hermes source of a session created by Hermes' own
-	// in-process cron scheduler (cron_<job_id>_<timestamp>).
-	sourceCron = "cron"
 
 	// titlePrefix is what session_kv_server.py's _create_gateway_session puts
 	// before the session ID in the title of every session it opens: the
@@ -101,16 +98,13 @@ var (
 	// and refuses anything that could change the upstream path.
 	transcriptIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
-	// The session IDs session_kv_server.py and Hermes mint. create_session
-	// makes an event triage ID from eight hex digits of a UUID. Scheduled
-	// checks either come from the Hermes cron scheduler (source="cron",
-	// cron_<job_id>_<YYYYMMDD>_<HHMMSS>) or a gateway scheduled session
-	// (source="api_server", cron-<slug>-<YYYYMMDD>). Under spec.mode: next,
+	// The session IDs session_kv_server.py mints. create_session makes an
+	// event triage ID from eight hex digits of a UUID; _session_id makes a
+	// scheduled ID from cron-<slug>-<YYYYMMDD>. Under spec.mode: next,
 	// hermes-bridge creates chat sessions over the gateway API with IDs
 	// prefixed a2a-ctx-.
 	eventTriageIDPattern      = regexp.MustCompile(`^k8s-evt-[0-9a-f]{8}$`)
 	scheduledIDPattern        = regexp.MustCompile(`^cron-[a-z0-9_-]{1,80}-[0-9]{8}$`)
-	hermesCronIDPattern       = regexp.MustCompile(`^cron_[A-Za-z0-9_.-]{1,100}$`)
 	a2aBridgeSessionIDPattern = regexp.MustCompile(`^a2a-ctx-[A-Za-z0-9_.:-]+$`)
 
 	// cardTitlePattern finds the card title an event triage prompt spells
@@ -147,10 +141,6 @@ func classifySession(id, source, title string) string {
 	case sessionIDPattern.MatchString(id):
 		return kindConsole
 	case source == "":
-		return kindOther
-	case source == sourceCron && hermesCronIDPattern.MatchString(id):
-		return kindScheduled
-	case source == sourceCron:
 		return kindOther
 	case source != sourceAPIServer:
 		return kindChat
