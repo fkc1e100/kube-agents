@@ -727,7 +727,7 @@ const match = html.match(/<script>([\s\S]*?)<\/script>/);
 assert.ok(match, "static/index.html has no <script> block");
 const scriptSource = match[1];
 
-function makeContext(fetchImpl, initialStorage = {}) {
+function makeContext(fetchImpl, initialStorage = {}, extraGlobals = {}) {
   const store = new Map(Object.entries(initialStorage));
   const appended = [];
   const elements = new Map();
@@ -780,6 +780,7 @@ function makeContext(fetchImpl, initialStorage = {}) {
     appended,
     store,
     elements,
+    ...extraGlobals,
   };
   vm.createContext(ctx);
   vm.runInContext(scriptSource + "\n;appendMessage = (role, text, tag) => { appended.push({role, text, tag}); return { remove() {} }; };", ctx);
@@ -1205,9 +1206,58 @@ function makeContext(fetchImpl, initialStorage = {}) {
     tripleEmphasis,
     "<p><em><strong>critical alert</strong></em></p>"
   );
+  const asymmetricTriple = vm.runInContext(
+    "renderMarkdown('***a** b*')",
+    ctx
+  );
+  assert.equal(
+    asymmetricTriple,
+    "<p><em><strong>a</strong> b</em></p>"
+  );
+  const nestedEmphasis = vm.runInContext(
+    "renderMarkdown('**a *b* c**')",
+    ctx
+  );
+  assert.equal(
+    nestedEmphasis,
+    "<p><strong>a <em>b</em> c</strong></p>"
+  );
+  const tabIndentedFence = vm.runInContext(
+    "renderMarkdown('\\t\\x60\\x60\\x60yaml\\n\\tkind: Pod\\n\\t\\x60\\x60\\x60')",
+    ctx
+  );
+  assert.equal(
+    tabIndentedFence,
+    "<pre><code>kind: Pod</code></pre>"
+  );
+  const escapedBackticks = vm.runInContext(
+    "renderMarkdown('\\\\\\x60not code\\\\\\x60 and \\\\*not italic\\\\*')",
+    ctx
+  );
+  assert.equal(
+    escapedBackticks,
+    "<p>\x60not code\x60 and *not italic*</p>"
+  );
   const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
   assert.ok(inline.includes("Use <code>yaml on its own line, not </code>inline"), "mid-line backticks must not drop surrounding prose: " + inline);
   assert.ok(!inline.includes("<pre>"), "mid-line backticks must not open a <pre> block: " + inline);
+}
+
+// Case 3b: a duplicated tab whose sessionStorage was cloned from another tab
+// (TAB_KEY does not match window.name) clears the cloned session and mark.
+{
+  const dupCtx = makeContext(
+    async () => ({ ok: true, status: 200, text: async () => "{}", json: async () => ({}) }),
+    {
+      "kube-agents-web-console-tab": "kube-agents-tab-0011223344556677",
+      "kube-agents-web-console-session": "web-console-" + "c".repeat(32),
+      "kube-agents-web-console-mark": "42",
+    },
+    { window: { name: "" } },
+  );
+  assert.equal(dupCtx.store.get("kube-agents-web-console-session"), undefined, "duplicate tab must clear cloned session");
+  assert.equal(dupCtx.store.get("kube-agents-web-console-mark"), undefined, "duplicate tab must clear cloned mark");
+  assert.ok(dupCtx.window.name.startsWith("kube-agents-tab-"), "duplicate tab must assign its own window.name");
 }
 
 // Case 4: first turn on a fresh tab mints the session and sets the mark to 0

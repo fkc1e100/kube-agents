@@ -171,7 +171,8 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
         """Ensures piped curl | bash invocations execute main and do not exit early."""
         install_script_content = _INSTALL_SH.read_text()
         test_env = get_isolated_test_env(
-            overrides={"KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock")}
+            overrides={"KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock")},
+            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         proc = subprocess.run(
             ["bash", "-s", "--", "--help"],
@@ -681,6 +682,7 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             env=get_isolated_test_env(
                 overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)},
                 bin_dir=str(bin_dir),
+                absent=_SEEDED_INSTALLER_ENV_KEYS,
             ),
             cwd=str(outside),
         )
@@ -1124,6 +1126,7 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                     "KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock"),
                     "PATH": str(bin_dir),
                 },
+                absent=_SEEDED_INSTALLER_ENV_KEYS,
             )
             proc = subprocess.run(
                 [
@@ -2856,7 +2859,8 @@ class NonInteractiveRerunInheritanceTest(unittest.TestCase):
                     "KUBE_AGENTS_INSTALL_ENV": str(env_file),
                     "MEMORY": "",
                     "MEMORY_PROVIDER": "",
-                }
+                },
+                absent=_SEEDED_INSTALLER_ENV_KEYS,
             )
             return subprocess.run(
                 ["bash", "-c",

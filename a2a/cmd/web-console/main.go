@@ -82,18 +82,20 @@ const (
 	// turnTimeout matches the in-tree callers of the same endpoint
 	// (session_kv_server.py's _start_agent_turn): a diagnostic turn that
 	// calls tools routinely runs for minutes.
-	turnTimeout = 300 * time.Second
-	// serverWriteTimeout must outlast a turn, or the server cuts the response
-	// off while Hermes is still answering.
-	serverWriteTimeout   = turnTimeout + 30*time.Second
-	serverReadTimeout    = 30 * time.Second
-	serverHeaderTimeout  = 10 * time.Second
-	serverIdleTimeout    = 120 * time.Second
-	shutdownTimeout      = 5 * time.Second
-	probeTimeout         = 3 * time.Second
+	turnTimeout          = 300 * time.Second
 	sessionCreateTimeout = 15 * time.Second
 	sessionListTimeout   = 10 * time.Second
 	messagesTimeout      = 10 * time.Second
+	// serverWriteTimeout must outlast the full handleChat sequence (session
+	// create, baseline messages read, turn, and post-turn messages read) plus
+	// response writing headroom, or http.Server cuts the response off while
+	// Hermes or the post-turn read is still running.
+	serverWriteTimeout  = turnTimeout + sessionCreateTimeout + 2*messagesTimeout + 30*time.Second
+	serverReadTimeout   = 30 * time.Second
+	serverHeaderTimeout = 10 * time.Second
+	serverIdleTimeout   = 120 * time.Second
+	shutdownTimeout     = 5 * time.Second
+	probeTimeout        = 3 * time.Second
 
 	// maxRequestBodyBytes bounds a chat request. A turn is a typed message,
 	// and the container's memory limit is 128Mi.
@@ -490,7 +492,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.claim(sid) {
-		writeError(w, http.StatusConflict, "turn_in_progress", "This session already has a turn running. Wait for its reply.")
+		writeError(w, http.StatusConflict, "turn_in_progress", "This session already has a turn running (for instance in a duplicated or reopened tab). Wait for its reply or open a new tab.")
 		return
 	}
 	defer s.release(sid)

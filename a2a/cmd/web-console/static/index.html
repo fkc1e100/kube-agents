@@ -317,12 +317,6 @@
         margin-bottom: 0;
       }
 
-      .message-bubble ul,
-      .message-bubble ol {
-        margin-left: 20px;
-        margin-bottom: 8px;
-      }
-
       .chat-input-bar {
         padding: 16px 24px;
         border-top: 1px solid var(--border-color);
@@ -561,7 +555,8 @@
               <div class="message-bubble">
                 <p>
                   Messages you send here go to the agent as turns in a session
-                  of their own. Each browser tab gets a new session.
+                  of their own. Each browser tab gets a new session (reloading a
+                  tab keeps its session; duplicating a tab mints a fresh one).
                 </p>
                 <p>
                   A turn that calls tools can take a few minutes. The agent
@@ -604,13 +599,7 @@
       // ID this tab has accounted for, so a reload does not repeat them.
       const MESSAGES_POLL_MS = 10000;
       const MARK_KEY = "kube-agents-web-console-mark";
-
-      let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
-      let turnInFlight = false;
-      let turnSeq = 0;
-      let pollInFlight = false;
-      let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
-      let unsettledTurns = [];
+      const TAB_KEY = "kube-agents-web-console-tab";
 
       function newSessionId() {
         const bytes = new Uint8Array(16);
@@ -619,6 +608,68 @@
           "web-console-" +
           Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")
         );
+      }
+
+      // Browsers copy sessionStorage into a duplicated tab while leaving the
+      // new browsing context's window.name empty. Detecting a mismatch with
+      // TAB_KEY (and announcing active sessions on BroadcastChannel) clears
+      // the cloned session so the duplicate tab gets its own session instead
+      // of sharing turns and 409 conflicts with the original tab.
+      const storedTab = sessionStorage.getItem(TAB_KEY);
+      if (
+        storedTab &&
+        typeof window !== "undefined" &&
+        window.name !== storedTab
+      ) {
+        sessionStorage.removeItem(SESSION_KEY);
+        sessionStorage.removeItem(MARK_KEY);
+      }
+      if (typeof window !== "undefined") {
+        if (!window.name || !window.name.startsWith("kube-agents-tab-")) {
+          window.name =
+            "kube-agents-tab-" + newSessionId().slice("web-console-".length);
+        }
+        sessionStorage.setItem(TAB_KEY, window.name);
+      }
+
+      let currentSessionId = sessionStorage.getItem(SESSION_KEY) || "";
+      let turnInFlight = false;
+      let turnSeq = 0;
+      let pollInFlight = false;
+      let lastSeenId = Number(sessionStorage.getItem(MARK_KEY)) || 0;
+      let unsettledTurns = [];
+
+      const tabChannel =
+        typeof BroadcastChannel === "function"
+          ? new BroadcastChannel("kube-agents-web-console-tabs")
+          : null;
+      if (tabChannel) {
+        const myTab = typeof window !== "undefined" ? window.name : "";
+        tabChannel.onmessage = (ev) => {
+          const msg = ev && ev.data;
+          if (!msg || !currentSessionId || msg.sessionId !== currentSessionId)
+            return;
+          if (msg.type === "who-has" && msg.tab !== myTab) {
+            tabChannel.postMessage({
+              type: "in-use",
+              sessionId: currentSessionId,
+              tab: myTab,
+            });
+          } else if (
+            msg.type === "in-use" &&
+            msg.tab !== myTab &&
+            !turnInFlight
+          ) {
+            initNewSession(newSessionId());
+          }
+        };
+        if (currentSessionId) {
+          tabChannel.postMessage({
+            type: "who-has",
+            sessionId: currentSessionId,
+            tab: myTab,
+          });
+        }
       }
 
       function advanceMark(id) {
@@ -852,16 +903,22 @@
       // formatting so bold can wrap a code span without matching inside one.
       function replaceCodeSpans(line, codes) {
         const runs = [];
-        const re = /`+/g;
+        const re = /(\\*)(`+)/g;
         let m;
         while ((m = re.exec(line)) !== null) {
-          runs.push({ start: m.index, end: re.lastIndex, len: m[0].length });
+          runs.push({
+            start: m.index + m[1].length,
+            end: re.lastIndex,
+            len: m[2].length,
+            escaped: m[1].length % 2 === 1,
+          });
         }
         if (runs.length < 2) return line;
         let out = "";
         let cursor = 0;
         for (let i = 0; i < runs.length; i++) {
           const open = runs[i];
+          if (open.escaped) continue;
           let closeIdx = -1;
           for (let j = i + 1; j < runs.length; j++) {
             if (runs[j].len === open.len) {
@@ -890,23 +947,89 @@
         return out;
       }
 
+      function renderEmphasis(text) {
+        const runs = [];
+        const re = /\*+/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          const start = m.index;
+          const end = re.lastIndex;
+          const before = start === 0 ? " " : text[start - 1];
+          const after = end >= text.length ? " " : text[end];
+          runs.push({
+            start,
+            end,
+            len: m[0].length,
+            origLen: m[0].length,
+            canOpen: !/\s/.test(after),
+            canClose: !/\s/.test(before),
+            openTags: [],
+            closeTags: [],
+          });
+        }
+        if (runs.length < 2) return text;
+        for (let c = 0; c < runs.length; c++) {
+          const closer = runs[c];
+          if (!closer.canClose) continue;
+          while (closer.len > 0) {
+            let openerIdx = -1;
+            for (let o = c - 1; o >= 0; o--) {
+              const opener = runs[o];
+              if (opener.len === 0 || !opener.canOpen) continue;
+              if (
+                (opener.canClose || closer.canOpen) &&
+                (opener.origLen + closer.origLen) % 3 === 0 &&
+                (opener.origLen % 3 !== 0 || closer.origLen % 3 !== 0)
+              ) {
+                continue;
+              }
+              openerIdx = o;
+              break;
+            }
+            if (openerIdx < 0) break;
+            const opener = runs[openerIdx];
+            const use = opener.len >= 2 && closer.len >= 2 ? 2 : 1;
+            const tag = use === 2 ? "strong" : "em";
+            opener.len -= use;
+            closer.len -= use;
+            opener.openTags.unshift(`<${tag}>`);
+            closer.closeTags.push(`</${tag}>`);
+            for (let k = openerIdx + 1; k < c; k++) {
+              runs[k].canOpen = false;
+            }
+          }
+        }
+        let out = "";
+        let pos = 0;
+        for (let i = 0; i < runs.length; i++) {
+          const r = runs[i];
+          out += text.slice(pos, r.start);
+          out += r.closeTags.join("") + "*".repeat(r.len) + r.openTags.join("");
+          pos = r.end;
+        }
+        out += text.slice(pos);
+        return out;
+      }
+
       function renderInline(text) {
         const codes = [];
+        const escapes = [];
         let html = escapeHtml(String(text).replace(/\x00/g, ""))
           .split(/\n{2,}/)
           .map((para) => {
             let p = replaceCodeSpans(para, codes);
-            p = p.replace(
-              /(?<!\*)\*\*\*(?![\s*])((?:[^*]|\*(?!\*)|\*\*(?!\*))+?)(?<![\s*])\*\*\*(?!\*)/g,
-              "<em><strong>$1</strong></em>",
-            );
-            p = p.replace(
-              /(?<!\*)\*\*(?![\s*])((?:[^*]|\*(?!\*))+?)(?<![\s*])\*\*(?!\*)/g,
-              "<strong>$1</strong>",
-            );
-            return p;
+            p = p.replace(/\\([\\`*_~[\]()#+\-.!])/g, (_, ch) => {
+              const idx = escapes.length;
+              escapes.push(ch);
+              return `\x00ESC${idx}\x00`;
+            });
+            return renderEmphasis(p);
           })
           .join("\n\n");
+        html = html.replace(
+          /\x00ESC(\d+)\x00/g,
+          (_, idx) => escapes[Number(idx)],
+        );
         html = html.replace(
           /\x00CODE(\d+)\x00/g,
           (_, idx) => codes[Number(idx)],
@@ -927,7 +1050,7 @@
         if (!text) return "";
         let html = "";
         let pos = 0;
-        const openRe = /(?:^|\n)([ ]*)(`{3,}|~{3,})([^\n]*)\n/g;
+        const openRe = /(?:^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n/g;
         let openMatch;
         while ((openMatch = openRe.exec(text)) !== null) {
           if (openMatch.index < pos) continue;
@@ -942,7 +1065,7 @@
           const fenceLen = openMatch[2].length;
           const startCode = openRe.lastIndex;
           const closeRe = new RegExp(
-            `^[ ]*(${fenceChar}{${fenceLen},}) *(?=\\n|$)`,
+            `^[ \\t]*(${fenceChar}{${fenceLen},})[ \\t]*(?=\\n|$)`,
             "gm",
           );
           closeRe.lastIndex = startCode;
@@ -962,7 +1085,7 @@
             .split("\n")
             .map((line) => {
               let k = 0;
-              while (k < indent && line[k] === " ") k++;
+              while (k < indent && (line[k] === " " || line[k] === "\t")) k++;
               return line.slice(k);
             })
             .join("\n");
