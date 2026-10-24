@@ -6,7 +6,6 @@ import re
 from typing import Any
 
 from cuj.harness.common import (
-    CLAUSE_SPLIT_RE,
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
@@ -16,8 +15,12 @@ from cuj.harness.common import (
     answer_text,
     input_text,
     interaction_blockers,
+    non_echo_clauses,
     proxy_leaks,
+    read_only_blockers,
     record_delegated_milestones,
+    run_harness_scenario,
+    within_latency_budget,
 )
 from cuj.utils.acceptance_criteria import AcceptanceCriteria, AcceptanceCriterion
 from cuj.utils.interaction import tool_operations
@@ -55,14 +58,28 @@ SERVICE_RE = re.compile(
     r"\b(?:services?|svc|clusterip|loadbalancer|port\s+\d+)\b",
     re.IGNORECASE,
 )
-CRD_RE = re.compile(
-    r"\b(?:platformagents?|agentprofiles?|agentplugins?)"
-    r"(?:\.kubeagents\.x-k8s\.io)?\b",
+NEGATED_WORKLOAD_OR_SERVICE_RE = re.compile(
+    r"\b(?:no|none|0|zero|without|missing|absent|empty)\b[^.\n;]{0,60}"
+    r"\b(?:pods?|workloads?|services?|svc|running|kubeagents-system)\b"
+    r"|\b(?:pods?|workloads?|services?|namespace)\b[^.\n;]{0,40}"
+    r"\b(?:not\s+running|do\s+not\s+exist|doesn't\s+exist|is\s+empty|are\s+empty|missing|absent)\b",
     re.IGNORECASE,
 )
-NEGATED_CRD_CLAUSE_RE = re.compile(
-    r"\b(?:no|not|none|absent|missing|do\s+not\s+exist|doesn't\s+exist"
-    r"|not\s+installed|0\s+(?:installed\s+)?crds?)\b",
+CRD_RE = re.compile(
+    r"\b(?:platformagents|agentprofiles|agentplugins)\.kubeagents\.x-k8s\.io\b",
+    re.IGNORECASE,
+)
+PAREN_GROUP_RE = re.compile(r"\([^)]*\)")
+NEGATED_CRD_BEFORE_RE = re.compile(
+    r"\b(?:no|not|none|never|neither|without|lacks?|missing|absent"
+    r"|failed\s+to\s+(?:find|list|get)|unable\s+to\s+(?:find|list|get)"
+    r"|0\s+(?:installed\s+)?crds?)\b[^\n;()]{0,120}\Z",
+    re.IGNORECASE,
+)
+NEGATED_CRD_AFTER_RE = re.compile(
+    r"\A[^\n;()]{0,80}\b(?:do\s+not\s+exist|doesn't\s+exist|not\s+installed"
+    r"|not\s+found|was\s+never\s+installed|were\s+never\s+installed"
+    r"|is\s+missing|are\s+missing|is\s+absent|are\s+absent)\b",
     re.IGNORECASE,
 )
 K8S_VERSION_RE = re.compile(
@@ -70,12 +87,23 @@ K8S_VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 NODE_RE = re.compile(r"\bnodes?\b", re.IGNORECASE)
-NODE_READY_RE = re.compile(r"\bready\b", re.IGNORECASE)
-NEGATED_READY_RE = re.compile(
-    r"\b(?:not|no|none|0|never|isn't|aren't|zero|unknown)\b[^.\n;]{0,25}\bready\b"
+NEGATED_NODE_READY_RE = re.compile(
+    r"\b(?:no|not|none(?:\s+of)?|never|0|zero)\s+"
+    r"(?:(?:the|all|three|two|four|\d+|worker|cluster|pool|default|in)\s+){0,8}?"
+    r"nodes?\b[^,.\n;]{0,40}\bready\b"
+    r"|\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?)\b)[^,.\n;]){0,40}"
+    r"\b(?:not\s+ready|notready|isn't\s+ready|aren't\s+ready|never\s+ready"
+    r"|0\s*(?:/\s*\d+\s*)?ready|ready\s*[:=]\s*(?:false|0|no|unknown))\b"
     r"|\b0\s*/\s*\d+\s*(?:nodes?\s+)?ready\b"
     r"|\bready\s*[:=]\s*(?:false|0|no|unknown)\b"
     r"|\bnotready\b",
+    re.IGNORECASE,
+)
+POSITIVE_NODE_READY_RE = re.compile(
+    r"\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^,.\n;]){0,40}"
+    r"\b(?!(?:not|no|never|0|zero)\s+ready\b)ready\b"
+    r"|\b(?<!not\s)(?<!no\s)(?<!0\s)(?<!zero\s)ready\b"
+    r"(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^,.\n;]){0,25}\bnodes?\b",
     re.IGNORECASE,
 )
 
@@ -92,13 +120,12 @@ ACCEPTANCE_CRITERIA = (
         "The answer inventories running pods and exposed services in the "
         "kubeagents-system namespace.",
         "delivered answer names kubeagents-system, running harness workloads, "
-        "and exposed services",
+        "and exposed services in non-negated clauses",
     ),
     AcceptanceCriterion(
         "ac03-kubeagents-crds-reported",
         "The answer lists the installed kube-agents Custom Resource Definitions.",
-        "delivered answer names the installed PlatformAgent, AgentProfile, or "
-        "AgentPlugin CRDs",
+        "delivered answer names installed *.kubeagents.x-k8s.io CRDs",
     ),
     AcceptanceCriterion(
         "ac04-node-readiness-and-version-reported",
@@ -109,10 +136,11 @@ ACCEPTANCE_CRITERIA = (
     ),
     AcceptanceCriterion(
         "ac05-inventory-remains-read-only",
-        "The inventory check performs no mutations and leaks no internal "
-        "LiteLLM proxy aliases.",
-        "recorded tool operations contain no mutating calls and output "
-        "contains no model-default or custom provider leak",
+        "The inventory check performs no mutations, leaks no internal "
+        "LiteLLM proxy aliases, and finishes within the turn latency budget.",
+        "complete normalized tool evidence contains no mutating calls, output "
+        "contains no model-default or custom provider leak, and turn latency "
+        "is within budget",
     ),
 )
 
@@ -150,48 +178,78 @@ MILESTONES = (
 )
 
 
-def _has_positive_node_ready(text: str) -> bool:
-    for clause in CLAUSE_SPLIT_RE.split(text):
+def _has_positive_node_ready(clauses: list[str]) -> bool:
+    for clause in clauses:
         if not NODE_RE.search(clause):
             continue
-        scrubbed = NEGATED_READY_RE.sub("", clause)
-        if NODE_READY_RE.search(scrubbed):
+        if NEGATED_NODE_READY_RE.search(clause):
+            continue
+        if POSITIVE_NODE_READY_RE.search(clause):
             return True
     return False
 
 
-def _reported_crds(text: str) -> list[str]:
+def _reported_crds(clauses: list[str]) -> list[str]:
     found: set[str] = set()
-    for clause in CLAUSE_SPLIT_RE.split(text):
-        if NEGATED_CRD_CLAUSE_RE.search(clause):
-            continue
+    for raw_clause in clauses:
+        clause = PAREN_GROUP_RE.sub(" ", raw_clause)
         for match in CRD_RE.finditer(clause):
+            prefix = clause[: match.start()]
+            suffix = clause[match.end() :]
+            if NEGATED_CRD_BEFORE_RE.search(prefix) or NEGATED_CRD_AFTER_RE.search(
+                suffix
+            ):
+                continue
             found.add(match.group(0).casefold())
     return sorted(found)
 
 
+def _positive_workloads_and_services(
+    clauses: list[str],
+) -> tuple[bool, list[str], bool]:
+    positive_clauses = [
+        clause
+        for clause in clauses
+        if not NEGATED_WORKLOAD_OR_SERVICE_RE.search(clause)
+    ]
+    positive_text = "\n".join(positive_clauses)
+    has_namespace = HARNESS_NAMESPACE in positive_text.casefold()
+    workloads = sorted(
+        {
+            match.group(0).casefold()
+            for match in HARNESS_WORKLOAD_RE.finditer(positive_text)
+        }
+    )
+    has_services = bool(SERVICE_RE.search(positive_text))
+    return has_namespace, workloads, has_services
+
+
 def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     _, output_blocker = interaction_blockers(interaction)
+    ro_blockers = read_only_blockers(interaction)
+    latency_ok, latency_s, budget_s = within_latency_budget(interaction)
 
     raw_input = input_text(interaction)
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    folded_answer = answer.casefold()
+    clauses = non_echo_clauses(answer, raw_input)
+    non_echo_text = "\n".join(clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
 
-    workloads = sorted(
-        {match.group(0).casefold() for match in HARNESS_WORKLOAD_RE.finditer(answer)}
+    has_namespace, workloads, has_services = _positive_workloads_and_services(
+        clauses
     )
-    has_namespace = HARNESS_NAMESPACE in folded_answer
-    has_services = bool(SERVICE_RE.search(answer))
-    crds = _reported_crds(answer)
+    crds = _reported_crds(clauses)
     versions = sorted(
-        {match.group(0).casefold() for match in K8S_VERSION_RE.finditer(answer)}
+        {
+            match.group(0).casefold()
+            for match in K8S_VERSION_RE.finditer(non_echo_text)
+        }
     )
-    node_ready = _has_positive_node_ready(answer)
+    node_ready = _has_positive_node_ready(clauses)
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)
     suite.record(
@@ -228,13 +286,15 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     )
     suite.record(
         "ac05-inventory-remains-read-only",
-        not mutations and not leaks,
+        not mutations and not leaks and not ro_blockers and latency_ok,
         {
             "operations": operations,
             "mutations": mutations,
             "proxyLeaks": leaks,
+            "latencySeconds": latency_s,
+            "maxLatencySeconds": budget_s,
         },
-        blocked_by=() if mutations or leaks else output_blocker,
+        blocked_by=() if mutations or leaks else ro_blockers,
     )
     return suite
 
@@ -254,9 +314,11 @@ def build_prompt() -> str:
 
 
 def test_03_harness_namespace_and_crd_inventory() -> None:
-    Scenario(
-        SCENARIO_ID,
-        build_prompt,
-        evaluate_acceptance,
-        evaluate_backend_milestones,
-    ).run_test()
+    run_harness_scenario(
+        Scenario(
+            SCENARIO_ID,
+            build_prompt,
+            evaluate_acceptance,
+            evaluate_backend_milestones,
+        )
+    )

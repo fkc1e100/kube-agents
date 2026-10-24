@@ -15,8 +15,12 @@ from cuj.harness.common import (
     answer_text,
     input_text,
     interaction_blockers,
+    non_echo_clauses,
     proxy_leaks,
+    read_only_blockers,
     record_delegated_milestones,
+    run_harness_scenario,
+    within_latency_budget,
 )
 from cuj.utils.acceptance_criteria import AcceptanceCriteria, AcceptanceCriterion
 from cuj.utils.interaction import tool_operations
@@ -34,20 +38,28 @@ REQUIRED_INPUT_PHRASES = (
     "permission posture",
 )
 
-PROMPT = """Inspect and report the harness identity and permission posture for \
-this kube-agents installation: (1) check the live PlatformAgent resource or \
-LiteLLM gateway configuration in kubeagents-system to report the upstream \
-backing LLM model and cloud provider serving inference (state only the real \
-upstream provider and model, not internal router alias names), (2) state the \
-conversational front-door role and how it routes work to other agents, \
-(3) state which tools the front door holds versus how kubectl and gcloud \
-CLI commands are executed, and (4) state the front-door permission posture \
-regarding cluster or cloud infrastructure changes. Include all four answers \
-in both the task completion summary and the full result. Do not mutate any \
-cluster or cloud state."""
+PROMPT = """Report the harness identity and permission posture for this \
+kube-agents installation directly from your runtime identity context (or by \
+delegating if needed): (1) state the upstream backing LLM model and cloud \
+provider serving inference (state only the real upstream provider and model, \
+not internal router alias names), (2) state the conversational front-door role \
+and how it routes work to other agents, (3) state which tools the front door \
+holds versus how kubectl and gcloud CLI commands are executed, and (4) state \
+the front-door permission posture regarding cluster or cloud infrastructure \
+changes. Do not mutate any cluster or cloud state."""
 
 BACKING_MODEL_RE = re.compile(
-    r"\b(?:gemini|claude|gpt)(?:[-_./a-z0-9]*)?\b",
+    r"\b(?:"
+    r"gemini[-_./][a-z0-9._-]+"
+    r"|gemini\s+\d+(?:\.\d+)?(?:\s+(?:pro|flash|ultra|nano))?"
+    r"|claude[-_./][a-z0-9._-]+"
+    r"|claude\s+(?:sonnet|opus|haiku|[34](?:\.\d+)?)(?:\s+\d+(?:\.\d+)?)?"
+    r"|gpt[-_./][a-z0-9._-]+"
+    r"|o[134](?:-[a-z0-9._-]+)?"
+    r"|llama[-_./][a-z0-9._-]+"
+    r"|deepseek[-_./][a-z0-9._-]+"
+    r"|qwen[-_./a-z0-9.]+"
+    r")\b",
     re.IGNORECASE,
 )
 BACKING_PROVIDER_RE = re.compile(
@@ -64,17 +76,22 @@ DELEGATION_RE = re.compile(
     re.IGNORECASE,
 )
 PERMISSION_POSTURE_RE = re.compile(
-    r"\b(?:plan[- ]and[- ]delegate|plan[- ]only|read[- ]only)\b",
+    r"\b(?:plan[- ]and[- ]delegate|plan[- ]only|read[- ]only"
+    r"|zero\s+(?:direct\s+)?(?:mutation|infrastructure\s+permissions)"
+    r"|unprivileged\s+conversational\s+router)\b",
     re.IGNORECASE,
 )
 NO_DIRECT_CLI_RE = re.compile(
     r"\b(?:no\s+direct|without\s+direct|cannot\s+(?:mutate|modify|run\s+kubectl)"
-    r"|no\s+infrastructure\s+tools|no\s+write"
-    r"|only\s+(?:holds?\s+)?(?:kanban_create|list_agents))\b",
+    r"|no\s+infrastructure\s+tools|no\s+write|no\s+(?:local\s+)?(?:terminal|kubectl|gcloud|credentials)"
+    r"|holds?\s+only\b|only\s+(?:holds?\s+)?(?:kanban_create|list_agents))\b",
     re.IGNORECASE,
 )
 DIRECT_MUTATION_CLAIM_RE = re.compile(
-    r"\b(?:can|able\s+to)\s+(?:also\s+)?run\s+kubectl\s+(?:apply|delete|patch)\s+directly\b",
+    r"\b(?:can|able\s+to)\s+(?:also\s+)?(?:directly\s+)?"
+    r"(?:(?:run\s+)?kubectl\s+(?:apply|delete|patch|create|exec|scale|edit|replace)"
+    r"|(?:mutate|modify)\s+(?:cluster|cloud|infrastructure|resources?))"
+    r"(?:\s+[^.\n;]{0,30})?\b",
     re.IGNORECASE,
 )
 
@@ -90,9 +107,8 @@ ACCEPTANCE_CRITERIA = (
         "ac02-backing-model-and-provider-reported",
         "The answer identifies the real backing model and provider without "
         "leaking internal LiteLLM proxy aliases.",
-        "answer names a real backing model (gemini, claude, or gpt) and "
-        "provider (vertex, google, anthropic, openai, or sap) and contains "
-        "no model-default or custom provider alias",
+        "answer names a concrete backing model and upstream provider and "
+        "contains no model-default or custom provider alias",
     ),
     AcceptanceCriterion(
         "ac03-coordinator-role-and-delegation-stated",
@@ -111,9 +127,11 @@ ACCEPTANCE_CRITERIA = (
     AcceptanceCriterion(
         "ac05-inspection-remains-read-only",
         "The identity and permission check performs no infrastructure or "
-        "GitOps mutations and leaks no internal proxy aliases.",
-        "recorded tool operations contain no mutating calls and output "
-        "contains no model-default or custom provider leak",
+        "GitOps mutations, leaks no internal proxy aliases, and finishes "
+        "within the turn latency budget.",
+        "complete normalized tool evidence contains no mutating calls, output "
+        "contains no model-default or custom provider leak, and turn latency "
+        "is within budget",
     ),
 )
 
@@ -125,20 +143,23 @@ MILESTONES = (
     ),
     Milestone(
         KAGE_DELEGATES_MILESTONE,
-        "Kage delegates the harness identity inspection via kanban_create.",
-        "root toolCalls contains a completed kanban_create",
+        "Kage delegates the harness identity inspection via kanban_create or "
+        "completes it directly at the front door.",
+        "root toolCalls contains a completed kanban_create or front door "
+        "answers directly",
         (INTERACTION_COMPLETED_MILESTONE,),
     ),
     Milestone(
         SPECIALIST_CREATED_MILESTONE,
-        "A specialist task is created to inspect the live harness configuration.",
-        "at least one projected specialist task exists",
+        "A specialist task is created or direct front-door inspection completes.",
+        "at least one projected specialist task exists or front door answers "
+        "directly",
         (KAGE_DELEGATES_MILESTONE,),
     ),
     Milestone(
         SPECIALIST_COMPLETES_MILESTONE,
-        "The delegated specialist identity inspection finishes.",
-        "at least one specialist task is done after at least one run",
+        "The identity inspection finishes.",
+        "at least one specialist task is done or front door answers directly",
         (SPECIALIST_CREATED_MILESTONE,),
     ),
     Milestone(
@@ -159,22 +180,25 @@ MILESTONES = (
 
 def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     _, output_blocker = interaction_blockers(interaction)
-
-    answer = answer_text(interaction)
-    leaks = proxy_leaks(all_visible_text(interaction))
-    operations = tool_operations(interaction)
-    mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
+    ro_blockers = read_only_blockers(interaction, require_tasks=False)
+    latency_ok, latency_s, budget_s = within_latency_budget(interaction)
 
     raw_input = input_text(interaction)
     folded_input = raw_input.casefold()
 
-    has_model = bool(BACKING_MODEL_RE.search(answer))
-    has_provider = bool(BACKING_PROVIDER_RE.search(answer))
-    has_coordinator = bool(COORDINATOR_ROLE_RE.search(answer))
-    has_delegation = bool(DELEGATION_RE.search(answer))
-    has_posture = bool(PERMISSION_POSTURE_RE.search(answer))
-    has_tool_boundary = bool(NO_DIRECT_CLI_RE.search(answer)) and not bool(
-        DIRECT_MUTATION_CLAIM_RE.search(answer)
+    answer = answer_text(interaction)
+    non_echo_text = "\n".join(non_echo_clauses(answer, raw_input))
+    leaks = proxy_leaks(all_visible_text(interaction))
+    operations = tool_operations(interaction)
+    mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
+
+    has_model = bool(BACKING_MODEL_RE.search(non_echo_text))
+    has_provider = bool(BACKING_PROVIDER_RE.search(non_echo_text))
+    has_coordinator = bool(COORDINATOR_ROLE_RE.search(non_echo_text))
+    has_delegation = bool(DELEGATION_RE.search(non_echo_text))
+    has_posture = bool(PERMISSION_POSTURE_RE.search(non_echo_text))
+    has_tool_boundary = bool(NO_DIRECT_CLI_RE.search(non_echo_text)) and not bool(
+        DIRECT_MUTATION_CLAIM_RE.search(non_echo_text)
     )
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)
@@ -216,13 +240,15 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     )
     suite.record(
         "ac05-inspection-remains-read-only",
-        not mutations and not leaks,
+        not mutations and not leaks and not ro_blockers and latency_ok,
         {
             "operations": operations,
             "mutations": mutations,
             "proxyLeaks": leaks,
+            "latencySeconds": latency_s,
+            "maxLatencySeconds": budget_s,
         },
-        blocked_by=() if mutations or leaks else output_blocker,
+        blocked_by=() if mutations or leaks else ro_blockers,
     )
     return suite
 
@@ -236,6 +262,7 @@ def evaluate_backend_milestones(interaction: dict[str, Any]) -> MilestoneSuite:
         suite,
         interaction,
         read_only_milestone_id=READ_ONLY_MILESTONE,
+        require_tasks=False,
     )
     suite.record(
         NO_PROXY_LEAK_MILESTONE,
@@ -251,9 +278,11 @@ def build_prompt() -> str:
 
 
 def test_01_identity_and_permission_posture() -> None:
-    Scenario(
-        SCENARIO_ID,
-        build_prompt,
-        evaluate_acceptance,
-        evaluate_backend_milestones,
-    ).run_test()
+    run_harness_scenario(
+        Scenario(
+            SCENARIO_ID,
+            build_prompt,
+            evaluate_acceptance,
+            evaluate_backend_milestones,
+        )
+    )

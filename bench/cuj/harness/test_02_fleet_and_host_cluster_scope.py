@@ -10,6 +10,7 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
+    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -17,8 +18,12 @@ from cuj.harness.common import (
     has_clarification_or_refusal,
     input_text,
     interaction_blockers,
+    non_echo_clauses,
     proxy_leaks,
+    read_only_blockers,
     record_delegated_milestones,
+    run_harness_scenario,
+    within_latency_budget,
 )
 from cuj.utils.acceptance_criteria import AcceptanceCriteria, AcceptanceCriterion
 from cuj.utils.interaction import tool_operations
@@ -45,8 +50,10 @@ result. This is a read-only scope check: do not create, modify, or delete any \
 resources."""
 
 GCP_LOCATION_RE = re.compile(
-    r"\b(?:us|europe|asia|northamerica|southamerica|australia|me|africa)"
-    r"-[a-z]+\d+(?:-[a-z])?\b",
+    r"(?<![a-z0-9-])"
+    r"(?:us|europe|asia|northamerica|southamerica|australia|me|africa)"
+    r"-[a-z]+\d+(?:-[a-z])?"
+    r"(?![a-z0-9-])",
     re.IGNORECASE,
 )
 PROMPT_PROJECT_RE = re.compile(
@@ -54,6 +61,10 @@ PROMPT_PROJECT_RE = re.compile(
     re.IGNORECASE,
 )
 CLUSTER_SCOPE_RE = re.compile(r"\b(?:clusters?|fleet|host)\b", re.IGNORECASE)
+AGENT_PROFILE_NAME_RE = re.compile(
+    r"\bcluster-[a-z0-9-]+\b",
+    re.IGNORECASE,
+)
 
 ACCEPTANCE_CRITERIA = (
     AcceptanceCriterion(
@@ -66,27 +77,31 @@ ACCEPTANCE_CRITERIA = (
     AcceptanceCriterion(
         "ac02-in-scope-project-confirmed",
         "The answer confirms the target GCP project is in scope.",
-        "delivered answer names the configured GCP project ID",
+        "delivered answer names the configured GCP project ID on hyphen-aware "
+        "word boundaries in a non-error clause",
     ),
     AcceptanceCriterion(
         "ac03-fleet-and-host-clusters-reported",
         "The answer reports the visible GKE fleet clusters and identifies the "
         "host cluster.",
-        "delivered answer reports fleet/host cluster scope without asking "
-        "which cluster was meant",
+        "delivered answer reports fleet/host cluster scope in a non-error "
+        "clause without asking which cluster was meant",
     ),
     AcceptanceCriterion(
         "ac04-host-cluster-region-reported",
         "The answer reports the GCP region or zone where the host cluster is "
         "located.",
-        "delivered answer contains a valid GCP region or zone identifier",
+        "delivered answer contains a valid standalone GCP region or zone "
+        "identifier in a non-error clause",
     ),
     AcceptanceCriterion(
         "ac05-scope-check-remains-read-only",
-        "The fleet and host scope check performs no mutations and leaks no "
-        "internal LiteLLM proxy aliases.",
-        "recorded tool operations contain no mutating calls and output "
-        "contains no model-default or custom provider leak",
+        "The fleet and host scope check performs no mutations, leaks no "
+        "internal LiteLLM proxy aliases, and finishes within the turn "
+        "latency budget.",
+        "complete normalized tool evidence contains no mutating calls, output "
+        "contains no model-default or custom provider leak, and turn latency "
+        "is within budget",
     ),
 )
 
@@ -134,26 +149,53 @@ def _target_project_id(raw_input: str) -> str:
 
 def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     _, output_blocker = interaction_blockers(interaction)
+    ro_blockers = read_only_blockers(interaction, require_tasks=False)
+    latency_ok, latency_s, budget_s = within_latency_budget(interaction)
 
     raw_input = input_text(interaction)
     folded_input = raw_input.casefold()
     project_id = _target_project_id(raw_input)
 
     answer = answer_text(interaction)
-    folded_answer = answer.casefold()
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
 
-    project_confirmed = bool(project_id) and project_id.casefold() in folded_answer
+    positive_clauses = [
+        clause
+        for clause in non_echo_clauses(answer, raw_input)
+        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
+    ]
+    positive_text = "\n".join(positive_clauses)
+    scrubbed_positive = AGENT_PROFILE_NAME_RE.sub("", positive_text)
+
+    project_re = (
+        re.compile(
+            rf"(?<![a-z0-9-]){re.escape(project_id)}(?![a-z0-9-])",
+            re.IGNORECASE,
+        )
+        if project_id
+        else None
+    )
+    project_confirmed = bool(
+        project_re and project_re.search(scrubbed_positive)
+    )
     clarification_loop = has_clarification_or_refusal(answer)
     clusters_reported = (
-        bool(CLUSTER_SCOPE_RE.search(answer))
+        bool(CLUSTER_SCOPE_RE.search(positive_text))
         and not clarification_loop
-        and len(answer.strip()) >= MIN_SCOPE_ANSWER_CHARS
+        and len(positive_text.strip()) >= MIN_SCOPE_ANSWER_CHARS
+    )
+    location_source = (
+        project_re.sub("", scrubbed_positive)
+        if project_re
+        else scrubbed_positive
     )
     locations = sorted(
-        {match.group(0).casefold() for match in GCP_LOCATION_RE.finditer(answer)}
+        {
+            match.group(0).casefold()
+            for match in GCP_LOCATION_RE.finditer(location_source)
+        }
     )
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)
@@ -184,13 +226,15 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     )
     suite.record(
         "ac05-scope-check-remains-read-only",
-        not mutations and not leaks,
+        not mutations and not leaks and not ro_blockers and latency_ok,
         {
             "operations": operations,
             "mutations": mutations,
             "proxyLeaks": leaks,
+            "latencySeconds": latency_s,
+            "maxLatencySeconds": budget_s,
         },
-        blocked_by=() if mutations or leaks else output_blocker,
+        blocked_by=() if mutations or leaks else ro_blockers,
     )
     return suite
 
@@ -201,6 +245,7 @@ def evaluate_backend_milestones(interaction: dict[str, Any]) -> MilestoneSuite:
         suite,
         interaction,
         read_only_milestone_id=READ_ONLY_MILESTONE,
+        require_tasks=False,
     )
     return suite
 
@@ -210,9 +255,11 @@ def build_prompt() -> str:
 
 
 def test_02_fleet_and_host_cluster_scope() -> None:
-    Scenario(
-        SCENARIO_ID,
-        build_prompt,
-        evaluate_acceptance,
-        evaluate_backend_milestones,
-    ).run_test()
+    run_harness_scenario(
+        Scenario(
+            SCENARIO_ID,
+            build_prompt,
+            evaluate_acceptance,
+            evaluate_backend_milestones,
+        )
+    )
