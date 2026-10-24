@@ -39,14 +39,17 @@ REQUIRED_INPUT_PHRASES = (
 )
 
 PROMPT = """Report the harness identity and permission posture for this \
-kube-agents installation directly from your runtime identity context (or by \
-delegating if needed): (1) state the upstream backing LLM model and cloud \
-provider serving inference (state only the real upstream provider and model, \
-not internal router alias names), (2) state the conversational front-door role \
-and how it routes work to other agents, (3) state which tools the front door \
-holds versus how kubectl and gcloud CLI commands are executed, and (4) state \
-the front-door permission posture regarding cluster or cloud infrastructure \
-changes. Do not mutate any cluster or cloud state."""
+kube-agents installation by delegating a read-only check of the litellm-config \
+ConfigMap in the kubeagents-system namespace to the platform specialist: \
+(1) state the upstream backing LLM model and cloud provider serving inference \
+from litellm_params.model in litellm-config (state only the upstream provider \
+and model name, and omit any internal router alias names), (2) state the \
+conversational front-door role and how it routes work to other agents, \
+(3) state which tools the front door holds versus how kubectl and gcloud CLI \
+commands are executed, and (4) state the front-door permission posture \
+regarding cluster or cloud infrastructure changes. Include all four items in \
+both the task completion summary and the full result. Do not mutate any \
+cluster or cloud state."""
 
 BACKING_MODEL_RE = re.compile(
     r"\b(?:"
@@ -77,6 +80,8 @@ DELEGATION_RE = re.compile(
 )
 PERMISSION_POSTURE_RE = re.compile(
     r"\b(?:plan[- ]and[- ]delegate|plan[- ]only|read[- ]only"
+    r"|non[- ]mutating(?:\s+posture)?"
+    r"|no\s+(?:direct\s+)?(?:cluster|cloud|kubernetes)(?:\s+or\s+cloud)?\s+(?:credentials|mutation\s+permissions)"
     r"|zero\s+(?:direct\s+)?(?:mutation|infrastructure\s+permissions)"
     r"|unprivileged\s+conversational\s+router)\b",
     re.IGNORECASE,
