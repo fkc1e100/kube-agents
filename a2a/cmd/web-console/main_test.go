@@ -707,11 +707,21 @@ func TestPageKeepsTheMessageBoxInTheWindow(t *testing.T) {
 //     turn's own assistant messages are not duplicated, including when the
 //     turn's final reply is empty.
 //  3. renderMarkdown formats line-opening fenced code blocks (including empty
-//     fenced blocks) while keeping mid-line backticks and literal **bold**
+//     fenced blocks, tab-indented fences, and four-backtick fences), CommonMark
+//     `*` and `_` delimiter runs, backslash escapes (including escaped `<`, `>`,
+//     `"`, `'`, `|`, `{`, `}`), ATX headings, bulleted/numbered lists,
+//     blockquotes, and inline links while keeping mid-line backticks and literal
 //     markers inside inline code spans intact.
+//  3b. Duplicated browser tabs clear cloned sessionStorage when TAB_KEY differs
+//      from window.name, or mint a fresh session over BroadcastChannel when two
+//      tabs share the same window.name and sessionStorage while discarding any
+//      in-flight poll for the superseded session.
 //  4. First turn on a fresh tab mints the session and sets the mark to 0
 //     before the request, so a dropped connection preserves the session and
 //     displays the late reply on the next poll.
+//  5. Recreated session (created: true after store loss) resets the mark so
+//     delegated results on the recreated session are shown, and Enter during
+//     IME composition (isComposing or keyCode 229) does not submit.
 func TestPageSettleAndWakeLogic(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -1154,7 +1164,7 @@ function makeContext(fetchImpl, initialStorage = {}, extraGlobals = {}) {
   );
   assert.equal(
     indentedListFence,
-    "<p>- Apply:</p><pre><code>kind: Pod\n\nspec: {}</code></pre><p>- Done</p>"
+    "<ul><li>Apply:</li></ul><pre><code>kind: Pod\n\nspec: {}</code></pre><ul><li>Done</li></ul>"
   );
   const indentedCloser = vm.runInContext(
     "renderMarkdown('\\x60\\x60\\x60yaml\\nkind: Pod\\n  \\x60\\x60\\x60\\nAfter that, apply it.')",
@@ -1231,12 +1241,28 @@ function makeContext(fetchImpl, initialStorage = {}, extraGlobals = {}) {
     "<pre><code>kind: Pod</code></pre>"
   );
   const escapedBackticks = vm.runInContext(
-    "renderMarkdown('\\\\\\x60not code\\\\\\x60 and \\\\*not italic\\\\*')",
+    "renderMarkdown('\\\\\\x60not code\\\\\\x60 and \\\\*not italic\\\\* and \\\\<pod-name\\\\> and \\\\|pipe\\\\|')",
     ctx
   );
   assert.equal(
     escapedBackticks,
-    "<p>\x60not code\x60 and *not italic*</p>"
+    "<p>\x60not code\x60 and *not italic* and &lt;pod-name&gt; and |pipe|</p>"
+  );
+  const underscoreEmphasis = vm.runInContext(
+    "renderMarkdown('_italic_ and __bold__ but foo_bar_baz stays literal')",
+    ctx
+  );
+  assert.equal(
+    underscoreEmphasis,
+    "<p><em>italic</em> and <strong>bold</strong> but foo_bar_baz stays literal</p>"
+  );
+  const richBlocks = vm.runInContext(
+    "renderMarkdown('## Cluster Status\\n\\n> All nodes ready\\n\\n- Pod \\x60web-0\\x60\\n- See [docs](https://example.com/docs)')",
+    ctx
+  );
+  assert.equal(
+    richBlocks,
+    '<h2>Cluster Status</h2><blockquote><p>All nodes ready</p></blockquote><ul><li>Pod <code>web-0</code></li><li>See <a href="https://example.com/docs" target="_blank" rel="noopener noreferrer">docs</a></li></ul>'
   );
   const inline = vm.runInContext("renderMarkdown('Use \\x60\\x60\\x60yaml on its own line, not \\x60\\x60\\x60inline\\x60\\x60\\x60 here.')", ctx);
   assert.ok(inline.includes("Use <code>yaml on its own line, not </code>inline"), "mid-line backticks must not drop surrounding prose: " + inline);
@@ -1244,7 +1270,10 @@ function makeContext(fetchImpl, initialStorage = {}, extraGlobals = {}) {
 }
 
 // Case 3b: a duplicated tab whose sessionStorage was cloned from another tab
-// (TAB_KEY does not match window.name) clears the cloned session and mark.
+// (TAB_KEY does not match window.name) clears the cloned session and mark, and
+// when two tabs share both window.name and sessionStorage, BroadcastChannel
+// arbitration mints a new session on the second tab and discards its in-flight
+// poll for the old session.
 {
   const dupCtx = makeContext(
     async () => ({ ok: true, status: 200, text: async () => "{}", json: async () => ({}) }),
@@ -1258,6 +1287,68 @@ function makeContext(fetchImpl, initialStorage = {}, extraGlobals = {}) {
   assert.equal(dupCtx.store.get("kube-agents-web-console-session"), undefined, "duplicate tab must clear cloned session");
   assert.equal(dupCtx.store.get("kube-agents-web-console-mark"), undefined, "duplicate tab must clear cloned mark");
   assert.ok(dupCtx.window.name.startsWith("kube-agents-tab-"), "duplicate tab must assign its own window.name");
+
+  const channels = [];
+  class FakeBroadcastChannel {
+    constructor(name) {
+      this.name = name;
+      this.onmessage = null;
+      channels.push(this);
+    }
+    postMessage(data) {
+      for (const peer of channels) {
+        if (peer !== this && peer.name === this.name) {
+          setImmediate(() => {
+            if (typeof peer.onmessage === "function") peer.onmessage({ data });
+          });
+        }
+      }
+    }
+  }
+  const sharedSession = "web-console-" + "d".repeat(32);
+  const sharedTabName = "kube-agents-tab-shared1234567890";
+  const tab1 = makeContext(
+    async () => ({ ok: true, status: 200, text: async () => "{}", json: async () => ({}) }),
+    {
+      "kube-agents-web-console-tab": sharedTabName,
+      "kube-agents-web-console-session": sharedSession,
+      "kube-agents-web-console-mark": "12",
+    },
+    { window: { name: sharedTabName }, BroadcastChannel: FakeBroadcastChannel },
+  );
+  let resolveTab2Poll = null;
+  const tab2 = makeContext(
+    async (url) => {
+      if (String(url).includes("/messages")) {
+        return new Promise((r) => { resolveTab2Poll = r; });
+      }
+      return { ok: true, status: 200, text: async () => "{}", json: async () => ({}) };
+    },
+    {
+      "kube-agents-web-console-tab": sharedTabName,
+      "kube-agents-web-console-session": sharedSession,
+      "kube-agents-web-console-mark": "12",
+    },
+    { window: { name: sharedTabName }, BroadcastChannel: FakeBroadcastChannel },
+  );
+  assert.equal(tab1.store.get("kube-agents-web-console-session"), sharedSession, "tab1 keeps original session");
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  const tab2Session = tab2.store.get("kube-agents-web-console-session");
+  assert.ok(tab2Session && tab2Session !== sharedSession, "tab2 must mint a distinct session via BroadcastChannel even when window.name matches: " + tab2Session);
+  assert.equal(tab2.store.get("kube-agents-web-console-mark"), "0", "tab2 mark must reset to 0");
+  if (resolveTab2Poll) {
+    resolveTab2Poll({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 99,
+        messages: [{ id: 99, role: "assistant", content: "old session row" }],
+      }),
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(tab2.store.get("kube-agents-web-console-mark"), "0", "stale poll from superseded session must be discarded");
+  }
 }
 
 // Case 4: first turn on a fresh tab mints the session and sets the mark to 0
@@ -1354,7 +1445,6 @@ function makeContext(fetchImpl, initialStorage = {}, extraGlobals = {}) {
     "kube-agents-web-console-session": sid,
     "kube-agents-web-console-mark": "138",
   });
-  ctx.SetImmediate = setImmediate;
   ctx.appended.length = 0;
   await vm.runInContext("submitMessage('after store wipe')", ctx);
   assert.equal(ctx.store.get("kube-agents-web-console-mark"), "2", "created:true must reset old mark 138 and settle to new reply_id 2");

@@ -31,7 +31,7 @@ Pass `--enable-web-console` to the installer, on a new install or a re-run of an
 ./install.sh --enable-web-console
 ```
 
-On a first install, the installer writes the choice into the `install.env` it creates, as `WEB_CONSOLE_ENABLED=true`, so later runs keep it. The installer never rewrites an existing `install.env`. On a re-run, the flag applies to that run only, and the installer warns you: set `WEB_CONSOLE_ENABLED=true` in `install.env` yourself, or the next `install.sh`, `upgrade.sh` or `--menu` run removes the console again. `--enable-web-console=false` and `WEB_CONSOLE_ENABLED=false` turn it off. If you drive the Terraform composition in `terraform/examples/full-install` directly, set `web_console_enabled = true`.
+On a first install, the installer writes the choice into the `install.env` it creates, as `WEB_CONSOLE_ENABLED=true`, so later runs keep it. Passing `--enable-web-console` on a non-interactive re-run does not rewrite `WEB_CONSOLE_ENABLED` in an existing `install.env`; the flag applies to that run only, and the installer warns you: set `WEB_CONSOLE_ENABLED=true` in `install.env` yourself, or the next `install.sh`, `upgrade.sh` or `--menu` run removes the console again. `--enable-web-console=false` and `WEB_CONSOLE_ENABLED=false` turn it off. If you drive the Terraform composition in `terraform/examples/full-install` directly, set `web_console_enabled = true`.
 
 The console needs the Platform Agent; the chart refuses to render it on an install with `platformAgent.enabled: false`. Its image follows the agent's image tag and the install's image registry, so a mirrored install pulls it from the mirror.
 

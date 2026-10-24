@@ -240,12 +240,8 @@ class InstallerCommonTest(unittest.TestCase):
                     "MEMORY": "",
                     "MEMORY_PROVIDER": "",
                     # Same reasoning, and the same ${VAR:-} read in
-                    # write_tfvars_from_state. get_isolated_test_env filters
-                    # the CI names and nothing else, so without this a shell
-                    # exporting ENABLE_DRIFT_DETECTOR=false reaches every case
-                    # that does not set it -- including the arm below that
-                    # asserts the drift keys are written when nobody asks.
-                    # Blanking it is "unset", which that arm wants: `:-` takes
+                    # write_tfvars_from_state. Blanking it explicitly here is
+                    # "unset", which the default arm below wants: `:-` takes
                     # the default for an empty value as well as an absent one.
                     "ENABLE_DRIFT_DETECTOR": "",
                     # Same again for the scoped pool's two keys, read as

@@ -317,6 +317,33 @@
         margin-bottom: 0;
       }
 
+      .message-bubble ul,
+      .message-bubble ol {
+        margin: 6px 0 8px 20px;
+      }
+
+      .message-bubble h1,
+      .message-bubble h2,
+      .message-bubble h3,
+      .message-bubble h4,
+      .message-bubble h5,
+      .message-bubble h6 {
+        font-weight: 600;
+        margin: 8px 0 4px;
+      }
+
+      .message-bubble blockquote {
+        border-left: 3px solid var(--border-color);
+        padding-left: 10px;
+        color: var(--text-secondary);
+        margin: 6px 0 8px;
+      }
+
+      .message-bubble a {
+        color: var(--gcp-blue);
+        text-decoration: underline;
+      }
+
       .chat-input-bar {
         padding: 16px 24px;
         border-top: 1px solid var(--border-color);
@@ -644,7 +671,10 @@
           ? new BroadcastChannel("kube-agents-web-console-tabs")
           : null;
       if (tabChannel) {
-        const myTab = typeof window !== "undefined" ? window.name : "";
+        // Fresh per-page-load nonce (never stored in window.name or
+        // sessionStorage) so even in a browser that clones window.name along
+        // with sessionStorage, two live tabs always carry distinct tab IDs.
+        const myTab = "tab-" + newSessionId().slice("web-console-".length);
         tabChannel.onmessage = (ev) => {
           const msg = ev && ev.data;
           if (!msg || !currentSessionId || msg.sessionId !== currentSessionId)
@@ -720,10 +750,17 @@
       async function pollMessages() {
         if (!currentSessionId || turnInFlight || pollInFlight) return;
         const seq = turnSeq;
+        const polledSession = currentSessionId;
         pollInFlight = true;
         try {
           const data = await fetchNewMessages();
-          if (!data || turnInFlight || seq !== turnSeq) return;
+          if (
+            !data ||
+            turnInFlight ||
+            seq !== turnSeq ||
+            polledSession !== currentSessionId
+          )
+            return;
           if (unsettledTurns.length > 0) {
             settlePendingTurns(data);
             return;
@@ -949,20 +986,34 @@
 
       function renderEmphasis(text) {
         const runs = [];
-        const re = /\*+/g;
+        const re = /(\*+|_+)/g;
         let m;
         while ((m = re.exec(text)) !== null) {
           const start = m.index;
           const end = re.lastIndex;
+          const ch = m[0][0];
           const before = start === 0 ? " " : text[start - 1];
           const after = end >= text.length ? " " : text[end];
+          const leftFlanking = !/\s/.test(after);
+          const rightFlanking = !/\s/.test(before);
+          const beforeAlnum = /[A-Za-z0-9]/.test(before);
+          const afterAlnum = /[A-Za-z0-9]/.test(after);
+          const canOpen =
+            ch === "*"
+              ? leftFlanking
+              : leftFlanking && (!rightFlanking || !beforeAlnum);
+          const canClose =
+            ch === "*"
+              ? rightFlanking
+              : rightFlanking && (!leftFlanking || !afterAlnum);
           runs.push({
+            ch,
             start,
             end,
             len: m[0].length,
             origLen: m[0].length,
-            canOpen: !/\s/.test(after),
-            canClose: !/\s/.test(before),
+            canOpen,
+            canClose,
             openTags: [],
             closeTags: [],
           });
@@ -975,7 +1026,12 @@
             let openerIdx = -1;
             for (let o = c - 1; o >= 0; o--) {
               const opener = runs[o];
-              if (opener.len === 0 || !opener.canOpen) continue;
+              if (
+                opener.len === 0 ||
+                !opener.canOpen ||
+                opener.ch !== closer.ch
+              )
+                continue;
               if (
                 (opener.canClose || closer.canOpen) &&
                 (opener.origLen + closer.origLen) % 3 === 0 &&
@@ -1004,28 +1060,133 @@
         for (let i = 0; i < runs.length; i++) {
           const r = runs[i];
           out += text.slice(pos, r.start);
-          out += r.closeTags.join("") + "*".repeat(r.len) + r.openTags.join("");
+          out +=
+            r.closeTags.join("") + r.ch.repeat(r.len) + r.openTags.join("");
           pos = r.end;
         }
         out += text.slice(pos);
         return out;
       }
 
+      function renderInlineSpan(span, codes, escapes, links) {
+        let p = span.replace(
+          /\\(&(?:lt|gt|amp|quot|#039);|[!#$%()*+,\-./:;=?@[\\\]^_`{|}~])/g,
+          (_, ch) => {
+            const idx = escapes.length;
+            escapes.push(ch);
+            return `\x00ESC${idx}\x00`;
+          },
+        );
+        p = p.replace(
+          /\[([^\n\]]+)\]\(([^\s()]+)\)/g,
+          (full, label, rawUrl) => {
+            if (!/^(?:https?:\/\/|mailto:|\/|#)[^\s<>"]*$/i.test(rawUrl))
+              return full;
+            const idx = links.length;
+            links.push(
+              `<a href="${rawUrl}" target="_blank" rel="noopener noreferrer">${renderEmphasis(label)}</a>`,
+            );
+            return `\x00LINK${idx}\x00`;
+          },
+        );
+        return renderEmphasis(p);
+      }
+
       function renderInline(text) {
         const codes = [];
         const escapes = [];
-        let html = escapeHtml(String(text).replace(/\x00/g, ""))
-          .split(/\n{2,}/)
-          .map((para) => {
-            let p = replaceCodeSpans(para, codes);
-            p = p.replace(/\\([\\`*_~[\]()#+\-.!])/g, (_, ch) => {
-              const idx = escapes.length;
-              escapes.push(ch);
-              return `\x00ESC${idx}\x00`;
-            });
-            return renderEmphasis(p);
-          })
-          .join("\n\n");
+        const links = [];
+        const prepared = replaceCodeSpans(
+          escapeHtml(String(text).replace(/\x00/g, "")),
+          codes,
+        );
+        const lines = prepared.split("\n");
+        const blocks = [];
+        let i = 0;
+        while (i < lines.length) {
+          if (!lines[i].trim()) {
+            i++;
+            continue;
+          }
+          const headingMatch = lines[i].match(
+            /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/,
+          );
+          if (headingMatch) {
+            const level = headingMatch[1].length;
+            const inner = renderInlineSpan(
+              headingMatch[2],
+              codes,
+              escapes,
+              links,
+            );
+            blocks.push(`<h${level}>${inner}</h${level}>`);
+            i++;
+            continue;
+          }
+          if (/^[ \t]*&gt;[ \t]?/.test(lines[i])) {
+            const quoteLines = [];
+            while (i < lines.length && /^[ \t]*&gt;[ \t]?/.test(lines[i])) {
+              quoteLines.push(lines[i].replace(/^[ \t]*&gt;[ \t]?/, ""));
+              i++;
+            }
+            const inner = renderInlineSpan(
+              quoteLines.join("\n"),
+              codes,
+              escapes,
+              links,
+            ).replace(/\n/g, "<br>");
+            blocks.push(`<blockquote><p>${inner}</p></blockquote>`);
+            continue;
+          }
+          if (/^[ \t]*[-*+][ \t]+/.test(lines[i])) {
+            const items = [];
+            while (i < lines.length && /^[ \t]*[-*+][ \t]+/.test(lines[i])) {
+              const itemText = lines[i].replace(/^[ \t]*[-*+][ \t]+/, "");
+              items.push(
+                `<li>${renderInlineSpan(itemText, codes, escapes, links)}</li>`,
+              );
+              i++;
+            }
+            blocks.push(`<ul>${items.join("")}</ul>`);
+            continue;
+          }
+          if (/^[ \t]*\d+\.[ \t]+/.test(lines[i])) {
+            const items = [];
+            while (i < lines.length && /^[ \t]*\d+\.[ \t]+/.test(lines[i])) {
+              const itemText = lines[i].replace(/^[ \t]*\d+\.[ \t]+/, "");
+              items.push(
+                `<li>${renderInlineSpan(itemText, codes, escapes, links)}</li>`,
+              );
+              i++;
+            }
+            blocks.push(`<ol>${items.join("")}</ol>`);
+            continue;
+          }
+          const paraLines = [];
+          while (
+            i < lines.length &&
+            lines[i].trim() &&
+            !/^[ \t]{0,3}#{1,6}[ \t]+/.test(lines[i]) &&
+            !/^[ \t]*&gt;[ \t]?/.test(lines[i]) &&
+            !/^[ \t]*[-*+][ \t]+/.test(lines[i]) &&
+            !/^[ \t]*\d+\.[ \t]+/.test(lines[i])
+          ) {
+            paraLines.push(lines[i]);
+            i++;
+          }
+          const inner = renderInlineSpan(
+            paraLines.join("\n"),
+            codes,
+            escapes,
+            links,
+          ).replace(/\n/g, "<br>");
+          blocks.push(`<p>${inner}</p>`);
+        }
+        let html = blocks.join("");
+        html = html.replace(
+          /\x00LINK(\d+)\x00/g,
+          (_, idx) => links[Number(idx)],
+        );
         html = html.replace(
           /\x00ESC(\d+)\x00/g,
           (_, idx) => escapes[Number(idx)],
@@ -1034,10 +1195,7 @@
           /\x00CODE(\d+)\x00/g,
           (_, idx) => codes[Number(idx)],
         );
-        return html
-          .split(/\n{2,}/)
-          .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
-          .join("");
+        return html;
       }
 
       // Splits on line-opening backtick or tilde fences (three or more matching

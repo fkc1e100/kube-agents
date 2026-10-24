@@ -4434,12 +4434,13 @@ class SettleNetworkPolicyAcceptanceTest(unittest.TestCase):
                 install_env.exists(),
                 "a refused first install with --enable-web-console must not leave install.env behind",
             )
-            # Because no stale install.env was written, a follow-up run with
-            # --accept-no-network-policy (omitting --enable-web-console) succeeds.
+            # Because no stale install.env was written, a follow-up run that
+            # loads INSTALL_ENV_FILE (if present) and passes --accept-no-network-policy succeeds.
             second_body = (
                 f'source "{_INSTALLER_COMMON}"\n'
                 f'KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"\n'
                 f'INSTALL_ENV_FILE="{install_env}"\n'
+                'if [ -f "$INSTALL_ENV_FILE" ]; then source "$INSTALL_ENV_FILE"; fi\n'
                 'TFVARS_CREATE_CLUSTER="false"\n'
                 'parse_args -y --accept-no-network-policy\n'
                 'validate_existing_cluster_opt_in_flags\n'
