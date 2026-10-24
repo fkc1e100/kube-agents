@@ -9,7 +9,6 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
-    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -17,7 +16,7 @@ from cuj.harness.common import (
     has_clarification_or_refusal,
     input_text,
     interaction_blockers,
-    non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -48,7 +47,11 @@ kubeagents-system) and their Active phase status in both the task completion \
 summary and the full result. Do not create, modify, or delete any cluster \
 resources."""
 
-CORE_NAMESPACE_RE = re.compile(r"\b(?:default|kube-system)\b", re.IGNORECASE)
+CORE_NAMESPACE_RE = re.compile(
+    r"(?<!\bby\s)\bdefault\b(?!\s+(?:node\s+)?(?:pool|service\s*account|storage\s*class|backend|route|policy|mode|config\w*|setting\w*|value\w*)\b)"
+    r"|\bkube-system\b",
+    re.IGNORECASE,
+)
 HARNESS_NAMESPACE_RE = re.compile(r"\bkubeagents-system\b", re.IGNORECASE)
 ACTIVE_PHASE_RE = re.compile(r"\bactive\b", re.IGNORECASE)
 
@@ -129,11 +132,16 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = [
-        clause
-        for clause in non_echo_clauses(answer, raw_input)
-        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
-    ]
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "namespaces?",
+        "default",
+        "kube-system",
+        "kubeagents-system",
+        "active",
+        "phase",
+    )
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)

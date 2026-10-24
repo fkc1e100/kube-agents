@@ -6,7 +6,11 @@ import os
 
 import pytest
 
-from cuj.harness.common import WEB_CONSOLE_URL_ENV, _run_web_console_turn
+from cuj.harness.common import (
+    COMPLETED_STATUS,
+    WEB_CONSOLE_URL_ENV,
+    _run_web_console_turn,
+)
 from cuj.utils.evidence import EvidenceLog
 from cuj.utils.portal import (
     PortalError,
@@ -14,6 +18,9 @@ from cuj.utils.portal import (
     isolated_portal,
     verify_agent,
 )
+
+PREFLIGHT_PROMPT = "Reply with exactly READY and nothing else. Do not use tools."
+EXPECTED_PREFLIGHT_REPLY = "READY"
 
 
 @pytest.fixture(scope="session")
@@ -29,15 +36,17 @@ def agent_preflight_results() -> dict[tuple[str, str], str]:
         try:
             interaction = _run_web_console_turn(
                 web_console_url,
-                "Reply with READY only.",
+                PREFLIGHT_PROMPT,
                 log,
             )
-            if "ready" not in str(interaction.get("output") or "").casefold():
+            status = str(interaction.get("status") or "unknown")
+            response = str(interaction.get("output") or "").strip()
+            if status != COMPLETED_STATUS or response != EXPECTED_PREFLIGHT_REPLY:
                 raise PortalError(
-                    f"web console preflight did not return READY: "
-                    f"{interaction.get('output')!r}"
+                    "web console preflight did not return READY: "
+                    f"status={status}, output={response!r}"
                 )
-        except (OSError, PortalError) as exc:
+        except (OSError, ValueError, PortalError) as exc:
             detail = f"{exc}; evidence: {log.path}"
             for key in configured:
                 results[key] = detail
@@ -61,7 +70,7 @@ def agent_preflight_results() -> dict[tuple[str, str], str]:
                     log,
                     profile=profile,
                 )
-        except (OSError, PortalError) as exc:
+        except (OSError, ValueError, PortalError) as exc:
             detail = str(exc)
             if "evidence:" not in detail:
                 detail += f"; evidence: {log.root}"

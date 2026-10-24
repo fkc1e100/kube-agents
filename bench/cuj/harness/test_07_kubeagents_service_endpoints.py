@@ -9,7 +9,6 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
-    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -17,7 +16,7 @@ from cuj.harness.common import (
     has_clarification_or_refusal,
     input_text,
     interaction_blockers,
-    non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -40,17 +39,16 @@ REQUIRED_INPUT_PHRASES = (
 
 PROMPT = """Inspect the Kubernetes Service resources in the kubeagents-system \
 namespace on this host cluster: (1) list the Service names in \
-kubeagents-system (such as platform-agent, litellm, or \
-kube-agents-web-console), (2) report their Kubernetes Service types \
-(ClusterIP or LoadBalancer), and (3) report the exposed port numbers for \
-each service. Include the kubeagents-system service names, service types \
-(ClusterIP/LoadBalancer), and port numbers in both the task completion \
+kubeagents-system, (2) report their Kubernetes Service types, and (3) report \
+the exposed port numbers for each service. Include the kubeagents-system \
+service names, service types, and port numbers in both the task completion \
 summary and the full result. Do not create, modify, or delete any cluster \
 resources."""
 
 HARNESS_SERVICE_NAME_RE = re.compile(
-    r"\b(?:platform-agent(?:-credential-proxy|-shell|-gateway)?"
-    r"|litellm|inference-gateway"
+    r"\b(?:platform-agent(?:-credential-proxy|-shell|-gateway)?(?!-[a-z0-9])"
+    r"|(?<!the\s)litellm(?!\s+(?:backend|proxy|model|alias|config\w*)\b)"
+    r"|inference-gateway(?!-[a-z0-9])"
     r"|kube-agents-(?:web-console(?:-public)?|controller-manager-[a-z0-9-]+))\b",
     re.IGNORECASE,
 )
@@ -58,8 +56,20 @@ SERVICE_TYPE_RE = re.compile(
     r"\b(?:clusterip|loadbalancer|nodeport|headless)\b",
     re.IGNORECASE,
 )
+IPV4_OR_NON_PORT_NUMBER_RE = re.compile(
+    r"\b\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?\b"
+    r"|\b\d+(?:\.\d+)?%"
+    r"|\b\d+\s+(?:pods?|nodes?|services?|containers?|events?|seconds?|minutes?"
+    r"|hours?|days?|namespaces?|resources?|endpoints?|ms|s|m|h)\b",
+    re.IGNORECASE,
+)
+PORT_CONTEXT_RE = re.compile(
+    r"\b(?:ports?|expos\w*|listen\w*|targetport|tcp|udp|ssh|cred-proxy"
+    r"|credential-proxy|dashboard)\b|->|\b\d+/(?:tcp|udp|\d+)\b",
+    re.IGNORECASE,
+)
 SERVICE_PORT_RE = re.compile(
-    r"\b(?:80|443|4000|8080|8443|8642|8699)\b",
+    r"(?<![.\d])\b(?:80|443|2222|4000|8080|8443|8642|8699|8765|9119)\b(?![.\d%])",
     re.IGNORECASE,
 )
 
@@ -133,6 +143,17 @@ MILESTONES = (
 )
 
 
+def _reported_ports(clauses: list[str]) -> list[str]:
+    found: set[str] = set()
+    for clause in clauses:
+        scrubbed = IPV4_OR_NON_PORT_NUMBER_RE.sub(" ", clause)
+        if not PORT_CONTEXT_RE.search(scrubbed):
+            continue
+        for match in SERVICE_PORT_RE.finditer(scrubbed):
+            found.add(match.group(0))
+    return sorted(found)
+
+
 def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     _, output_blocker = interaction_blockers(interaction)
     ro_blockers = read_only_blockers(interaction)
@@ -142,11 +163,22 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = [
-        clause
-        for clause in non_echo_clauses(answer, raw_input)
-        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
-    ]
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "services?",
+        "svc",
+        "ports?",
+        "endpoints?",
+        "clusterip",
+        "loadbalancer",
+        "nodeport",
+        "headless",
+        "platform-agent",
+        "litellm",
+        "inference-gateway",
+        "kube-agents-web-console",
+    )
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
@@ -162,9 +194,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     service_types = sorted(
         {m.group(0).casefold() for m in SERVICE_TYPE_RE.finditer(positive_text)}
     )
-    ports = sorted(
-        {m.group(0) for m in SERVICE_PORT_RE.finditer(positive_text)}
-    )
+    ports = _reported_ports(positive_clauses)
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)
     suite.record(

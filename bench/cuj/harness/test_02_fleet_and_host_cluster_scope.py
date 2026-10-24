@@ -10,7 +10,6 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
-    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -18,7 +17,7 @@ from cuj.harness.common import (
     has_clarification_or_refusal,
     input_text,
     interaction_blockers,
-    non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -56,14 +55,66 @@ GCP_LOCATION_RE = re.compile(
     r"(?![a-z0-9-])",
     re.IGNORECASE,
 )
-PROMPT_PROJECT_RE = re.compile(
-    r"\bin\s+project\s+([a-z][a-z0-9-]{4,61})\b",
-    re.IGNORECASE,
-)
 CLUSTER_SCOPE_RE = re.compile(r"\b(?:clusters?|fleet|host)\b", re.IGNORECASE)
 AGENT_PROFILE_NAME_RE = re.compile(
     r"\bcluster-[a-z0-9-]+\b",
     re.IGNORECASE,
+)
+NON_CLUSTER_HYPHENATED_RE = re.compile(
+    r"\b(?:in-scope|out-of-scope|read-only|kube-agents|kubeagents-system"
+    r"|plan-and-delegate|front-door|non-error|non-zero|multi-cluster)\b",
+    re.IGNORECASE,
+)
+HYPHENATED_IDENTIFIER_RE = re.compile(
+    r"\b[a-z][a-z0-9]*(?:-[a-z0-9]+)+\b",
+    re.IGNORECASE,
+)
+ADJACENT_CLUSTER_NAME_RE = re.compile(
+    r"\b(?:host\s+)?clusters?(?:\s+(?:is|are|include|includes|named))?\s*[:=]?\s*"
+    r"[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?\b",
+    re.IGNORECASE,
+)
+CLUSTER_STOPWORDS = frozenset(
+    {
+        "across",
+        "active",
+        "all",
+        "and",
+        "are",
+        "confirm",
+        "current",
+        "currently",
+        "fleet",
+        "for",
+        "from",
+        "gcp",
+        "gke",
+        "has",
+        "have",
+        "host",
+        "identify",
+        "include",
+        "includes",
+        "list",
+        "listed",
+        "location",
+        "name",
+        "named",
+        "none",
+        "only",
+        "project",
+        "projects",
+        "region",
+        "running",
+        "scope",
+        "that",
+        "the",
+        "this",
+        "visible",
+        "was",
+        "were",
+        "with",
+    }
 )
 
 ACCEPTANCE_CRITERIA = (
@@ -84,8 +135,9 @@ ACCEPTANCE_CRITERIA = (
         "ac03-fleet-and-host-clusters-reported",
         "The answer reports the visible GKE fleet clusters and identifies the "
         "host cluster.",
-        "delivered answer reports fleet/host cluster scope in a non-error "
-        "clause without asking which cluster was meant",
+        "delivered answer names at least one concrete GKE cluster identifier "
+        "in a non-error fleet/host scope clause without asking which cluster "
+        "was meant",
     ),
     AcceptanceCriterion(
         "ac04-host-cluster-region-reported",
@@ -139,12 +191,28 @@ MILESTONES = (
 )
 
 
-def _target_project_id(raw_input: str) -> str:
-    configured = os.environ.get(PROJECT_ID_ENV, "").strip()
-    if configured:
-        return configured
-    match = PROMPT_PROJECT_RE.search(raw_input)
-    return match.group(1) if match else ""
+def _reported_clusters(
+    clauses: list[str],
+    project_re: re.Pattern[str] | None,
+) -> list[str]:
+    found: set[str] = set()
+    for clause in clauses:
+        if not CLUSTER_SCOPE_RE.search(clause):
+            continue
+        cleaned = AGENT_PROFILE_NAME_RE.sub(" ", clause)
+        if project_re is not None:
+            cleaned = project_re.sub(" ", cleaned)
+        cleaned = GCP_LOCATION_RE.sub(" ", cleaned)
+        cleaned = NON_CLUSTER_HYPHENATED_RE.sub(" ", cleaned)
+        for match in HYPHENATED_IDENTIFIER_RE.finditer(cleaned):
+            token = match.group(0).casefold()
+            if token not in CLUSTER_STOPWORDS:
+                found.add(token)
+        for match in ADJACENT_CLUSTER_NAME_RE.finditer(cleaned):
+            token = match.group(1).casefold()
+            if token not in CLUSTER_STOPWORDS:
+                found.add(token)
+    return sorted(found)
 
 
 def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
@@ -154,18 +222,24 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
 
     raw_input = input_text(interaction)
     folded_input = raw_input.casefold()
-    project_id = _target_project_id(raw_input)
+    project_id = os.environ.get(PROJECT_ID_ENV, "").strip()
 
     answer = answer_text(interaction)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
 
-    positive_clauses = [
-        clause
-        for clause in non_echo_clauses(answer, raw_input)
-        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
-    ]
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "clusters?",
+        "fleet",
+        "host",
+        "project",
+        "scope",
+        "region",
+        "location",
+    )
     positive_text = "\n".join(positive_clauses)
     scrubbed_positive = AGENT_PROFILE_NAME_RE.sub("", positive_text)
 
@@ -181,8 +255,9 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
         project_re and project_re.search(scrubbed_positive)
     )
     clarification_loop = has_clarification_or_refusal(answer)
+    clusters = _reported_clusters(positive_clauses, project_re)
     clusters_reported = (
-        bool(CLUSTER_SCOPE_RE.search(positive_text))
+        bool(clusters)
         and not clarification_loop
         and len(positive_text.strip()) >= MIN_SCOPE_ANSWER_CHARS
     )
@@ -215,7 +290,11 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     suite.record(
         "ac03-fleet-and-host-clusters-reported",
         clusters_reported,
-        {"clarificationLoop": clarification_loop, "answer": answer},
+        {
+            "clusters": clusters,
+            "clarificationLoop": clarification_loop,
+            "answer": answer,
+        },
         blocked_by=output_blocker,
     )
     suite.record(

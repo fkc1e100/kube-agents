@@ -9,15 +9,15 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
-    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
     answer_text,
     has_clarification_or_refusal,
+    has_positive_node_ready,
     input_text,
     interaction_blockers,
-    non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -50,15 +50,10 @@ K8S_VERSION_RE = re.compile(
     r"\bv1\.\d+(?:\.\d+)?(?:-[a-z0-9.+_-]+)?\b",
     re.IGNORECASE,
 )
-NODE_READY_RE = re.compile(
-    r"\b\d+\s+(?:[a-z0-9-]+\s+){0,3}?nodes?\b[^.\n;]{0,40}\bready\b"
-    r"|\bnodes?\b[^.\n;]{0,40}\b\d+(?:/\d+)?\s+ready\b"
-    r"|\ball\s+\d+\s+nodes?\s+(?:are\s+)?ready\b",
-    re.IGNORECASE,
-)
 CPU_CAPACITY_RE = re.compile(
-    r"\b(?:\d+(?:\.\d+)?\s*(?:v?cpus?|cores?|m\b|millicores?)"
-    r"|cpu\s*[:=]?\s*\d+(?:\.\d+)?(?:m|\s*v?cpus?|\s*cores?)?)\b",
+    r"\b(?:\d+(?:\.\d+)?\s*(?:v?cpus?|cores?|millicores?)\b"
+    r"|\d+m\s+(?:allocatable\s+)?(?:v?cpus?|cores?)\b"
+    r"|cpu(?:\s+allocatable|\s+capacity)?\s*[:=]?\s*\d+(?:\.\d+)?(?:\s*(?:m|millicores?|v?cpus?|cores?))?\b)",
     re.IGNORECASE,
 )
 MEMORY_CAPACITY_RE = re.compile(
@@ -146,11 +141,20 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = [
-        clause
-        for clause in non_echo_clauses(answer, raw_input)
-        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
-    ]
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "versions?",
+        "nodes?",
+        "ready",
+        "cpu",
+        "vcpus?",
+        "cores?",
+        "millicores?",
+        "memory",
+        "allocatable",
+        "capacity",
+    )
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
@@ -160,7 +164,10 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     versions = sorted(
         {m.group(0).casefold() for m in K8S_VERSION_RE.finditer(positive_text)}
     )
-    has_node_ready = bool(NODE_READY_RE.search(positive_text)) and not refusal
+    has_node_ready = (
+        has_positive_node_ready(positive_clauses, require_count=True)
+        and not refusal
+    )
     has_cpu = bool(CPU_CAPACITY_RE.search(positive_text)) and not refusal
     has_memory = bool(MEMORY_CAPACITY_RE.search(positive_text)) and not refusal
 

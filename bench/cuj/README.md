@@ -23,16 +23,21 @@ uv run --project bench pytest -s bench/cuj/harness
 
 The suite targets the stock `platform-agent` resource created by
 `install.sh`. Set `CUJ_PROJECT_ID` for scenarios that
-need a Google Cloud project. `CUJ_WEB_CONSOLE_URL`, `CUJ_MAX_LATENCY_SECONDS`,
-`CUJ_PROFILE`, `CUJ_TIMEOUT`, and `CUJ_POLL_INTERVAL` are optional overrides
-shared by the suite.
+need a Google Cloud project. `CUJ_PROFILE`, `CUJ_TIMEOUT`, and
+`CUJ_POLL_INTERVAL` are optional overrides shared by the entire `bench/cuj`
+suite (`cuj.utils.scenario`), while `CUJ_WEB_CONSOLE_URL` and
+`CUJ_MAX_LATENCY_SECONDS` apply specifically to `bench/cuj/harness/`
+(`cuj.harness.common`).
 Pytest reports every journey independently using its normal test discovery.
 Before running a journey, `test_00_agent_responsive.py` requires the configured
 agent to be discoverable and complete a minimal `READY` interaction through the
-same admin portal path.
-Each test starts an API-only portal on an OS-assigned loopback port (or talks
-directly to `CUJ_WEB_CONSOLE_URL` when configured) and uses a unique
-interaction session, so parallel workers do not share ports or sessions.
+admin portal path (or, when running `bench/cuj/harness` with
+`CUJ_WEB_CONSOLE_URL` set, `bench/cuj/harness/conftest.py` runs the `READY`
+preflight directly against the Web Console HTTP API).
+Each test starts an API-only portal on an OS-assigned loopback port (or, in
+`bench/cuj/harness/`, talks directly to `CUJ_WEB_CONSOLE_URL` when configured)
+and uses a unique interaction session, so parallel workers do not share ports or
+sessions.
 Each journey appends its request, each change in the portal interaction
 projection (not every poll), acceptance criteria, milestones, and summary to
 `interactions.jsonl` in a unique `/tmp/kube-agents-<scenario>-*` directory,

@@ -50,8 +50,11 @@ summary and the full result. Do not restart pods or mutate any cluster \
 resources."""
 
 SKIPPED_CHECK_RE = re.compile(
-    r"\b(?:not\s+checked|unchecked|skipped|unable\s+to\s+check|cannot\s+check"
-    r"|did\s+not\s+check|were\s+not\s+inspected)\b",
+    r"\b(?:not\s+(?:checked|inspected|retrieved|fetched|read|collected|available|attempted)"
+    r"|unchecked|skipped|omitted"
+    r"|(?:unable|failed)\s+to\s+(?:check|inspect|retrieve|fetch|read|get|access|collect)"
+    r"|(?:could|can|did|were|was)\s+not\s+(?:check|inspect|retrieve|fetch|read|get|access|collect|inspected|checked|retrieved)"
+    r"|cannot\s+(?:check|inspect|retrieve|fetch|read|get|access|collect))\b",
     re.IGNORECASE,
 )
 CRASHLOOP_RE = re.compile(
@@ -62,8 +65,18 @@ RESTART_RE = re.compile(r"\brestarts?\b", re.IGNORECASE)
 WARNING_RE = re.compile(r"\bwarnings?\b", re.IGNORECASE)
 EVENT_RE = re.compile(r"\bevents?\b", re.IGNORECASE)
 DIAGNOSTIC_OUTCOME_RE = re.compile(
-    r"(?<!non-)\b(?:\d+|zero|no|none|all|clean|healthy|running|active|multiple"
-    r"|found|detected|observed|present|backoff|oomkilled|error|failed|unhealthy)\b",
+    r"(?<!non-)(?<!-)\b(?:\d+|zero|no|none|multiple)\s+(?:[a-z0-9_-]+\s+){0,3}?"
+    r"(?:pods?|containers?|workloads?|restarts?|warnings?|events?|crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?)\b"
+    r"|\b(?:crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?|restarts?(?:\s+counts?)?|warning\s+events?|events?)\b"
+    r"[^.;\n]{0,40}?(?:[:=]\s*(?<!-)\b(?:\d+|zero|no|none|clean|healthy)\b"
+    r"|\b(?:is|are|was|were|at|with|of|have|has)\s+(?<!-)\b(?:\d+|zero|no|none)\b"
+    r"|\b(?:none|zero|no\s+\w+)\s+(?:were\s+|was\s+)?(?:found|detected|observed|present|recorded|seen)\b)"
+    r"|\b(?:no|none|zero|without(?:\s+any)?|neither)\b[^.;\n]{0,40}?"
+    r"\b(?:crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?|restarts?|warning\s+events?)\b"
+    r"|\b(?:found|detected|observed|recorded)\s+(?:\d+|multiple|several)?\s*(?:[a-z0-9_-]+\s+){0,3}?"
+    r"(?:crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?|restarts?|warning\s+events?)\b"
+    r"|(?<!\bwhether\s)(?<!\bif\s)(?<!\bany\s)\b(?:\d+\s+pods?|pod\s+[a-z0-9-]+|[a-z0-9]+-[a-z0-9-]+)\s+(?:is|are|was|were)\s+in\s+crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?\b"
+    r"|\ball\s+(?:\d+\s+)?(?:[a-z0-9_-]+\s+){0,2}?(?:pods?|containers?|workloads?)\s+(?:are\s+)?(?:healthy|running|ready|clean)\b",
     re.IGNORECASE,
 )
 GATEWAY_RE = re.compile(r"\bplatform-?agent-gateway\b", re.IGNORECASE)
@@ -72,11 +85,22 @@ GATEWAY_STATUS_RE = re.compile(
     r"|unhealthy|\d+/\d+)\b",
     re.IGNORECASE,
 )
+GATEWAY_RBAC_RE = re.compile(
+    r"\b(?:forbidden|permission\s+denied|pods/log"
+    r"|rbac\s+(?:forbids|denies|prevent\w*|restrict\w*|boundary|block\w*)"
+    r"|(?:restricted|blocked|denied|forbidden)\s+by\s+rbac)\b",
+    re.IGNORECASE,
+)
+GATEWAY_LOG_EVIDENCE_RE = re.compile(
+    r"\b(?:healthz|200\s+ok|connection\s+refused|listening\s+on|backoff|oomkilled"
+    r"|logs?\s+(?:show|shows|contain|contains|report|reports|indicate|indicates|confirm|confirms|include|includes|state|states)"
+    r"|last\s+\d+\s+log\s+lines?\s*[:=-]"
+    r"|recent\s+logs?\s*[:=-]"
+    r"|no\s+errors?\s+in\s+(?:the\s+)?(?:recent\s+)?logs?)\b",
+    re.IGNORECASE,
+)
 GATEWAY_LOG_OR_RBAC_RE = re.compile(
-    r"\b(?:logs?|healthz|200\s+ok|connection\s+refused|forbidden"
-    r"|permission\s+denied|cannot\s+get\s+pods/log"
-    r"|rbac\s+(?:forbids|denies|prevent\w*|restrict\w*|boundary)"
-    r"|restricted\s+by\s+rbac)\b",
+    f"(?:{GATEWAY_LOG_EVIDENCE_RE.pattern}|{GATEWAY_RBAC_RE.pattern})",
     re.IGNORECASE,
 )
 
@@ -157,7 +181,9 @@ def _clause_has_outcome(
     clauses: list[str], *patterns: re.Pattern[str]
 ) -> bool:
     for clause in clauses:
-        if SKIPPED_CHECK_RE.search(clause):
+        if SKIPPED_CHECK_RE.search(clause) and not GATEWAY_RBAC_RE.search(
+            clause
+        ):
             continue
         if all(pattern.search(clause) for pattern in patterns) and bool(
             DIAGNOSTIC_OUTCOME_RE.search(clause)
@@ -168,7 +194,12 @@ def _clause_has_outcome(
 
 def _gateway_status_and_logs_reported(clauses: list[str]) -> bool:
     unskipped = [
-        clause for clause in clauses if not SKIPPED_CHECK_RE.search(clause)
+        clause
+        for clause in clauses
+        if not (
+            SKIPPED_CHECK_RE.search(clause)
+            and not GATEWAY_RBAC_RE.search(clause)
+        )
     ]
     gateway_clauses = [
         clause for clause in unskipped if GATEWAY_RE.search(clause)
@@ -176,12 +207,7 @@ def _gateway_status_and_logs_reported(clauses: list[str]) -> bool:
     if not gateway_clauses:
         return False
     has_status = any(GATEWAY_STATUS_RE.search(c) for c in gateway_clauses)
-    has_log_or_rbac = any(
-        GATEWAY_LOG_OR_RBAC_RE.search(c) for c in gateway_clauses
-    ) or (
-        has_status
-        and any(GATEWAY_LOG_OR_RBAC_RE.search(c) for c in unskipped)
-    )
+    has_log_or_rbac = any(GATEWAY_LOG_OR_RBAC_RE.search(c) for c in unskipped)
     return has_status and has_log_or_rbac
 
 

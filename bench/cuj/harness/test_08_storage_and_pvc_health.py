@@ -9,7 +9,6 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
-    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -18,6 +17,7 @@ from cuj.harness.common import (
     input_text,
     interaction_blockers,
     non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -38,17 +38,17 @@ REQUIRED_INPUT_PHRASES = (
     "storageclass",
 )
 
-PROMPT = """Inspect the storage and PersistentVolumeClaim (PVC) health in the \
+PROMPT = """Inspect the storage and PersistentVolumeClaim health in the \
 kubeagents-system namespace on this host cluster: (1) list the \
 PersistentVolumeClaim resources in kubeagents-system, (2) report their \
-binding status (such as Bound) and requested capacity, and (3) report the \
-StorageClass backing the PVCs in kubeagents-system. Include the PVC names, \
-Bound status, requested capacity, and StorageClass in both the task \
-completion summary and the full result. Do not create, modify, or delete any \
-cluster resources."""
+binding status and requested capacity, and (3) report the StorageClass \
+backing those claims in kubeagents-system. Include the \
+PersistentVolumeClaim names, binding status, requested capacity, and \
+StorageClass in both the task completion summary and the full result. Do \
+not create, modify, or delete any cluster resources."""
 
 PVC_NAME_RE = re.compile(
-    r"\b(?:platform-agent-[a-z0-9-]+|pvc|persistentvolumeclaims?)\b",
+    r"\b(?:platform-agent-[a-z0-9-]+|[a-z0-9]+(?:-[a-z0-9]+)+-pvc|pvc-[a-z0-9-]+)\b",
     re.IGNORECASE,
 )
 BOUND_STATUS_RE = re.compile(
@@ -56,7 +56,9 @@ BOUND_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 UNBOUND_STATUS_RE = re.compile(
-    r"\b(?:pending|lost|unbound|not\s+bound)\b",
+    r"\b(?:pending|lost|unbound|released|failed)\b"
+    r"|\b(?:not|no|none|nothing|never|(?<!-)0|zero|isn't|aren't|wasn't|weren't)\b[^.;\n]{0,40}\bbound\b"
+    r"|\bbound\s*[:=]\s*(?:false|no|0|unknown|none)\b",
     re.IGNORECASE,
 )
 STORAGE_CLASS_OR_CAPACITY_RE = re.compile(
@@ -142,11 +144,17 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = [
-        clause
-        for clause in non_echo_clauses(answer, raw_input)
-        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
-    ]
+    all_clauses = non_echo_clauses(answer, raw_input)
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "pvcs?",
+        "persistentvolumeclaims?",
+        "storage",
+        "storageclass(?:es)?",
+        "volumes?",
+        "claims?",
+    )
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
@@ -160,6 +168,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
             and not UNBOUND_STATUS_RE.search(clause)
             for clause in positive_clauses
         )
+        and not any(UNBOUND_STATUS_RE.search(clause) for clause in all_clauses)
         and not refusal
     )
     storage_details = sorted(

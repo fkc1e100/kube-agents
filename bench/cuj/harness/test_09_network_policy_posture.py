@@ -9,7 +9,6 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
-    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -17,7 +16,7 @@ from cuj.harness.common import (
     has_clarification_or_refusal,
     input_text,
     interaction_blockers,
-    non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -40,13 +39,11 @@ REQUIRED_INPUT_PHRASES = (
 
 PROMPT = """Inspect the Kubernetes NetworkPolicy resources in the \
 kubeagents-system namespace on this host cluster: (1) list the NetworkPolicy \
-names in kubeagents-system (such as platform-agent-shell or \
-platform-agent-credential-proxy), (2) report their policy types (Ingress \
-and/or Egress), and (3) summarize the pod selectors and network isolation \
-posture they enforce. Include the NetworkPolicy names, policy types \
-(Ingress/Egress), and pod selector summary in both the task completion \
-summary and the full result. Do not create, modify, or delete any cluster \
-resources."""
+names in kubeagents-system, (2) report their policy types, and \
+(3) summarize the pod selectors and network isolation posture they enforce. \
+Include the NetworkPolicy names, policy types, and pod selector summary in \
+both the task completion summary and the full result. Do not create, modify, \
+or delete any cluster resources."""
 
 NETPOL_NAME_RE = re.compile(
     r"\b(?:platform-agent-(?:shell|credential-proxy|gateway|sandbox)[a-z0-9-]*"
@@ -58,8 +55,9 @@ POLICY_DIRECTION_RE = re.compile(
     re.IGNORECASE,
 )
 ISOLATION_SUMMARY_RE = re.compile(
-    r"\b(?:pods?|selectors?|traffic|ports?|isolat\w*|allow\w*|restrict\w*"
-    r"|sandbox|proxy|shell)\b",
+    r"\b(?:selectors?|podselector|matchlabels|traffic|isolat\w*|allow\w*"
+    r"|restrict\w*|deny|denies|blocks?|egress\s+to|ingress\s+from)\b"
+    r"|\bapp(?:\.kubernetes\.io/name)?\s*=",
     re.IGNORECASE,
 )
 
@@ -140,11 +138,17 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     folded_input = raw_input.casefold()
 
     answer = answer_text(interaction)
-    positive_clauses = [
-        clause
-        for clause in non_echo_clauses(answer, raw_input)
-        if not NEGATED_OR_ERROR_CLAUSE_RE.search(clause)
-    ]
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "networkpolic(?:y|ies)",
+        "netpols?",
+        "polic(?:y|ies)",
+        "ingress",
+        "egress",
+        "selectors?",
+        "isolat\\w*",
+    )
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
@@ -160,7 +164,8 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
             for m in POLICY_DIRECTION_RE.finditer(positive_text)
         }
     )
-    has_summary = bool(ISOLATION_SUMMARY_RE.search(positive_text)) and not refusal
+    summary_text = NETPOL_NAME_RE.sub(" ", positive_text)
+    has_summary = bool(ISOLATION_SUMMARY_RE.search(summary_text)) and not refusal
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)
     suite.record(

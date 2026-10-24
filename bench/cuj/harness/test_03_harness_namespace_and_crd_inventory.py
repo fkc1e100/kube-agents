@@ -9,13 +9,16 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
+    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
     answer_text,
+    has_positive_node_ready,
     input_text,
     interaction_blockers,
     non_echo_clauses,
+    positive_inventory_clauses,
     proxy_leaks,
     read_only_blockers,
     record_delegated_milestones,
@@ -50,19 +53,20 @@ status, and v1.x version in both the task completion summary and the full \
 result. Do not create, modify, or delete any cluster resources."""
 
 HARNESS_WORKLOAD_RE = re.compile(
-    r"\b(?:platform-?agent(?:-[a-z0-9-]+)?|inference-gateway|litellm"
-    r"|kube-agents-(?:web-console|controller-manager))\b",
+    r"\b(?:"
+    r"platform-?agent-(?!host\b)(?:gateway|shell|credential-proxy|sandbox)(?:-[a-z0-9-]+)?"
+    r"|inference-gateway(?:-[a-z0-9-]+)?"
+    r"|litellm(?:-[a-z0-9-]+)?"
+    r"|kube-agents-(?:web-console(?!-public\b)|controller-manager)(?:-[a-z0-9-]+)?"
+    r")\b",
     re.IGNORECASE,
 )
 SERVICE_RE = re.compile(
-    r"\b(?:services?|svc|clusterip|loadbalancer|port\s+\d+)\b",
-    re.IGNORECASE,
-)
-NEGATED_WORKLOAD_OR_SERVICE_RE = re.compile(
-    r"\b(?:no|none|0|zero|without|missing|absent|empty)\b[^.\n;]{0,60}"
-    r"\b(?:pods?|workloads?|services?|svc|running|kubeagents-system)\b"
-    r"|\b(?:pods?|workloads?|services?|namespace)\b[^.\n;]{0,40}"
-    r"\b(?:not\s+running|do\s+not\s+exist|doesn't\s+exist|is\s+empty|are\s+empty|missing|absent)\b",
+    r"\b(?:clusterip|loadbalancer|nodeport|headless|port\s+\d+|\d+/tcp)\b"
+    r"|\b(?:services?|svc)\b[^.\n;]{0,80}\b(?:platform-agent|inference-gateway"
+    r"|litellm|kube-agents-web-console|kube-agents-controller-manager)\b"
+    r"|\b(?:platform-agent|inference-gateway|litellm|kube-agents-web-console"
+    r"|kube-agents-controller-manager)\s+(?:services?|svc)\b",
     re.IGNORECASE,
 )
 CRD_RE = re.compile(
@@ -70,40 +74,25 @@ CRD_RE = re.compile(
     re.IGNORECASE,
 )
 PAREN_GROUP_RE = re.compile(r"\([^)]*\)")
-NEGATED_CRD_BEFORE_RE = re.compile(
+NEGATED_CRD_SEGMENT_RE = re.compile(
     r"\b(?:no|not|none|never|neither|without|lacks?|missing|absent"
     r"|failed\s+to\s+(?:find|list|get)|unable\s+to\s+(?:find|list|get)"
-    r"|0\s+(?:installed\s+)?crds?)\b[^\n;()]{0,120}\Z",
+    r"|0\s+(?:installed\s+)?crds?)\b",
     re.IGNORECASE,
 )
 NEGATED_CRD_AFTER_RE = re.compile(
-    r"\A[^\n;()]{0,80}\b(?:do\s+not\s+exist|doesn't\s+exist|not\s+installed"
-    r"|not\s+found|was\s+never\s+installed|were\s+never\s+installed"
-    r"|is\s+missing|are\s+missing|is\s+absent|are\s+absent)\b",
+    r"\A[^.\n;]{0,80}\b(?:"
+    r"do\s+not\s+exist|doesn't\s+exist|did\s+not\s+exist"
+    r"|not\s+(?:installed|found|present|registered|available|detected|defined)"
+    r"|is\s+(?:not\s+\w+|missing|absent)"
+    r"|are\s+(?:not\s+\w+|missing|absent)"
+    r"|was\s+(?:not|never)\s+\w+|were\s+(?:not|never)\s+\w+"
+    r"|missing|absent"
+    r")\b",
     re.IGNORECASE,
 )
 K8S_VERSION_RE = re.compile(
     r"\bv1\.\d+(?:\.\d+)?(?:-[a-z0-9.+_-]+)?\b",
-    re.IGNORECASE,
-)
-NODE_RE = re.compile(r"\bnodes?\b", re.IGNORECASE)
-NEGATED_NODE_READY_RE = re.compile(
-    r"\b(?:no|not|none(?:\s+of)?|never|0|zero)\s+"
-    r"(?:(?:the|all|three|two|four|\d+|worker|cluster|pool|default|in)\s+){0,8}?"
-    r"nodes?\b[^,.\n;]{0,40}\bready\b"
-    r"|\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?)\b)[^,.\n;]){0,40}"
-    r"\b(?:not\s+ready|notready|isn't\s+ready|aren't\s+ready|never\s+ready"
-    r"|0\s*(?:/\s*\d+\s*)?ready|ready\s*[:=]\s*(?:false|0|no|unknown))\b"
-    r"|\b0\s*/\s*\d+\s*(?:nodes?\s+)?ready\b"
-    r"|\bready\s*[:=]\s*(?:false|0|no|unknown)\b"
-    r"|\bnotready\b",
-    re.IGNORECASE,
-)
-POSITIVE_NODE_READY_RE = re.compile(
-    r"\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^,.\n;]){0,40}"
-    r"\b(?!(?:not|no|never|0|zero)\s+ready\b)ready\b"
-    r"|\b(?<!not\s)(?<!no\s)(?<!0\s)(?<!zero\s)ready\b"
-    r"(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^,.\n;]){0,25}\bnodes?\b",
     re.IGNORECASE,
 )
 
@@ -178,40 +167,66 @@ MILESTONES = (
 )
 
 
-def _has_positive_node_ready(clauses: list[str]) -> bool:
-    for clause in clauses:
-        if not NODE_RE.search(clause):
-            continue
-        if NEGATED_NODE_READY_RE.search(clause):
-            continue
-        if POSITIVE_NODE_READY_RE.search(clause):
-            return True
-    return False
+def _strip_non_crd_parens(text: str) -> str:
+    return PAREN_GROUP_RE.sub(
+        lambda m: f" {m.group(0)[1:-1]} "
+        if CRD_RE.search(m.group(0))
+        else " ",
+        text,
+    )
 
 
 def _reported_crds(clauses: list[str]) -> list[str]:
     found: set[str] = set()
     for raw_clause in clauses:
-        clause = PAREN_GROUP_RE.sub(" ", raw_clause)
-        for match in CRD_RE.finditer(clause):
-            prefix = clause[: match.start()]
-            suffix = clause[match.end() :]
-            if NEGATED_CRD_BEFORE_RE.search(prefix) or NEGATED_CRD_AFTER_RE.search(
-                suffix
-            ):
-                continue
-            found.add(match.group(0).casefold())
+        if NEGATED_OR_ERROR_CLAUSE_RE.search(raw_clause):
+            continue
+        clause = _strip_non_crd_parens(raw_clause)
+        if not CRD_RE.search(clause):
+            continue
+        negated_list_active = False
+        offset = 0
+        for segment in clause.split(","):
+            seg_end = offset + len(segment)
+            suffix_from_seg = clause[offset:]
+            seg_matches = list(CRD_RE.finditer(segment))
+            if not seg_matches:
+                negated_list_active = False
+            else:
+                first_start = seg_matches[0].start()
+                if NEGATED_CRD_SEGMENT_RE.search(segment[:first_start]):
+                    negated_list_active = True
+                for match in seg_matches:
+                    between_negated = NEGATED_CRD_SEGMENT_RE.search(
+                        segment[: match.start()]
+                    )
+                    after_text = clause[offset + match.end() :]
+                    if (
+                        negated_list_active
+                        or between_negated
+                        or NEGATED_CRD_AFTER_RE.search(after_text)
+                        or NEGATED_CRD_AFTER_RE.search(suffix_from_seg)
+                    ):
+                        continue
+                    found.add(match.group(0).casefold())
+            offset = seg_end + 1
     return sorted(found)
 
 
 def _positive_workloads_and_services(
-    clauses: list[str],
+    answer: str,
+    raw_input: str,
 ) -> tuple[bool, list[str], bool]:
-    positive_clauses = [
-        clause
-        for clause in clauses
-        if not NEGATED_WORKLOAD_OR_SERVICE_RE.search(clause)
-    ]
+    positive_clauses = positive_inventory_clauses(
+        answer,
+        raw_input,
+        "pods?",
+        "workloads?",
+        "services?",
+        "svc",
+        "running",
+        HARNESS_NAMESPACE,
+    )
     positive_text = "\n".join(positive_clauses)
     has_namespace = HARNESS_NAMESPACE in positive_text.casefold()
     workloads = sorted(
@@ -240,7 +255,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
 
     has_namespace, workloads, has_services = _positive_workloads_and_services(
-        clauses
+        answer, raw_input
     )
     crds = _reported_crds(clauses)
     versions = sorted(
@@ -249,7 +264,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
             for match in K8S_VERSION_RE.finditer(non_echo_text)
         }
     )
-    node_ready = _has_positive_node_ready(clauses)
+    node_ready = has_positive_node_ready(clauses)
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)
     suite.record(
