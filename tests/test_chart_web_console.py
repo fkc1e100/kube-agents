@@ -93,12 +93,12 @@ class WebConsoleChartTest(unittest.TestCase):
 
     def test_service_type_is_a_literal_cluster_ip(self) -> None:
         # The fourth document is the headless LiteLLM peers Service the console
-        # resolves to reach each LiteLLM pod; the rest are the upgrade runner's
-        # identities and grants.
+        # resolves to reach each LiteLLM pod; the rest are the console's
+        # environment service account and RBAC bindings.
         self.assertEqual(
             [_kind(d) for d in self.raw_docs],
             ["Deployment", "Service", "NetworkPolicy", "Service", "ServiceAccount", "ClusterRole",
-             "ClusterRoleBinding", "Role", "RoleBinding", "ServiceAccount", "ClusterRoleBinding"],
+             "ClusterRoleBinding", "Role", "RoleBinding"],
         )
         self.assertIn("clusterIP: None", self.raw_docs[3])
         service = self.docs["Service"]
@@ -414,60 +414,22 @@ class WebConsoleRenderTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self._render("--set", "webConsole.enabled=true", "--set", "webConsole.assist.url=ftp://x")
 
-    def test_upgrade_runner_renders_service_account_and_role_rules(self) -> None:
+    def test_environment_rbac_binds_console_sa_without_cluster_admin_or_pod_create(self) -> None:
         docs = self._render("--set", "webConsole.enabled=true")
         sa_names = [d["metadata"]["name"] for d in docs if d["kind"] == "ServiceAccount"]
-        self.assertIn("kube-agents-upgrader", sa_names)
+        self.assertNotIn("kube-agents-upgrader", sa_names)
         role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "t-web-console-environment")
         resources = [tuple(r.get("resources", ())) for r in role["rules"]]
-        self.assertIn(("pods", "pods/log"), resources)
-        # The rules are only granted if the bindings bind someone: the
-        # console's Role to its own service account, the upgrader's
-        # ClusterRoleBinding to kube-agents-upgrader alone.
+        self.assertNotIn(("pods",), resources)
+        self.assertNotIn(("pods", "pods/log"), resources)
         binding = next(d for d in docs if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "t-web-console-environment")
         self.assertEqual(
             [(s["kind"], s["name"]) for s in binding.get("subjects") or []],
             [("ServiceAccount", "t-web-console")],
             "the console's namespace Role binds nobody",
         )
-        upgrader_binding = next(d for d in docs if d["kind"] == "ClusterRoleBinding" and d["metadata"]["name"] == "t-upgrader-admin")
-        self.assertEqual(
-            [(s["kind"], s["name"], s["namespace"]) for s in upgrader_binding.get("subjects") or []],
-            [("ServiceAccount", "kube-agents-upgrader", "ns")],
-        )
-        env = self._console_env(docs)
-        self.assertEqual(env["UPGRADE_RUNNER_ENABLED"], "true")
-        self.assertEqual(env["AUTO_UPGRADE"], "false")
-        self.assertNotIn("AUTO_UPGRADE_WINDOW", env)
-        self.assertEqual(env["AUTO_UPGRADE_MIN_RELEASE_AGE"], "72h")
-
-        env_auto = self._console_env(self._render("--set", "webConsole.enabled=true", "--set", "webConsole.upgradeRunner.autoUpgrade=true"))
-        self.assertEqual(env_auto["AUTO_UPGRADE"], "true")
-
-        env_window = self._console_env(
-            self._render(
-                "--set",
-                "webConsole.enabled=true",
-                "--set-string",
-                "webConsole.upgradeRunner.autoUpgradeWindow=Sat\\,Sun 02:00-06:00 America/Toronto",
-                "--set-string",
-                "webConsole.upgradeRunner.autoUpgradeMinReleaseAge=0",
-            )
-        )
-        self.assertEqual(env_window["AUTO_UPGRADE_WINDOW"], "Sat,Sun 02:00-06:00 America/Toronto")
-        self.assertEqual(env_window["AUTO_UPGRADE_MIN_RELEASE_AGE"], "0")
-
-        docs_off = self._render("--set", "webConsole.enabled=true", "--set", "webConsole.upgradeRunner.enabled=false")
-        sa_names_off = [d["metadata"]["name"] for d in docs_off if d["kind"] == "ServiceAccount"]
-        self.assertNotIn("kube-agents-upgrader", sa_names_off)
-        self.assertEqual(self._console_env(docs_off)["UPGRADE_RUNNER_ENABLED"], "false")
-
-        # The runner's RBAC lives in the environment block, so turning the
-        # environment off turns the runner off too, and the console is told.
-        docs_no_env = self._render("--set", "webConsole.enabled=true", "--set", "webConsole.environment.enabled=false")
-        self.assertNotIn("kube-agents-upgrader", [d["metadata"]["name"] for d in docs_no_env if d["kind"] == "ServiceAccount"])
-        self.assertNotIn("t-upgrader-admin", [d["metadata"]["name"] for d in docs_no_env if d["kind"] == "ClusterRoleBinding"])
-        self.assertEqual(self._console_env(docs_no_env)["UPGRADE_RUNNER_ENABLED"], "false")
+        crb_names = [d["metadata"]["name"] for d in docs if d["kind"] == "ClusterRoleBinding"]
+        self.assertNotIn("t-upgrader-admin", crb_names)
 
 
 

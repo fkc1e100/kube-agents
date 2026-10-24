@@ -1586,46 +1586,6 @@ console.log([
 	}
 }
 
-func TestPageUpgradeStatusKeepsPollingAndReportsALostConsole(t *testing.T) {
-	script := `const els = {}; const $ = id => els[id] || (els[id] = { hidden: true, innerText: "", style: {} });
-let intervals = 0; const setInterval = () => ++intervals; const clearInterval = () => {};
-const readBody = async r => r.body; let respond;
-const fetch = async () => respond();
-let upgradePollTimer = null; let upgradeSeenRunning = false;
-` + pageJS(t, "UPGRADE_POLL_MS", "UPGRADE_POLL_MAX_FAILURES", "upgradePollFailures", "upgradePollLost", "pollUpgradeStatus") + `
-(async () => {
-  respond = () => ({ ok: true, body: { state: "running", phase: "operator" } });
-  await pollUpgradeStatus();
-  const resumed = upgradePollTimer !== null;
-  respond = () => { throw new Error("connection refused"); };
-  for (let i = 0; i < UPGRADE_POLL_MAX_FAILURES; i++) await pollUpgradeStatus();
-  console.log(JSON.stringify([resumed, intervals, $("upgrade-live-state").innerText, upgradePollTimer]));
-})();`
-	if got, want := runPageJS(t, script), `[true,1,"Lost contact with the console",null]`; got != want {
-		t.Errorf("[timer started on a running read, intervals, badge, timer] = %s, want %s", got, want)
-	}
-}
-
-func TestPageUpgradeStatusHidesTheRunButtonWhenTheRunnerIsOff(t *testing.T) {
-	script := `const els = {}; const $ = id => els[id] || (els[id] = { hidden: false, disabled: false, innerText: "", style: {} });
-let intervals = 0; const setInterval = () => ++intervals; const clearInterval = () => {};
-const readBody = async r => r.body; let respond;
-const fetch = async () => respond();
-let upgradePollTimer = null; let upgradeSeenRunning = false;
-` + pageJS(t, "UPGRADE_POLL_MS", "UPGRADE_POLL_MAX_FAILURES", "upgradePollFailures", "upgradePollLost", "pollUpgradeStatus") + `
-(async () => {
-  respond = () => ({ ok: true, body: { state: "idle", runner_enabled: true } });
-  await pollUpgradeStatus();
-  const shownWhenOn = !$("upgrade-run-btn").hidden;
-  respond = () => ({ ok: true, body: { state: "idle", runner_enabled: false } });
-  await pollUpgradeStatus();
-  console.log(JSON.stringify([shownWhenOn, $("upgrade-run-btn").hidden, $("upgrade-run-btn").disabled]));
-})();`
-	if got, want := runPageJS(t, script), `[true,true,true]`; got != want {
-		t.Errorf("[button shown with the runner on, hidden with it off, disabled with it off] = %s, want %s", got, want)
-	}
-}
-
 func TestPageStreamedRepliesDoNotPileUpArtifacts(t *testing.T) {
 	script := `const SKILL_BY_NAME = {}; const skillUsage = new Map();
 ` + pageJS(t, "escapeHtml", "skillInfo", "renderInline", "artifactSeq", "artifactStore", "artifactIdByKey", "registerArtifact", "renderMarkdown") + "\n" +
@@ -1639,10 +1599,10 @@ console.log(JSON.stringify([live.includes("data-copy-art"), afterLive, Object.ke
 	}
 }
 
-func TestPageUpgradeHelmCommandResetsChartDefaults(t *testing.T) {
-	fn := pageJS(t, "upgradeCommands")
-	if !strings.Contains(fn, "--reset-then-reuse-values") || strings.Contains(fn, " --reuse-values") {
-		t.Errorf("upgradeCommands does not use --reset-then-reuse-values:\n%s", fn)
+func TestPageUpgradeCommandsUseDocumentedUpgradeScriptAndBundle(t *testing.T) {
+	fn := pageJS(t, "UPGRADE_SCRIPT_URL", "UPGRADE_BUNDLE_URL", "upgradeCommands")
+	if !strings.Contains(fn, "upgrade.sh --non-interactive") || !strings.Contains(fn, "kube-agents-{version}.tar.gz") || strings.Contains(fn, "helm upgrade") {
+		t.Errorf("upgradeCommands should use the release-pinned upgrade.sh and release bundle rather than raw helm upgrade:\n%s", fn)
 	}
 }
 

@@ -77,7 +77,7 @@ A reply is also refused, with a 409 and the message "The agent is still working 
 
 The console reads the text of event triage sessions, scheduled checks, and its own threads. An event triage or scheduled session can include replies people posted in the Slack or Google Chat thread where the alert or report went, because those replies continue the same session. Anyone who can open the console can read them. The console never reads the messages of a session that started in Slack or Google Chat. It lists those by title only, and Hermes writes most titles from a session's first exchange, so a title can summarize what someone asked.
 
-Reading those sessions does not widen access much. Opening the console takes `pods/portforward` on the install namespace. The built-in `edit` and `admin` roles that grant it also grant `pods/exec`, which reads the agent's session store directly. The upgrade runner is the exception: it lets anyone who can open the console start a pod that runs as `cluster-admin`, as described under [Upgrades from the console](#upgrades-from-the-console).
+Reading those sessions does not widen access much. Opening the console takes `pods/portforward` on the install namespace. The built-in `edit` and `admin` roles that grant it also grant `pods/exec`, which reads the agent's session store directly.
 
 ## How it is reached
 
@@ -85,7 +85,7 @@ The console is reachable through `kubectl port-forward` and no other way. The ch
 
 The console holds the agent's API key, from the same Secret the agent reads, and attaches it to the requests it sends the agent. The key does not reach the browser. There is no login page and no per-user identity: every turn reaches the agent as the console. A port-forward carries no identity of the person behind it, so the page cannot show who is signed in.
 
-Do not expose the console through a LoadBalancer, an Ingress or a NodePort. Anyone who could reach it would be able to drive the agent and, with the upgrade runner on, start a `cluster-admin` pod. The chart does not offer a way to change the Service type, and apart from its health check the console refuses any request whose `Host` is not `localhost`, `127.0.0.1` or `::1`.
+Do not expose the console through a LoadBalancer, an Ingress or a NodePort. Anyone who could reach it would be able to drive the agent. The chart does not offer a way to change the Service type, and apart from its health check the console refuses any request whose `Host` is not `localhost`, `127.0.0.1` or `::1`.
 
 ## Turning it on
 
@@ -107,14 +107,6 @@ kubectl port-forward -n kubeagents-system svc/kube-agents-web-console 8080:8080
 
 Then open `http://localhost:8080`. The console pod does not run under gVisor, so this works on a sandboxed install as well.
 
-## Upgrades from the console
-
-The Upgrade dialog can run the upgrade inside the cluster. **Run upgrade in cluster** creates a pod named `kube-agents-upgrade-runner` in the install namespace. The pod installs `kubectl` and `helm`, downloads `upgrade.sh` at the chosen release tag from the repository in `webConsole.releaseCheck.repo`, and runs it. The dialog shows the pod's log while it runs. The kubelet stops the pod after 90 minutes.
-
-The pod runs as the service account `kube-agents-upgrader`, which the chart binds to the `cluster-admin` ClusterRole. The console's own service account may create pods in the install namespace so it can start the runner. The console checks only that a request comes through a loopback `Host` with the console's header. So anyone who can open the console can start a `cluster-admin` pod running the `upgrade.sh` of any release tag.
-
-The runner is on by default whenever the console is. Set `webConsole.upgradeRunner.enabled: false` to turn it off. The chart then renders neither the binding nor the pod rule, and the console refuses the request with a message saying the runner is off. The runner also needs `webConsole.environment.enabled`, because its permissions render with the console's service account. Automatic upgrades are a separate switch, `webConsole.upgradeRunner.autoUpgrade`, which is off by default.
-
 ## Routes
 
 The page uses these routes. All of them answer only a loopback `Host`.
@@ -131,9 +123,6 @@ The page uses these routes. All of them answer only a loopback `Host`.
 | `GET /api/environment`               | Versions, install and rollout dates, and counts of nodes, namespaces, workloads and pods, for a feedback report. It reads the Kubernetes API; the only names it returns are the kube-agents Helm release, its namespace and the owning Argo CD Application. |
 | `GET /api/release`                   | The version this install runs and the newest release on GitHub. The GitHub read is cached for an hour; `webConsole.releaseCheck.enabled: false` turns it off.                                                                                               |
 | `POST /api/assist`                   | A feedback draft edited by the install's own inference gateway: one completion, no tools.                                                                                                                                                                   |
-| `POST /api/upgrade`                  | Starts the upgrade runner pod for a release tag. See [Upgrades from the console](#upgrades-from-the-console).                                                                                                                                               |
-| `GET /api/upgrade/status`            | The runner pod's state, current step and log tail.                                                                                                                                                                                                          |
-| `GET`, `POST /api/upgrade/auto`      | Reads or sets the automatic upgrade switch, recorded as an annotation on the PlatformAgent.                                                                                                                                                                 |
 
 ## What to expect when something is wrong
 

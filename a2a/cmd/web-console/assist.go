@@ -311,12 +311,11 @@ type releaseResponse struct {
 	// Status is "latest", "behind", "ahead", "unknown" or "disabled";
 	// Detail says how far or why not. "ahead" is a build newer than the
 	// newest published release.
-	Status      string      `json:"status"`
-	Detail      string      `json:"detail,omitempty"`
-	CheckedAt   string      `json:"checked_at,omitempty"`
-	AutoUpgrade bool        `json:"auto_upgrade"`
-	IsPatched   bool        `json:"is_patched"`
-	AppliedPRs  []AppliedPR `json:"applied_prs,omitempty"`
+	Status     string      `json:"status"`
+	Detail     string      `json:"detail,omitempty"`
+	CheckedAt  string      `json:"checked_at,omitempty"`
+	IsPatched  bool        `json:"is_patched"`
+	AppliedPRs []AppliedPR `json:"applied_prs,omitempty"`
 }
 
 type releaseCache struct {
@@ -370,12 +369,7 @@ type gitHubCompare struct {
 func (s *server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), releaseWalkTimeout+time.Second)
 	defer cancel()
-	rel := s.currentRelease(ctx)
-	rel.AutoUpgrade = s.isAutoUpgradeEnabled(ctx)
-	if rel.AutoUpgrade && rel.Status == "behind" {
-		_, _ = s.maybeTriggerAutoUpgrade(ctx)
-	}
-	writeJSON(w, http.StatusOK, rel)
+	writeJSON(w, http.StatusOK, s.currentRelease(ctx))
 }
 
 // runningVersion classifies the image tag: a release tag, a commit to

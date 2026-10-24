@@ -1414,24 +1414,6 @@
             }
           }
         },
-        "upgradeRunner": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "autoUpgrade": {
-              "type": "boolean"
-            },
-            "autoUpgradeWindow": {
-              "type": "string"
-            },
-            "autoUpgradeMinReleaseAge": {
-              "type": "string"
-            }
-          }
-        },
         "image": {
           "type": "object",
           "additionalProperties": false,

@@ -33,6 +33,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -252,6 +253,66 @@ func (k *kubeClient) get(ctx context.Context, path string, out any) error {
 	return json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(out)
 }
 
+func (k *kubeClient) doJSON(ctx context.Context, method, path string, body any, out any) (int, error) {
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return 0, err
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, k.base+path, reader)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", bearerPrefix+k.bearer())
+	req.Header.Set("Accept", contentTypeJSON)
+	if body != nil {
+		if method == http.MethodPatch {
+			req.Header.Set("Content-Type", "application/merge-patch+json")
+		} else {
+			req.Header.Set("Content-Type", contentTypeJSON)
+		}
+	}
+	resp, err := k.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer drainAndClose(resp)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamErrorBytes))
+		return resp.StatusCode, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if out != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxUpstreamBodyBytes)).Decode(out); err != nil {
+			return resp.StatusCode, err
+		}
+	}
+	return resp.StatusCode, nil
+}
+
+func (s *server) liveInstallVersion(ctx context.Context) (string, string) {
+	// The live image tag comes from the PlatformAgent when present; the
+	// chart version remains what the chart stamped at install time.
+	imageTag, chartVersion := s.cfg.ImageTag, s.cfg.ChartVersion
+	if s.kube != nil && s.cfg.PodNamespace != "" {
+		var pa struct {
+			Spec struct {
+				Deployment struct {
+					Tag string `json:"tag"`
+				} `json:"deployment"`
+			} `json:"spec"`
+		}
+		if err := s.kube.get(ctx, fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName), &pa); err == nil {
+			if tag := strings.TrimSpace(pa.Spec.Deployment.Tag); tag != "" {
+				imageTag = tag
+			}
+		}
+	}
+	return imageTag, chartVersion
+}
+
 // count returns how many objects a list has, reading as little as it can:
 // one item plus remainingItemCount when the server reports it, otherwise
 // pages of countPageLimit up to countMaxPages. floor is true when the walk
@@ -417,11 +478,6 @@ func (s *server) readEnvironment(ctx context.Context) environmentResponse {
 		out.Install.ManagedBy, out.Install.HelmRelease, out.Install.ReleaseNamespace, out.Install.ArgoCDApp = installManagedBy(pa.Metadata.Labels, pa.Metadata.Annotations)
 		if tag := strings.TrimSpace(pa.Spec.Deployment.Tag); tag != "" {
 			out.Versions.ImageTag = tag
-			if releaseTagPattern.MatchString(tag) {
-				clean := strings.TrimPrefix(tag, "v")
-				out.Versions.ChartVersion = clean
-				out.Versions.AppVersion = "v" + clean
-			}
 		}
 	}
 	var rs struct {

@@ -61,11 +61,9 @@ limitations under the License.
 // The console is not read-only. GET /api/environment (environment.go) and
 // GET /api/release (assist.go) read the cluster and the published releases;
 // POST /api/assist sends a feedback draft to the inference gateway; and
-// POST /api/upgrade (upgrade.go) creates a runner pod under the upgrader
-// ServiceAccount, which the chart binds to cluster-admin unless
-// webConsole.upgradeRunner.enabled is false. /api/repositories, /api/patches
-// and /api/models each have a POST form as well. Every POST route takes the
-// loopback Host check and the console request header.
+// /api/repositories, /api/patches and /api/models each have a POST form as
+// well. Every POST route takes the loopback Host check and the console request
+// header.
 package main
 
 import (
@@ -257,16 +255,8 @@ type config struct {
 	AssistModel   string
 	ReleaseCheck  bool
 	ReleaseRepo   string
-	AutoUpgrade   bool
 	GitHubAPIBase string
-	// AutoUpgradeWindow limits automatic upgrades to a maintenance window;
-	// nil means any time. AutoUpgradeMinReleaseAge is how long a release
-	// must have been published before an automatic upgrade installs it;
-	// zero turns the check off. Neither applies to the manual Upgrade
-	// button. See upgrade.go.
-	AutoUpgradeWindow        *upgradeWindow
-	AutoUpgradeMinReleaseAge time.Duration
-	AllowedHosts             []string
+	AllowedHosts  []string
 }
 
 func loadConfig() config {
@@ -298,7 +288,6 @@ func loadConfig() config {
 		AssistModel:   envOr(envAssistModel, defaultAssistModel),
 		ReleaseCheck:  envBool(envReleaseCheck, true),
 		ReleaseRepo:   envOr(envReleaseRepo, defaultReleaseRepo),
-		AutoUpgrade:   envBool(envAutoUpgrade, false),
 		GitHubAPIBase: gitHubAPIBase,
 		AllowedHosts:  parseAllowedHostsEnv(os.Getenv(envAllowedHosts), os.Getenv(envWebConsoleAllowedHosts)),
 	}
@@ -306,7 +295,6 @@ func loadConfig() config {
 		log.Printf(logPrefix+"%s=%q is not owner/name; using %s", envReleaseRepo, cfg.ReleaseRepo, defaultReleaseRepo)
 		cfg.ReleaseRepo = defaultReleaseRepo
 	}
-	cfg.AutoUpgradeWindow, cfg.AutoUpgradeMinReleaseAge = loadAutoUpgradePolicy()
 	return cfg
 }
 
@@ -484,21 +472,6 @@ type server struct {
 	// lower it.
 	delegationPollInterval time.Duration
 
-	// autoUpgradeSet tracks whether auto-upgrade was toggled at runtime;
-	// autoUpgradeEnabled holds the runtime value; lastAutoUpgradeTarget
-	// records the newest release version the background loop attempted so a
-	// failed attempt is not retried in a tight loop.
-	autoUpgradeSet        bool
-	autoUpgradeEnabled    bool
-	lastAutoUpgradeTarget string
-	// autoUpgradeHold is why the last automatic check did not start an
-	// upgrade (outside the window, agents busy, release too new); empty
-	// when nothing is held. GET /api/upgrade/status reports it as Detail.
-	autoUpgradeHold string
-	// now is the clock the automatic upgrade gates read; nil means
-	// time.Now. Tests replace it.
-	now func() time.Time
-
 	// reposMu guards the dynamically loaded / updated GitOps & IAM repositories.
 	reposMu        sync.RWMutex
 	cachedRepos    []repositoryInfo
@@ -568,10 +541,6 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/models/test", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleModelsTest))))
 	mux.Handle("GET /api/environment", s.requireLocalHost(http.HandlerFunc(s.handleEnvironment)))
 	mux.Handle("GET /api/release", s.requireLocalHost(http.HandlerFunc(s.handleRelease)))
-	mux.Handle("GET /api/upgrade/status", s.requireLocalHost(http.HandlerFunc(s.handleUpgradeStatus)))
-	mux.Handle("GET /api/upgrade/auto", s.requireLocalHost(http.HandlerFunc(s.handleUpgradeAutoGet)))
-	mux.Handle("POST /api/upgrade/auto", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleUpgradeAutoSet))))
-	mux.Handle("POST /api/upgrade", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleUpgradeStart))))
 	mux.Handle("POST /api/assist", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleAssist))))
 	mux.Handle("POST /api/chat", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChat))))
 	mux.Handle("POST /api/chat/stream", s.requireLocalHost(s.requireConsoleRequest(http.HandlerFunc(s.handleChatStream))))
@@ -1436,9 +1405,6 @@ func main() {
 		log.Printf(logPrefix + "API_SERVER_KEY is empty; the agent gateway will refuse every turn")
 	}
 	s := newServer(cfg)
-	bgCtx, bgCancel := context.WithCancel(context.Background())
-	defer bgCancel()
-	go s.runAutoUpgradeLoop(bgCtx)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.ListenPort,

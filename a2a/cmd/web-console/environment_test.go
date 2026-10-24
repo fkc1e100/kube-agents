@@ -277,3 +277,35 @@ func TestRolloutDeploymentsFollowTheInstallNames(t *testing.T) {
 		t.Errorf("defaults = %v", def)
 	}
 }
+
+func TestInstallVersionFollowsThePlatformAgentTag(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentTypeJSON)
+		if r.URL.Path == fmt.Sprintf(platformAgentsAPIPath, "kubeagents-system", "platform-agent") {
+			fmt.Fprint(w, `{"metadata":{"name":"platform-agent","creationTimestamp":"2026-10-01T00:00:00Z"},"spec":{"deployment":{"tag":"0.12.0"}}}`)
+			return
+		}
+		fmt.Fprint(w, `{"metadata":{},"items":[]}`)
+	}))
+	defer api.Close()
+
+	_, s := setupServer(t)
+	s.cfg.PodNamespace = "kubeagents-system"
+	s.cfg.PlatformAgentName = "platform-agent"
+	s.cfg.ImageTag = "0.8.0"
+	s.cfg.ChartVersion = "0.8.0"
+	s.cfg.AppVersion = "v0.8.0"
+	s.cfg.ReleaseCheck = false
+	s.kube = &kubeClient{base: api.URL, token: "sa-token", client: api.Client()}
+
+	if tag, chart := s.liveInstallVersion(t.Context()); tag != "0.12.0" || chart != "0.8.0" {
+		t.Fatalf("liveInstallVersion = %q, %q; want the PlatformAgent's 0.12.0 tag and the chart's 0.8.0 version", tag, chart)
+	}
+	if rel := s.currentRelease(t.Context()); rel.Running != "0.12.0" {
+		t.Fatalf("currentRelease running %q, want 0.12.0 from the PlatformAgent", rel.Running)
+	}
+	env := s.readEnvironment(t.Context())
+	if env.Versions.ImageTag != "0.12.0" || env.Versions.ChartVersion != "0.8.0" || env.Versions.AppVersion != "v0.8.0" {
+		t.Fatalf("readEnvironment versions %+v, want ImageTag 0.12.0 from the PlatformAgent and ChartVersion/AppVersion preserved from the chart", env.Versions)
+	}
+}

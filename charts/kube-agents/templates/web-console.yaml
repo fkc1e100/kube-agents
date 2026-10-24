@@ -175,25 +175,6 @@ spec:
               value: {{ ($releaseCheck.enabled | default false) | ternary "true" "false" | quote }}
             - name: RELEASE_REPO
               value: {{ $releaseCheck.repo | default "gke-labs/kube-agents" | quote }}
-            {{- $upgradeRunner := .Values.webConsole.upgradeRunner | default dict }}
-            {{- /*
-            The runner's RBAC and service account render only inside the
-            environment block below, so the console offers the runner only
-            when both toggles are on; otherwise POST /api/upgrade refuses
-            with a message naming them instead of an API-server 403.
-            */}}
-            - name: UPGRADE_RUNNER_ENABLED
-              value: {{ (and .Values.webConsole.environment.enabled ($upgradeRunner.enabled | default false)) | ternary "true" "false" | quote }}
-            - name: AUTO_UPGRADE
-              value: {{ ($upgradeRunner.autoUpgrade | default false) | ternary "true" "false" | quote }}
-            {{- with $upgradeRunner.autoUpgradeWindow }}
-            - name: AUTO_UPGRADE_WINDOW
-              value: {{ . | quote }}
-            {{- end }}
-            {{- if hasKey $upgradeRunner "autoUpgradeMinReleaseAge" }}
-            - name: AUTO_UPGRADE_MIN_RELEASE_AGE
-              value: {{ $upgradeRunner.autoUpgradeMinReleaseAge | toString | quote }}
-            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -352,11 +333,7 @@ rules:
   - apiGroups: ["kubeagents.x-k8s.io"]
     resources: ["platformagents"]
     resourceNames: [{{ $agentName | quote }}]
-    {{- if and .Values.webConsole.upgradeRunner .Values.webConsole.upgradeRunner.enabled }}
     verbs: ["get", "patch"]
-    {{- else }}
-    verbs: ["get"]
-    {{- end }}
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["list"]
@@ -368,15 +345,6 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["litellm-config"]
     verbs: ["get", "patch", "update"]
-  {{- if and .Values.webConsole.upgradeRunner .Values.webConsole.upgradeRunner.enabled }}
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["create"]
-  - apiGroups: [""]
-    resources: ["pods", "pods/log"]
-    resourceNames: ["kube-agents-upgrade-runner"]
-    verbs: ["get", "delete"]
-  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -395,35 +363,5 @@ subjects:
 - kind: ServiceAccount
   name: {{ .Release.Name }}-web-console
   namespace: {{ .Release.Namespace }}
-{{- if and .Values.webConsole.upgradeRunner .Values.webConsole.upgradeRunner.enabled }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: kube-agents-upgrader
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/name: web-console
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    {{- include "kube-agents.labels" . | nindent 4 }}
-automountServiceAccountToken: true
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ .Release.Name }}-upgrader-admin
-  labels:
-    app.kubernetes.io/name: web-console
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    {{- include "kube-agents.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-admin
-subjects:
-  - kind: ServiceAccount
-    name: kube-agents-upgrader
-    namespace: {{ .Release.Namespace }}
-{{- end }}
 {{- end }}
 {{- end }}

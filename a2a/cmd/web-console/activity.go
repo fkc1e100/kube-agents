@@ -669,6 +669,12 @@ var knownPlatformSkills = []string{
 	"pr-conversation",
 	"inspect-repository",
 	"github-issue-resolver",
+	"gke-rightsizing-checks",
+	"gcp-terraform",
+	"gitops-helm-chart",
+	"kube-agents-feedback",
+	"upgrade-readiness-brief",
+	"support-escalation-bundle",
 }
 
 var (
