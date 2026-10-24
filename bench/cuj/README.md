@@ -12,10 +12,39 @@ uv run --project bench pytest -s bench/cuj
 ```
 
 To run the 10 read-only harness and WebUI quality/latency validation journeys
-against a deployed Web Console URL (for example in nightly runs):
+by standing up an ephemeral GKE cluster (`create` mode, which provisions the
+cluster with `--enable-web-console`, connects over a private loopback
+`kubectl port-forward`, and tears the cluster down via `uninstall.sh` when the
+session finishes):
 
 ```bash
-CUJ_WEB_CONSOLE_URL=http://<web-console-ip> \
+CUJ_WEB_CONSOLE_CLUSTER_MODE=create \
+CUJ_PROJECT_ID=<gcp-project-id> \
+CUJ_CLUSTER_LOCATION=us-central1 \
+CUJ_MAX_LATENCY_SECONDS=180 \
+uv run --project bench pytest -s bench/cuj/harness
+```
+
+To deploy the Web Console onto an existing GKE cluster (`existing` mode, which
+enables `kube-agents-web-console`, connects over a loopback `port-forward` or a
+private `ClusterIP` when `CUJ_WEB_CONSOLE_USE_PRIVATE_IP=true`, and tears the
+unauthenticated Web Console down on exit unless deployed via a private IP):
+
+```bash
+CUJ_WEB_CONSOLE_CLUSTER_MODE=existing \
+CUJ_PROJECT_ID=<gcp-project-id> \
+CUJ_CLUSTER_NAME=<existing-cluster-name> \
+CUJ_CLUSTER_LOCATION=us-central1 \
+CUJ_MAX_LATENCY_SECONDS=180 \
+uv run --project bench pytest -s bench/cuj/harness
+```
+
+To run against an already-forwarded loopback or private-IP Web Console URL
+(public IP addresses are rejected by `validate_private_web_console_url` because
+the Web Console has no authentication):
+
+```bash
+CUJ_WEB_CONSOLE_URL=http://127.0.0.1:18080 \
 CUJ_PROJECT_ID=<gcp-project-id> \
 CUJ_MAX_LATENCY_SECONDS=180 \
 uv run --project bench pytest -s bench/cuj/harness
@@ -26,14 +55,19 @@ The suite targets the stock `platform-agent` resource created by
 need a Google Cloud project. `CUJ_TIMEOUT` and `CUJ_POLL_INTERVAL` are optional
 overrides shared by both the admin portal path (`cuj.utils.scenario`) and the
 Web Console HTTP API path (`cuj.harness.common`); `CUJ_PROFILE` applies to the
-admin portal path, while `CUJ_WEB_CONSOLE_URL` and `CUJ_MAX_LATENCY_SECONDS`
-apply specifically to `bench/cuj/harness/` (`cuj.harness.common`).
+admin portal path, while `CUJ_WEB_CONSOLE_URL`, `CUJ_WEB_CONSOLE_CLUSTER_MODE`
+(`create`, `existing`, or `port-forward`), `CUJ_WEB_CONSOLE_USE_PRIVATE_IP`,
+`CUJ_KEEP_PRIVATE_WEB_CONSOLE`, `CUJ_TEARDOWN_WEB_CONSOLE`, and
+`CUJ_MAX_LATENCY_SECONDS` apply specifically to `bench/cuj/harness/`
+(`cuj.harness.common`).
 Pytest reports every journey independently using its normal test discovery.
 Before running a journey, `test_00_agent_responsive.py` requires the configured
 agent to be discoverable and complete a minimal `READY` interaction through the
 admin portal path (or, when running `bench/cuj/harness` with
-`CUJ_WEB_CONSOLE_URL` set, `bench/cuj/harness/conftest.py` runs the `READY`
-preflight directly against the Web Console HTTP API).
+`CUJ_WEB_CONSOLE_URL` or `CUJ_WEB_CONSOLE_CLUSTER_MODE` set,
+`bench/cuj/harness/conftest.py` manages the Web Console lifecycle, runs the
+`READY` preflight directly against the private Web Console HTTP API, and tears
+down the Web Console or ephemeral cluster when the pytest session exits).
 Each test starts an API-only portal on an OS-assigned loopback port (or, in
 `bench/cuj/harness/`, talks directly to `CUJ_WEB_CONSOLE_URL` when configured)
 and uses a unique interaction session, so parallel workers do not share ports or

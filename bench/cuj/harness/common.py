@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
+import socket
+import subprocess
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 import pytest
 
@@ -19,7 +25,7 @@ from cuj.utils.interaction import (
     unnormalized_tool_calls,
 )
 from cuj.utils.milestones import MilestoneSuite
-from cuj.utils.portal import Portal, PortalError
+from cuj.utils.portal import REPO_ROOT, Portal, PortalError
 
 if TYPE_CHECKING:
     from cuj.utils.scenario import Scenario
@@ -38,6 +44,42 @@ SPECIALIST_CREATED_MILESTONE = "m2-specialist-task-created"
 SPECIALIST_COMPLETES_MILESTONE = "m3-specialist-completes"
 
 WEB_CONSOLE_URL_ENV = "CUJ_WEB_CONSOLE_URL"
+WEB_CONSOLE_CLUSTER_MODE_ENV = "CUJ_WEB_CONSOLE_CLUSTER_MODE"
+WEB_CONSOLE_USE_PRIVATE_IP_ENV = "CUJ_WEB_CONSOLE_USE_PRIVATE_IP"
+KEEP_PRIVATE_WEB_CONSOLE_ENV = "CUJ_KEEP_PRIVATE_WEB_CONSOLE"
+TEARDOWN_WEB_CONSOLE_ENV = "CUJ_TEARDOWN_WEB_CONSOLE"
+PROJECT_ID_ENV = "CUJ_PROJECT_ID"
+CLUSTER_NAME_ENV = "CUJ_CLUSTER_NAME"
+CLUSTER_LOCATION_ENV = "CUJ_CLUSTER_LOCATION"
+MODEL_PROVIDER_ENV = "CUJ_MODEL_PROVIDER"
+KUBE_CONTEXT_ENV = "CUJ_KUBE_CONTEXT"
+KUBE_NAMESPACE_ENV = "CUJ_NAMESPACE"
+DEFAULT_KUBE_NAMESPACE = "kubeagents-system"
+DEFAULT_CLUSTER_LOCATION = "us-central1"
+DEFAULT_MODEL_PROVIDER = "vertex_ai"
+WEB_CONSOLE_SERVICE_NAME = "kube-agents-web-console"
+WEB_CONSOLE_SERVICE_PORT = 8080
+WEB_CONSOLE_READY_TIMEOUT_SECONDS = 60.0
+INSTALL_TIMEOUT_SECONDS = 2400.0
+UNINSTALL_TIMEOUT_SECONDS = 1800.0
+KUBECTL_TIMEOUT_SECONDS = 120.0
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+INTERNAL_DNS_SUFFIXES = (
+    ".svc",
+    ".svc.cluster.local",
+    ".cluster.local",
+    ".internal",
+)
+PRIVATE_IP_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+VALID_CLUSTER_MODES = frozenset({"create", "existing", "port-forward"})
+TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "y", "on"})
 MAX_LATENCY_SECONDS_ENV = "CUJ_MAX_LATENCY_SECONDS"
 DEFAULT_MAX_LATENCY_SECONDS = 180.0
 DEFAULT_TURN_TIMEOUT_SECONDS = 300.0
@@ -787,6 +829,510 @@ def _transcript_turn_settled(transcript_payload: dict[str, Any]) -> bool:
     )
 
 
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    """Return whether environment variable ``name`` is set to a truthy value."""
+
+    raw = os.environ.get(name, "").strip().casefold()
+    if not raw:
+        return default
+    return raw in TRUTHY_ENV_VALUES
+
+
+def validate_private_web_console_url(url: str) -> str:
+    """Validate that ``url`` points to loopback, a private IP, or an internal DNS host."""
+
+    cleaned = url.strip().rstrip("/")
+    parsed = urllib.parse.urlsplit(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise PortalError(
+            f"Web Console URL must be an absolute HTTP(S) URL: {url!r}"
+        )
+    hostname = parsed.hostname.strip().casefold()
+    if hostname in LOOPBACK_HOSTS or hostname.endswith(INTERNAL_DNS_SUFFIXES):
+        return cleaned
+    try:
+        ip = ipaddress.ip_address(hostname)
+    except ValueError as exc:
+        raise PortalError(
+            f"Refusing non-private Web Console host {hostname!r} in {url!r}: "
+            "the Web Console has no authentication and must only be accessed "
+            "over loopback (127.0.0.1/localhost), an internal cluster DNS "
+            "name, or a private RFC-1918 IP address."
+        ) from exc
+    if (
+        not (
+            ip.is_loopback
+            or any(ip in network for network in PRIVATE_IP_NETWORKS)
+        )
+        or ip.is_unspecified
+        or ip.is_multicast
+    ):
+        raise PortalError(
+            f"Refusing non-private Web Console IP {hostname!r} in {url!r}: "
+            "the Web Console has no authentication and must never be exposed "
+            "on a public IP address."
+        )
+    return cleaned
+
+
+def _web_console_transport(root: str, *, timeout: float) -> Portal:
+    """Construct a ``Portal`` client with Web Console headers for ``root``."""
+
+    validated = validate_private_web_console_url(root)
+    transport = Portal(validated, timeout=timeout)
+    transport.headers[CONSOLE_HEADER] = "1"
+    hostname = (urllib.parse.urlsplit(validated).hostname or "").casefold()
+    if hostname not in LOOPBACK_HOSTS:
+        transport.headers["Host"] = f"127.0.0.1:{WEB_CONSOLE_SERVICE_PORT}"
+    return transport
+
+
+def _kubectl_cmd(
+    *args: str,
+    namespace: str | None = None,
+    kube_context: str = "",
+) -> list[str]:
+    """Build a ``kubectl`` command scoped to ``kube_context`` and ``namespace``."""
+
+    cmd = ["kubectl"]
+    if kube_context:
+        cmd.extend(["--context", kube_context])
+    if namespace:
+        cmd.extend(["-n", namespace])
+    cmd.extend(args)
+    return cmd
+
+
+def _run_checked_command(
+    cmd: list[str],
+    *,
+    timeout: float = KUBECTL_TIMEOUT_SECONDS,
+    description: str,
+) -> str:
+    """Execute ``cmd`` in ``REPO_ROOT`` and wrap failures in ``PortalError``."""
+
+    try:
+        completed = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise PortalError(f"{description} failed: {detail}") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PortalError(f"{description} failed: {exc}") from exc
+    return completed.stdout.strip()
+
+
+def _provision_cluster_with_web_console(
+    *,
+    project_id: str,
+    cluster_name: str,
+    location: str,
+    model_provider: str,
+) -> None:
+    """Stand up a GKE cluster with ``install.sh`` and the Web Console enabled."""
+
+    _run_checked_command(
+        [
+            str(REPO_ROOT / "install.sh"),
+            "--non-interactive",
+            f"--gcp-project-id={project_id}",
+            f"--gcp-region={location}",
+            f"--gke-cluster-name={cluster_name}",
+            f"--model-provider={model_provider}",
+            "--enable-web-console=true",
+            "--allow-unverified-source",
+        ],
+        timeout=INSTALL_TIMEOUT_SECONDS,
+        description=f"provisioning cluster {cluster_name!r} with web console",
+    )
+
+
+def _teardown_cluster(
+    *,
+    project_id: str,
+    cluster_name: str,
+    location: str,
+) -> None:
+    """Tear down a provisioned GKE cluster via ``uninstall.sh``."""
+
+    _run_checked_command(
+        [
+            str(REPO_ROOT / "uninstall.sh"),
+            "--non-interactive",
+            f"--gcp-project-id={project_id}",
+            f"--gcp-region={location}",
+            f"--gke-cluster-name={cluster_name}",
+        ],
+        timeout=UNINSTALL_TIMEOUT_SECONDS,
+        description=f"tearing down cluster {cluster_name!r}",
+    )
+
+
+def _deploy_web_console_on_existing_cluster(
+    *,
+    project_id: str,
+    cluster_name: str,
+    location: str,
+    model_provider: str,
+    namespace: str,
+    kube_context: str,
+) -> None:
+    """Deploy the Web Console onto an existing cluster as a private Service."""
+
+    if cluster_name and project_id and not kube_context:
+        _run_checked_command(
+            [
+                "gcloud",
+                "container",
+                "clusters",
+                "get-credentials",
+                cluster_name,
+                f"--location={location}",
+                f"--project={project_id}",
+            ],
+            description=(
+                f"fetching credentials for existing cluster {cluster_name!r}"
+            ),
+        )
+
+    probe = subprocess.run(
+        _kubectl_cmd(
+            "get",
+            "deployment",
+            "platform-agent-gateway",
+            namespace=namespace,
+            kube_context=kube_context,
+        ),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=KUBECTL_TIMEOUT_SECONDS,
+    )
+    if probe.returncode == 0:
+        helm_cmd = [
+            "helm",
+            "upgrade",
+            "kube-agents",
+            str(REPO_ROOT / "charts" / "kube-agents"),
+            "-n",
+            namespace,
+            "--reuse-values",
+            "--set",
+            "webConsole.enabled=true",
+            "--wait",
+        ]
+        if kube_context:
+            helm_cmd.extend(["--kube-context", kube_context])
+        _run_checked_command(
+            helm_cmd,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+            description="enabling web console via helm upgrade on existing cluster",
+        )
+        return
+
+    if not project_id or not cluster_name:
+        raise PortalError(
+            "existing cluster does not have platform-agent-gateway deployed in "
+            f"namespace {namespace!r}; set {PROJECT_ID_ENV} and "
+            f"{CLUSTER_NAME_ENV} to install kube-agents with the Web Console"
+        )
+    _provision_cluster_with_web_console(
+        project_id=project_id,
+        cluster_name=cluster_name,
+        location=location,
+        model_provider=model_provider,
+    )
+
+
+def _teardown_web_console_on_existing_cluster(
+    *,
+    namespace: str,
+    kube_context: str,
+) -> None:
+    """Disable and delete the unauthenticated Web Console on an existing cluster."""
+
+    helm_cmd = [
+        "helm",
+        "upgrade",
+        "kube-agents",
+        str(REPO_ROOT / "charts" / "kube-agents"),
+        "-n",
+        namespace,
+        "--reuse-values",
+        "--set",
+        "webConsole.enabled=false",
+        "--wait",
+    ]
+    if kube_context:
+        helm_cmd.extend(["--kube-context", kube_context])
+    subprocess.run(
+        helm_cmd,
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=KUBECTL_TIMEOUT_SECONDS,
+    )
+    _run_checked_command(
+        _kubectl_cmd(
+            "delete",
+            "deployment,service,networkpolicy",
+            WEB_CONSOLE_SERVICE_NAME,
+            "--ignore-not-found=true",
+            namespace=namespace,
+            kube_context=kube_context,
+        ),
+        description="deleting web console resources on existing cluster",
+    )
+
+
+def _resolve_private_web_console_url(
+    *,
+    namespace: str,
+    kube_context: str,
+) -> str:
+    """Resolve and validate the private IP endpoint of ``svc/kube-agents-web-console``."""
+
+    raw = _run_checked_command(
+        _kubectl_cmd(
+            "get",
+            "svc",
+            WEB_CONSOLE_SERVICE_NAME,
+            "-o",
+            "jsonpath={.status.loadBalancer.ingress[0].ip},{.spec.clusterIP}",
+            namespace=namespace,
+            kube_context=kube_context,
+        ),
+        description=f"resolving private IP for service/{WEB_CONSOLE_SERVICE_NAME}",
+    )
+    parts = [
+        part.strip()
+        for part in raw.split(",")
+        if part.strip() and part.strip().casefold() != "none"
+    ]
+    if not parts:
+        raise PortalError(
+            f"service/{WEB_CONSOLE_SERVICE_NAME} in namespace {namespace!r} "
+            "has no private ClusterIP or internal ingress IP"
+        )
+    candidate_url = f"http://{parts[0]}:{WEB_CONSOLE_SERVICE_PORT}"
+    return validate_private_web_console_url(candidate_url)
+
+
+def _wait_for_web_console_health(
+    base_url: str,
+    *,
+    process: subprocess.Popen[str] | None = None,
+    timeout: float = WEB_CONSOLE_READY_TIMEOUT_SECONDS,
+) -> None:
+    """Wait until ``GET {base_url}/healthz`` returns HTTP 200."""
+
+    health_url = f"{validate_private_web_console_url(base_url)}/healthz"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process is not None and process.poll() is not None:
+            raise PortalError(
+                "kubectl port-forward for web console exited during startup "
+                f"with code {process.returncode}"
+            )
+        try:
+            with urllib.request.urlopen(health_url, timeout=2.0) as response:
+                if response.status == 200:
+                    return
+        except (OSError, urllib.error.URLError):
+            time.sleep(0.2)
+    raise PortalError(
+        f"web console did not become healthy at {health_url} within "
+        f"{timeout:g} seconds"
+    )
+
+
+@contextmanager
+def _port_forward_web_console(
+    *,
+    namespace: str,
+    kube_context: str,
+) -> Iterator[str]:
+    """Open a loopback ``kubectl port-forward`` tunnel to the Web Console Service."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+        probe_sock.bind(("127.0.0.1", 0))
+        local_port = probe_sock.getsockname()[1]
+
+    cmd = _kubectl_cmd(
+        "port-forward",
+        f"svc/{WEB_CONSOLE_SERVICE_NAME}",
+        f"{local_port}:{WEB_CONSOLE_SERVICE_PORT}",
+        "--address",
+        "127.0.0.1",
+        namespace=namespace,
+        kube_context=kube_context,
+    )
+    process = subprocess.Popen(
+        cmd,
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    endpoint = f"http://127.0.0.1:{local_port}"
+    try:
+        _wait_for_web_console_health(endpoint, process=process)
+        yield endpoint
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        if process.stderr is not None:
+            process.stderr.close()
+
+
+@contextmanager
+def managed_web_console_endpoint() -> Iterator[str]:
+    """Manage cluster/Web Console setup, private endpoint validation, and teardown.
+
+    Supported modes via ``CUJ_WEB_CONSOLE_CLUSTER_MODE``:
+    - ``create``: Stand up an ephemeral GKE cluster with ``install.sh`` and the
+      Web Console enabled, connect via loopback ``kubectl port-forward`` or a
+      private IP (``CUJ_WEB_CONSOLE_USE_PRIVATE_IP=true``), and tear the
+      cluster down on exit via ``uninstall.sh`` unless deployed via private IP
+      with ``CUJ_KEEP_PRIVATE_WEB_CONSOLE=true``.
+    - ``existing``: Deploy the Web Console onto an existing cluster, connect
+      via loopback ``kubectl port-forward`` or a private IP
+      (``CUJ_WEB_CONSOLE_USE_PRIVATE_IP=true``), and tear the Web Console down
+      on exit unless deployed via private IP (and ``CUJ_TEARDOWN_WEB_CONSOLE``
+      is not ``true``).
+    - ``port-forward``: Forward an already-deployed ``svc/kube-agents-web-console``
+      on ``127.0.0.1`` and tear down on exit when
+      ``CUJ_TEARDOWN_WEB_CONSOLE=true``.
+    """
+
+    mode = os.environ.get(WEB_CONSOLE_CLUSTER_MODE_ENV, "").strip().casefold()
+    configured_url = os.environ.get(WEB_CONSOLE_URL_ENV, "").strip()
+    if not mode and not configured_url:
+        yield ""
+        return
+
+    if mode and mode not in VALID_CLUSTER_MODES:
+        raise PortalError(
+            f"Unsupported {WEB_CONSOLE_CLUSTER_MODE_ENV}={mode!r}; "
+            f"expected one of {sorted(VALID_CLUSTER_MODES)}"
+        )
+
+    namespace = (
+        os.environ.get(KUBE_NAMESPACE_ENV, "").strip()
+        or DEFAULT_KUBE_NAMESPACE
+    )
+    kube_context = os.environ.get(KUBE_CONTEXT_ENV, "").strip()
+    project_id = os.environ.get(PROJECT_ID_ENV, "").strip()
+    location = (
+        os.environ.get(CLUSTER_LOCATION_ENV, "").strip()
+        or DEFAULT_CLUSTER_LOCATION
+    )
+    model_provider = (
+        os.environ.get(MODEL_PROVIDER_ENV, "").strip()
+        or DEFAULT_MODEL_PROVIDER
+    )
+    use_private_ip = _env_truthy(WEB_CONSOLE_USE_PRIVATE_IP_ENV)
+    keep_private = _env_truthy(KEEP_PRIVATE_WEB_CONSOLE_ENV)
+    explicit_teardown = _env_truthy(TEARDOWN_WEB_CONSOLE_ENV)
+
+    if not mode:
+        validated = validate_private_web_console_url(configured_url)
+        try:
+            yield validated
+        finally:
+            if explicit_teardown:
+                _teardown_web_console_on_existing_cluster(
+                    namespace=namespace,
+                    kube_context=kube_context,
+                )
+        return
+
+    cluster_name = os.environ.get(CLUSTER_NAME_ENV, "").strip()
+    if mode == "create":
+        if not project_id:
+            raise PortalError(
+                f"{PROJECT_ID_ENV} is required when "
+                f"{WEB_CONSOLE_CLUSTER_MODE_ENV}='create'"
+            )
+        if not cluster_name:
+            cluster_name = f"cuj-web-console-{os.urandom(4).hex()}"
+
+    previous_url = os.environ.get(WEB_CONSOLE_URL_ENV)
+    try:
+        if mode == "create":
+            _provision_cluster_with_web_console(
+                project_id=project_id,
+                cluster_name=cluster_name,
+                location=location,
+                model_provider=model_provider,
+            )
+        elif mode == "existing":
+            _deploy_web_console_on_existing_cluster(
+                project_id=project_id,
+                cluster_name=cluster_name,
+                location=location,
+                model_provider=model_provider,
+                namespace=namespace,
+                kube_context=kube_context,
+            )
+
+        with ExitStack() as stack:
+            if configured_url:
+                endpoint = validate_private_web_console_url(configured_url)
+            elif use_private_ip and mode in {"create", "existing"}:
+                endpoint = _resolve_private_web_console_url(
+                    namespace=namespace,
+                    kube_context=kube_context,
+                )
+            else:
+                endpoint = stack.enter_context(
+                    _port_forward_web_console(
+                        namespace=namespace,
+                        kube_context=kube_context,
+                    )
+                )
+            os.environ[WEB_CONSOLE_URL_ENV] = endpoint
+            yield endpoint
+    finally:
+        if previous_url is None:
+            os.environ.pop(WEB_CONSOLE_URL_ENV, None)
+        else:
+            os.environ[WEB_CONSOLE_URL_ENV] = previous_url
+
+        if mode == "create":
+            if not (use_private_ip and keep_private and not explicit_teardown):
+                _teardown_cluster(
+                    project_id=project_id,
+                    cluster_name=cluster_name,
+                    location=location,
+                )
+        elif mode == "existing":
+            should_teardown = explicit_teardown or not use_private_ip
+            if should_teardown and not (
+                use_private_ip and keep_private and not explicit_teardown
+            ):
+                _teardown_web_console_on_existing_cluster(
+                    namespace=namespace,
+                    kube_context=kube_context,
+                )
+        elif mode == "port-forward" and explicit_teardown:
+            _teardown_web_console_on_existing_cluster(
+                namespace=namespace,
+                kube_context=kube_context,
+            )
+
+
 def _fetch_web_console_transcript(
     transport: Portal,
     session_id: str,
@@ -804,7 +1350,7 @@ def _run_web_console_turn(
 ) -> dict[str, Any]:
     """Execute one synchronous turn against the Web Console HTTP API."""
 
-    root = base_url.rstrip("/")
+    root = validate_private_web_console_url(base_url)
     session_id = (
         f"{WEB_CONSOLE_SESSION_PREFIX}"
         f"{os.urandom(WEB_CONSOLE_RAND_BYTES).hex()}"
@@ -823,8 +1369,7 @@ def _run_web_console_turn(
 
     started = time.monotonic()
     deadline = started + timeout_s
-    chat_transport = Portal(root, timeout=timeout_s)
-    chat_transport.headers[CONSOLE_HEADER] = "1"
+    chat_transport = _web_console_transport(root, timeout=timeout_s)
     chat_payload: dict[str, Any] = {}
     chat_timed_out = False
     try:
@@ -838,8 +1383,10 @@ def _run_web_console_turn(
         else:
             raise
 
-    transcript_transport = Portal(root, timeout=TRANSCRIPT_TIMEOUT_SECONDS)
-    transcript_transport.headers[CONSOLE_HEADER] = "1"
+    transcript_transport = _web_console_transport(
+        root,
+        timeout=TRANSCRIPT_TIMEOUT_SECONDS,
+    )
     transcript_payload = _fetch_web_console_transcript(
         transcript_transport, session_id
     )
@@ -884,17 +1431,23 @@ def _run_web_console_turn(
 
 
 def run_harness_scenario(scenario: Scenario) -> None:
-    """Run ``scenario`` via ``CUJ_WEB_CONSOLE_URL`` when set, else ``Scenario.run_test``."""
+    """Run ``scenario`` via a private Web Console endpoint or ``Scenario.run_test``."""
 
     web_console_url = os.environ.get(WEB_CONSOLE_URL_ENV, "").strip()
-    if not web_console_url:
+    cluster_mode = os.environ.get(WEB_CONSOLE_CLUSTER_MODE_ENV, "").strip()
+    if not web_console_url and not cluster_mode:
         scenario.run_test()
         return
 
     log = EvidenceLog.temporary(f"kube-agents-{scenario.id}-")
     try:
-        prompt = scenario.build_prompt()
-        interaction = _run_web_console_turn(web_console_url, prompt, log)
+        with ExitStack() as stack:
+            if not web_console_url:
+                web_console_url = stack.enter_context(
+                    managed_web_console_endpoint()
+                )
+            prompt = scenario.build_prompt()
+            interaction = _run_web_console_turn(web_console_url, prompt, log)
         acceptance = scenario.evaluate_acceptance(interaction)
         milestones = None
         milestone_results = ()

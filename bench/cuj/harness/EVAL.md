@@ -4,10 +4,35 @@ This document specifies the 10 read-only Critical User Journey (CUJ) evaluations
 
 ## Running the Evaluation Suite
 
-### Against a Live Web Console Endpoint
+Because the Web Console holds the agent API key server-side and has no login page of its own, `validate_private_web_console_url` refuses any public IP address or external hostname and accepts only loopback (`127.0.0.1`, `::1`, `localhost`), internal cluster/VPC DNS names (`*.svc.cluster.local`, `*.internal`), or RFC-1918 private IP addresses.
+
+### Stand Up an Ephemeral Cluster and Tear Down When Done (`create`)
 
 ```bash
-CUJ_WEB_CONSOLE_URL="http://<web-console-ip>" \
+CUJ_WEB_CONSOLE_CLUSTER_MODE="create" \
+CUJ_PROJECT_ID="<gcp-project-id>" \
+CUJ_CLUSTER_LOCATION="us-central1" \
+CUJ_MAX_LATENCY_SECONDS="180" \
+uv run --project bench pytest -v -s bench/cuj/harness
+```
+
+### Deploy the Web Console onto an Existing Cluster (`existing`)
+
+By default, `existing` mode enables `kube-agents-web-console`, connects via a loopback `kubectl port-forward`, and tears down the Web Console deployment when the pytest session finishes. When `CUJ_WEB_CONSOLE_USE_PRIVATE_IP="true"` is set inside a VPC-connected runner, the harness resolves the private `ClusterIP` (or internal VPC IP) of `svc/kube-agents-web-console` and retains the private-IP deployment unless `CUJ_TEARDOWN_WEB_CONSOLE="true"` is set:
+
+```bash
+CUJ_WEB_CONSOLE_CLUSTER_MODE="existing" \
+CUJ_PROJECT_ID="<gcp-project-id>" \
+CUJ_CLUSTER_NAME="<existing-cluster-name>" \
+CUJ_CLUSTER_LOCATION="us-central1" \
+CUJ_MAX_LATENCY_SECONDS="180" \
+uv run --project bench pytest -v -s bench/cuj/harness
+```
+
+### Against a Loopback or Private-IP Web Console Endpoint
+
+```bash
+CUJ_WEB_CONSOLE_URL="http://127.0.0.1:18080" \
 CUJ_PROJECT_ID="<gcp-project-id>" \
 CUJ_MAX_LATENCY_SECONDS="180" \
 uv run --project bench pytest -v -s bench/cuj/harness

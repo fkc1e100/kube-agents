@@ -13,6 +13,7 @@ if str(BENCH_ROOT) not in sys.path:
 import pytest
 
 from cuj.harness import (  # noqa: E402
+    common as cuj_common,
     conftest as cuj_harness_conftest,
     test_01_identity_and_permission_posture as cuj_h01,
     test_02_fleet_and_host_cluster_scope as cuj_h02,
@@ -29,7 +30,10 @@ from cuj.harness.common import (  # noqa: E402
     _fetch_web_console_transcript,
     _project_web_console_interaction,
     _transcript_turn_settled,
+    _web_console_transport,
     interaction_latency_seconds,
+    managed_web_console_endpoint,
+    validate_private_web_console_url,
     within_latency_budget,
 )
 from cuj.utils.portal import PortalError  # noqa: E402
@@ -1379,7 +1383,9 @@ def test_web_console_transcript_error_and_conftest_ready_preflight(monkeypatch):
         "_run_web_console_turn",
         lambda *_args, **_kwargs: {"status": "completed", "output": "READY"},
     )
-    ok_results = cuj_harness_conftest.agent_preflight_results.__wrapped__()
+    ok_results = next(
+        cuj_harness_conftest.agent_preflight_results.__wrapped__()
+    )
     assert all(val == "" for val in ok_results.values())
 
     monkeypatch.setattr(
@@ -1387,7 +1393,7 @@ def test_web_console_transcript_error_and_conftest_ready_preflight(monkeypatch):
         "_run_web_console_turn",
         lambda *_args, **_kwargs: {"status": "completed", "output": "NOT READY"},
     )
-    bad_reply_results = (
+    bad_reply_results = next(
         cuj_harness_conftest.agent_preflight_results.__wrapped__()
     )
     assert all(
@@ -1402,5 +1408,185 @@ def test_web_console_transcript_error_and_conftest_ready_preflight(monkeypatch):
             PortalError("Web Console unreachable")
         ),
     )
-    err_results = cuj_harness_conftest.agent_preflight_results.__wrapped__()
+    err_results = next(
+        cuj_harness_conftest.agent_preflight_results.__wrapped__()
+    )
     assert all("Web Console unreachable" in val for val in err_results.values())
+
+
+def test_validate_private_web_console_url_and_transport_headers():
+    assert (
+        validate_private_web_console_url("http://127.0.0.1:18080/")
+        == "http://127.0.0.1:18080"
+    )
+    assert (
+        validate_private_web_console_url("http://localhost:8080")
+        == "http://localhost:8080"
+    )
+    assert (
+        validate_private_web_console_url("http://10.24.0.15:8080")
+        == "http://10.24.0.15:8080"
+    )
+    assert (
+        validate_private_web_console_url("http://172.16.4.12:8080")
+        == "http://172.16.4.12:8080"
+    )
+    assert (
+        validate_private_web_console_url("http://192.168.1.50:8080")
+        == "http://192.168.1.50:8080"
+    )
+    assert (
+        validate_private_web_console_url(
+            "http://kube-agents-web-console.kubeagents-system.svc.cluster.local:8080"
+        )
+        == "http://kube-agents-web-console.kubeagents-system.svc.cluster.local:8080"
+    )
+
+    with pytest.raises(PortalError, match="Refusing non-private Web Console IP"):
+        validate_private_web_console_url("http://203.0.113.10:8080")
+
+    with pytest.raises(
+        PortalError, match="Refusing non-private Web Console host"
+    ):
+        validate_private_web_console_url("https://web-console.example.com")
+
+    loopback_transport = _web_console_transport(
+        "http://127.0.0.1:18080", timeout=10.0
+    )
+    assert loopback_transport.headers["X-Kube-Agents-Console"] == "1"
+    assert "Host" not in loopback_transport.headers
+
+    private_ip_transport = _web_console_transport(
+        "http://10.24.0.15:8080", timeout=10.0
+    )
+    assert private_ip_transport.headers["X-Kube-Agents-Console"] == "1"
+    assert private_ip_transport.headers["Host"] == "127.0.0.1:8080"
+
+
+def test_managed_web_console_endpoint_create_mode_tears_down_cluster(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+
+    events: list[tuple[str, Any]] = []
+
+    monkeypatch.delenv("CUJ_WEB_CONSOLE_URL", raising=False)
+    monkeypatch.setenv("CUJ_WEB_CONSOLE_CLUSTER_MODE", "create")
+    monkeypatch.setenv("CUJ_PROJECT_ID", "demo-project")
+    monkeypatch.setenv("CUJ_CLUSTER_NAME", "ephemeral-cuj-cluster")
+    monkeypatch.setenv("CUJ_CLUSTER_LOCATION", "us-central1")
+
+    monkeypatch.setattr(
+        cuj_common,
+        "_provision_cluster_with_web_console",
+        lambda **kwargs: events.append(("provision", kwargs)),
+    )
+    monkeypatch.setattr(
+        cuj_common,
+        "_teardown_cluster",
+        lambda **kwargs: events.append(("teardown_cluster", kwargs)),
+    )
+
+    @contextmanager
+    def fake_port_forward(*, namespace: str, kube_context: str):
+        events.append(("port_forward_start", (namespace, kube_context)))
+        try:
+            yield "http://127.0.0.1:18080"
+        finally:
+            events.append(("port_forward_stop", (namespace, kube_context)))
+
+    monkeypatch.setattr(
+        cuj_common, "_port_forward_web_console", fake_port_forward
+    )
+
+    with pytest.raises(RuntimeError, match="simulated test failure"):
+        with managed_web_console_endpoint() as url:
+            assert url == "http://127.0.0.1:18080"
+            assert cuj_common.os.environ["CUJ_WEB_CONSOLE_URL"] == url
+            raise RuntimeError("simulated test failure")
+
+    assert "CUJ_WEB_CONSOLE_URL" not in cuj_common.os.environ
+    assert [name for name, _ in events] == [
+        "provision",
+        "port_forward_start",
+        "port_forward_stop",
+        "teardown_cluster",
+    ]
+    assert events[-1][1] == {
+        "project_id": "demo-project",
+        "cluster_name": "ephemeral-cuj-cluster",
+        "location": "us-central1",
+    }
+
+
+def test_managed_web_console_endpoint_existing_mode_port_forward_and_private_ip(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+
+    events: list[tuple[str, Any]] = []
+
+    monkeypatch.delenv("CUJ_WEB_CONSOLE_URL", raising=False)
+    monkeypatch.setenv("CUJ_WEB_CONSOLE_CLUSTER_MODE", "existing")
+    monkeypatch.setenv("CUJ_PROJECT_ID", "demo-project")
+    monkeypatch.setenv("CUJ_CLUSTER_NAME", "existing-cluster")
+
+    monkeypatch.setattr(
+        cuj_common,
+        "_deploy_web_console_on_existing_cluster",
+        lambda **kwargs: events.append(("deploy_existing", kwargs["cluster_name"])),
+    )
+    monkeypatch.setattr(
+        cuj_common,
+        "_teardown_web_console_on_existing_cluster",
+        lambda **kwargs: events.append(("teardown_existing", kwargs["namespace"])),
+    )
+
+    @contextmanager
+    def fake_port_forward(*, namespace: str, kube_context: str):
+        events.append(("port_forward_start", namespace))
+        try:
+            yield "http://127.0.0.1:19090"
+        finally:
+            events.append(("port_forward_stop", namespace))
+
+    monkeypatch.setattr(
+        cuj_common, "_port_forward_web_console", fake_port_forward
+    )
+
+    # Default on existing cluster (no private IP): tears down Web Console on exit.
+    with managed_web_console_endpoint() as url:
+        assert url == "http://127.0.0.1:19090"
+
+    assert [name for name, _ in events] == [
+        "deploy_existing",
+        "port_forward_start",
+        "port_forward_stop",
+        "teardown_existing",
+    ]
+
+    # Private IP deployment on existing cluster: resolves private ClusterIP and
+    # does not tear down unless CUJ_TEARDOWN_WEB_CONSOLE=true.
+    events.clear()
+    monkeypatch.setenv("CUJ_WEB_CONSOLE_USE_PRIVATE_IP", "true")
+    monkeypatch.setattr(
+        cuj_common,
+        "_resolve_private_web_console_url",
+        lambda **_kwargs: "http://10.96.12.34:8080",
+    )
+
+    with managed_web_console_endpoint() as private_url:
+        assert private_url == "http://10.96.12.34:8080"
+
+    assert [name for name, _ in events] == ["deploy_existing"]
+
+    # Explicit teardown on private IP deployment tears down when requested.
+    events.clear()
+    monkeypatch.setenv("CUJ_TEARDOWN_WEB_CONSOLE", "true")
+    with managed_web_console_endpoint() as private_url:
+        assert private_url == "http://10.96.12.34:8080"
+
+    assert [name for name, _ in events] == [
+        "deploy_existing",
+        "teardown_existing",
+    ]
