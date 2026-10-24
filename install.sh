@@ -2625,7 +2625,7 @@ bootstrap_install_env_file() {
       "every later install.sh run"
     warn_flag_beats_unrecorded_file_value "$destination" WEB_CONSOLE_ENABLED --enable-web-console \
       "${PARAM_ENABLE_WEB_CONSOLE:-}" \
-      "A later run without it re-reads the recorded value and renders the web console to match it, adding or removing it." \
+      "A later run without it renders the web console from what the file records; upgrade.sh and --menu take no --enable-web-console, so the next of either puts the console back to the recorded or default state." \
       true \
       "every later install.sh run"
     # Five consequence strings, unlike every other call here, which take one.

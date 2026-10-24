@@ -9,34 +9,16 @@ import (
 	"testing"
 )
 
-func TestUpdateConfigYAMLWithModel(t *testing.T) {
-	orig := `model_list:
-  - model_name: model-default
-    litellm_params:
-      model: vertex_ai/gemini-3.5-flash
-  - model_name: hermes-agent
-    litellm_params:
-      model: vertex_ai/gemini-3.5-flash
-  - model_name: gemini-3.5-flash
-    litellm_params:
-      model: vertex_ai/gemini-3.5-flash
-litellm_settings:
-  callbacks: ["prometheus", "litellm_thinking_replay_callback.proxy_handler_instance"]
-`
-
-	updated := updateConfigYAMLWithModel(orig, "gemini-3.8-flash", "vertex_ai/gemini-3.8-flash")
-
-	if !strings.Contains(updated, "model_name: model-default\n    litellm_params:\n      model: vertex_ai/gemini-3.8-flash") {
-		t.Fatalf("model-default not updated:\n%s", updated)
-	}
-	if !strings.Contains(updated, "model_name: hermes-agent\n    litellm_params:\n      model: vertex_ai/gemini-3.8-flash") {
-		t.Fatalf("hermes-agent not updated:\n%s", updated)
-	}
-	if !strings.Contains(updated, "  - model_name: gemini-3.8-flash\n    litellm_params:\n      model: vertex_ai/gemini-3.8-flash") {
-		t.Fatalf("gemini-3.8-flash alias missing or misindented:\n%s", updated)
-	}
-	if !strings.Contains(updated, `callbacks: ["prometheus", "litellm_thinking_replay_callback.proxy_handler_instance"]`) {
-		t.Fatalf("callbacks lost or corrupted:\n%s", updated)
+func TestGenerateModelHelmValuesYAML(t *testing.T) {
+	yaml := generateModelHelmValuesYAML("gemini-3.8-flash", "vertex_ai", "vertex_ai/gemini-3.8-flash", "high")
+	for _, want := range []string{
+		"model: gemini-3.8-flash",
+		"provider: vertex_ai",
+		"reasoningLevel: high",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("generateModelHelmValuesYAML missing %q:\n%s", want, yaml)
+		}
 	}
 }
 
@@ -87,9 +69,9 @@ func TestModelsGetAndPost(t *testing.T) {
 		t.Errorf("active_target: got %q, want 'vertex_ai/gemini-4.0-argon'", postRes.ActiveTarget)
 	}
 
-	// 3. Verify in-memory state updated
-	if s.cfg.AssistModel != "gemini-4.0-argon" {
-		t.Errorf("s.cfg.AssistModel: got %q, want 'gemini-4.0-argon'", s.cfg.AssistModel)
+	// 3. Verify in-memory state and declarative Helm YAML updated without mutating s.cfg
+	if !strings.Contains(postRes.HelmValuesYAML, "model: gemini-4.0-argon") {
+		t.Errorf("helm_values_yaml missing model: %q", postRes.HelmValuesYAML)
 	}
 	m := s.currentModel(context.Background())
 	if m.Name != "gemini-4.0-argon" {
@@ -150,7 +132,18 @@ func TestModelsGetAndPost(t *testing.T) {
 }
 
 func TestModelsPreFlightValidationFailure(t *testing.T) {
+	var seenModels []string
 	fakeGateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if m, ok := body["model"].(string); ok {
+			seenModels = append(seenModels, m)
+		}
+		if body["model"] == "model-default" || body["model"] == "hermes-agent" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"pong"}}]}`))
+			return
+		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"message":"The requested model 'invalid-model' does not exist."}}`))
 	}))
@@ -171,6 +164,11 @@ func TestModelsPreFlightValidationFailure(t *testing.T) {
 
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("expected 422 for failing pre-flight test, got %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, m := range seenModels {
+		if m == "model-default" || m == "hermes-agent" {
+			t.Errorf("testModel fell back to alias %q when testing candidate model", m)
+		}
 	}
 	var errResp map[string]any
 	_ = json.NewDecoder(rec.Body).Decode(&errResp)

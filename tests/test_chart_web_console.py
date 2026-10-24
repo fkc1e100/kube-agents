@@ -248,6 +248,18 @@ class WebConsoleChartTest(unittest.TestCase):
         self.assertNotIn("ALLOWED_HOSTS", self.template)
         self.assertFalse((CHART_DIR / "values-poc.yaml").exists(), "values-poc.yaml bypasses install.sh")
 
+    def test_environment_role_grants_only_platformagent_and_replicaset_access(self) -> None:
+        role = yaml.safe_load(_plain_yaml(self.docs["Role"]))
+        resources = [tuple(r.get("resources", ())) for r in role["rules"]]
+        self.assertEqual(resources, [("platformagents",), ("replicasets",)])
+        cluster_role = yaml.safe_load(_plain_yaml(self.docs["ClusterRole"]))
+        for rule in cluster_role["rules"] + role["rules"]:
+            if "pods" in rule.get("resources", ()):
+                self.assertEqual(rule.get("verbs"), ["list"])
+        binding = yaml.safe_load(_plain_yaml(self.docs["RoleBinding"]))
+        self.assertIn("subjects", binding)
+        self.assertNotIn("subjects", binding.get("roleRef", {}))
+
     def test_latest_tag_is_pulled_every_time(self) -> None:
         # A node that cached `latest` never picks up a new build under IfNotPresent,
         # and an integer tag must be cast to string before `eq $tag "latest"`.
@@ -420,16 +432,21 @@ class WebConsoleRenderTest(unittest.TestCase):
         self.assertNotIn("kube-agents-upgrader", sa_names)
         role = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "t-web-console-environment")
         resources = [tuple(r.get("resources", ())) for r in role["rules"]]
-        self.assertNotIn(("pods",), resources)
-        self.assertNotIn(("pods", "pods/log"), resources)
+        self.assertEqual(resources, [("platformagents",), ("replicasets",)])
+        cluster_role = next(d for d in docs if d["kind"] == "ClusterRole" and d["metadata"]["name"] == "t-web-console-environment")
+        for r in cluster_role["rules"] + role["rules"]:
+            if "pods" in (r.get("resources") or []):
+                self.assertEqual(r.get("verbs"), ["list"])
+            self.assertNotIn("*", r.get("verbs") or [])
         binding = next(d for d in docs if d["kind"] == "RoleBinding" and d["metadata"]["name"] == "t-web-console-environment")
         self.assertEqual(
             [(s["kind"], s["name"]) for s in binding.get("subjects") or []],
             [("ServiceAccount", "t-web-console")],
             "the console's namespace Role binds nobody",
         )
-        crb_names = [d["metadata"]["name"] for d in docs if d["kind"] == "ClusterRoleBinding"]
-        self.assertNotIn("t-upgrader-admin", crb_names)
+        for b in docs:
+            if b["kind"] in ("ClusterRoleBinding", "RoleBinding"):
+                self.assertNotEqual((b.get("roleRef") or {}).get("name"), "cluster-admin")
 
 
 

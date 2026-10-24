@@ -25,7 +25,8 @@ limitations under the License.
 // pods/portforward on the namespace. Three checks in this file keep that
 // boundary from being bypassed through the operator's own browser:
 //
-//   - every route but /healthz refuses a Host header that is not loopback,
+//   - every route but /healthz refuses a Host header that is not loopback
+//     (or explicitly listed in ALLOWED_HOSTS / WEB_CONSOLE_ALLOWED_HOSTS),
 //     which defeats DNS rebinding against the forwarded port;
 //   - POST /api/chat and /api/chat/stream require a custom header and a
 //     JSON body, so a page on another origin cannot send a turn without a
@@ -128,9 +129,9 @@ const (
 	// (session_kv_server.py's _start_agent_turn): a diagnostic turn that
 	// calls tools routinely runs for minutes.
 	turnTimeout = 300 * time.Second
-	// serverWriteTimeout must outlast a turn, or the server cuts the response
-	// off while Hermes is still answering.
-	serverWriteTimeout   = turnTimeout + 30*time.Second
+	// serverWriteTimeout must outlast a turn or a streamed turn, or the server
+	// cuts the response off while Hermes is still answering.
+	serverWriteTimeout   = streamTurnCeiling + streamWriteGrace + 30*time.Second
 	serverReadTimeout    = 30 * time.Second
 	serverHeaderTimeout  = 10 * time.Second
 	serverIdleTimeout    = 120 * time.Second
@@ -144,7 +145,12 @@ const (
 	// defaultDelegationPollInterval is how often runTurn polls session
 	// messages while waiting for a kanban_create card filed during the turn
 	// to reach a terminal status.
-	defaultDelegationPollInterval = 350 * time.Millisecond
+	defaultDelegationPollInterval = 1 * time.Second
+	// defaultDelegationSynthesisGracePolls is how many extra polls
+	// awaitDelegatedKanbanReply waits after all cards reach a terminal status
+	// for the Planning Agent's wake turn to post its synthesis reply before
+	// falling back to the raw card result summaries.
+	defaultDelegationSynthesisGracePolls = 4
 
 	// agentBusyWindow is how recently an agent session must have been
 	// active for an unanswered newest message to count as a turn in
@@ -505,7 +511,11 @@ func newServer(cfg config) *server {
 		allowedHosts:           make(map[string]bool),
 	}
 	for _, h := range cfg.AllowedHosts {
-		h = strings.ToLower(strings.Trim(strings.TrimSpace(h), "[]"))
+		h = hostOnly(h)
+		if h == "*" {
+			log.Printf(logPrefix + "ignoring wildcard '*' in ALLOWED_HOSTS; specify explicit hostnames")
+			continue
+		}
 		if h != "" {
 			s.allowedHosts[h] = true
 		}
@@ -562,22 +572,17 @@ func (s *server) isAllowedHost(host string) bool {
 	if loopbackHosts[h] {
 		return true
 	}
-	if s.allowedHosts != nil {
-		if s.allowedHosts["*"] || s.allowedHosts[h] {
-			return true
-		}
-	}
-	return false
+	return s.allowedHosts != nil && s.allowedHosts[h]
 }
 
 // requireLocalHost refuses a request whose Host is not allowed. By default,
-// only loopback hosts (localhost, 127.0.0.1, ::1) are allowed. Additional hosts
-// or wildcards may be configured via ALLOWED_HOSTS / WEB_CONSOLE_ALLOWED_HOSTS.
+// only loopback hosts (localhost, 127.0.0.1, ::1) are allowed. Additional
+// explicit hosts may be configured via ALLOWED_HOSTS / WEB_CONSOLE_ALLOWED_HOSTS.
 func (s *server) requireLocalHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.isAllowedHost(r.Host) {
 			writeError(w, http.StatusForbidden, "host_not_allowed",
-				"The web console only answers on localhost. Reach it with kubectl port-forward.")
+				"The web console only answers on localhost (or hosts listed in ALLOWED_HOSTS). Reach it with kubectl port-forward.")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -598,13 +603,7 @@ func (s *server) requireConsoleRequest(next http.Handler) http.Handler {
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			u, err := url.Parse(origin)
-			if err != nil {
-				writeError(w, http.StatusForbidden, "cross_origin", "Cross-origin requests are refused.")
-				return
-			}
-			originHost := hostOnly(u.Host)
-			reqHost := hostOnly(r.Host)
-			if originHost != reqHost && !s.allowedHosts["*"] && (!s.isAllowedHost(originHost) || !s.isAllowedHost(reqHost)) {
+			if err != nil || !strings.EqualFold(u.Host, r.Host) {
 				writeError(w, http.StatusForbidden, "cross_origin", "Cross-origin requests are refused.")
 				return
 			}
@@ -1224,11 +1223,14 @@ func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
 func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, beforeID int64, initialReply string) (string, error) {
 	rows, _, failure := s.pageMessages(ctx, sid, beforeID, nil)
 	if failure != nil {
+		log.Printf(logPrefix+"session %s: initial delegation message read failed (%s): %s", sid, failure.code, failure.message)
 		return initialReply, nil
 	}
-	if reply, settled, delegated := s.resolveDelegatedTurn(rows, beforeID); !delegated {
+	reply, settled, allTerminal, delegated := s.resolveDelegatedTurn(rows, beforeID)
+	if !delegated {
 		return initialReply, nil
-	} else if settled {
+	}
+	if settled {
 		return reply, nil
 	}
 
@@ -1239,9 +1241,17 @@ func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, befo
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	gracePolls := 0
+	if allTerminal {
+		gracePolls = 1
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			if allTerminal && strings.TrimSpace(reply) != "" {
+				return reply, nil
+			}
 			if strings.TrimSpace(initialReply) != "" {
 				return initialReply, nil
 			}
@@ -1251,8 +1261,15 @@ func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, befo
 			if failure != nil {
 				continue
 			}
-			if reply, settled, _ := s.resolveDelegatedTurn(rows, beforeID); settled {
+			reply, settled, allTerminal, _ = s.resolveDelegatedTurn(rows, beforeID)
+			if settled {
 				return reply, nil
+			}
+			if allTerminal {
+				gracePolls++
+				if gracePolls >= defaultDelegationSynthesisGracePolls {
+					return reply, nil
+				}
 			}
 		}
 	}
@@ -1260,13 +1277,16 @@ func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, befo
 
 // resolveDelegatedTurn scans messages with ID > beforeID for kanban_create
 // tool results and their matching [kanban] Task <id> <status>. notifications.
-// It returns (reply, settled, delegated).
-func (s *server) resolveDelegatedTurn(rows []hermesMessage, beforeID int64) (string, bool, bool) {
+// It returns (reply, settled, allTerminal, delegated), where settled is true
+// once all cards are terminal and the Planning Agent's wake turn has replied
+// (either with a synthesis message or [SILENT]).
+func (s *server) resolveDelegatedTurn(rows []hermesMessage, beforeID int64) (string, bool, bool, bool) {
 	var orderedIDs []string
 	pending := map[string]bool{}
 	completed := map[string]*messageCard{}
 	var lastCardMsgID int64
 	var synthesis string
+	var wakeSilent bool
 
 	for _, m := range rows {
 		if m.ID <= beforeID {
@@ -1283,42 +1303,49 @@ func (s *server) resolveDelegatedTurn(rows []hermesMessage, beforeID int64) (str
 				completed[card.TaskID] = card
 				if m.ID > lastCardMsgID {
 					lastCardMsgID = m.ID
+					synthesis = ""
+					wakeSilent = false
 				}
 			}
 		}
 		if m.Role == roleAssistant && m.Content != nil && lastCardMsgID > 0 && m.ID > lastCardMsgID {
-			if text := strings.TrimSpace(*m.Content); text != "" && !strings.EqualFold(text, "[SILENT]") {
-				synthesis = text
+			if text := strings.TrimSpace(*m.Content); text != "" {
+				if strings.EqualFold(text, "[SILENT]") {
+					wakeSilent = true
+				} else {
+					synthesis = text
+				}
 			}
 		}
 	}
 
 	if len(orderedIDs) == 0 {
-		return "", false, false
+		return "", false, false, false
 	}
 	for _, id := range orderedIDs {
 		if _, ok := completed[id]; !ok {
-			return "", false, true
+			return "", false, false, true
 		}
 	}
 	if synthesis != "" {
-		return synthesis, true, true
+		return synthesis, true, true, true
 	}
 	var summaries []string
 	for _, id := range orderedIDs {
-		if sum := strings.TrimSpace(completed[id].Summary); sum != "" {
+		card := completed[id]
+		if sum := strings.TrimSpace(card.Summary); sum != "" {
 			summaries = append(summaries, sum)
+		} else {
+			summaries = append(summaries, fmt.Sprintf("Task %s %s.", id, strings.TrimSpace(card.Status)))
 		}
 	}
-	if len(summaries) > 0 {
-		return strings.Join(summaries, "\n\n"), true, true
-	}
-	return "", false, true
+	fallback := strings.Join(summaries, "\n\n")
+	return fallback, wakeSilent, true, true
 }
 
 func isTerminalKanbanStatus(status string) bool {
 	s := strings.ToLower(strings.TrimSpace(status))
-	for _, term := range []string{"completed", "done", "blocked", "failed", "timed_out", "timed out", "crashed", "gave_up", "gave up"} {
+	for _, term := range []string{"completed", "done", "failed", "blocked", "cancelled", "canceled", "aborted", "gave_up", "gave up"} {
 		if s == term || strings.HasPrefix(s, term+";") || strings.HasPrefix(s, term+":") || strings.HasPrefix(s, term+".") || strings.HasPrefix(s, term+" ") {
 			return true
 		}

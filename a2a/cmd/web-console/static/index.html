@@ -2195,13 +2195,13 @@
             <div
               class="model-select-wrap"
               id="header-model-wrap"
-              title="Active LLM model: click dropdown to switch on the fly via LiteLLM"
+              title="Preferred LLM model recorded on PlatformAgent"
             >
               <span class="model-select-icon" aria-hidden="true">&#10024;</span>
               <select
                 class="header-model-select"
                 id="header-model-select"
-                aria-label="Switch Active LLM Model"
+                aria-label="Select Preferred LLM Model"
               >
                 <option value="" disabled selected>
                   Loading model&hellip;
@@ -2211,13 +2211,13 @@
                 class="model-select-spinner"
                 id="header-model-spinner"
                 hidden
-                title="Switching model in LiteLLM&hellip;"
+                title="Recording model selection on PlatformAgent&hellip;"
               ></span>
             </div>
             <div
               class="reasoning-select-wrap"
               id="header-reasoning-wrap"
-              title="Reasoning &amp; Thinking Level: click dropdown to change on the fly"
+              title="Reasoning &amp; Thinking Level recorded on PlatformAgent"
             >
               <span class="reasoning-select-icon" aria-hidden="true"
                 >&#129504;</span
@@ -2370,7 +2370,7 @@
             class="tile"
             id="tile-model"
             style="cursor: pointer"
-            title="Click to switch model on the fly in the header"
+            title="Click to select preferred model in the header"
           >
             <div
               class="tile-label"
@@ -2677,12 +2677,12 @@
                 >
                   <span>&#128269;</span> Find &amp; Connect Repositories
                 </div>
-                <div style="display: flex; gap: 6px; margin-bottom: 8px">
+                <div style="display: flex; gap: 6px">
                   <input
                     type="text"
                     id="quick-repo-input"
                     class="input-box"
-                    placeholder="e.g. fkc1e100/kube-agents-infra"
+                    placeholder="e.g. acme/kube-agents-infra"
                     style="font-size: 12px; padding: 4px 8px; flex: 1"
                   />
                   <select
@@ -2701,48 +2701,6 @@
                     style="font-size: 11.5px; padding: 4px 10px"
                   >
                     Connect
-                  </button>
-                </div>
-                <div
-                  style="
-                    display: flex;
-                    flex-wrap: wrap;
-                    gap: 4px;
-                    align-items: center;
-                  "
-                >
-                  <span style="font-size: 11px; color: var(--text-sub)"
-                    >Discovered Fleet:</span
-                  >
-                  <button
-                    type="button"
-                    class="chip quick-preset-chip"
-                    data-repo="fkc1e100/kube-agents-infra"
-                    data-role="gitops"
-                    data-cat="infra"
-                    title="Click to connect as primary GitOps remediation target"
-                  >
-                    + fkc1e100/kube-agents-infra
-                  </button>
-                  <button
-                    type="button"
-                    class="chip quick-preset-chip"
-                    data-repo="fkc1e100/kube-agents-apps"
-                    data-role="managed"
-                    data-cat="workloads"
-                    title="Click to connect as managed workloads repo"
-                  >
-                    + fkc1e100/kube-agents-apps
-                  </button>
-                  <button
-                    type="button"
-                    class="chip quick-preset-chip"
-                    data-repo="fkc1e100/kube-agents-iam"
-                    data-role="managed"
-                    data-cat="iam"
-                    title="Click to connect as managed IAM repo"
-                  >
-                    + fkc1e100/kube-agents-iam
                   </button>
                 </div>
               </div>
@@ -3322,6 +3280,7 @@
                 >
                   <option value="github">GitHub</option>
                   <option value="gitlab">GitLab</option>
+                  <option value="gitea">Gitea</option>
                 </select>
                 <input
                   type="text"
@@ -3407,6 +3366,7 @@
                 >
                   <option value="github">GitHub</option>
                   <option value="gitlab">GitLab</option>
+                  <option value="gitea">Gitea</option>
                 </select>
                 <input
                   type="text"
@@ -3496,6 +3456,7 @@
                 >
                   <option value="github">GitHub</option>
                   <option value="gitlab">GitLab</option>
+                  <option value="gitea">Gitea</option>
                 </select>
                 <input
                   type="text"
@@ -3573,6 +3534,7 @@
                 >
                   <option value="github">GitHub</option>
                   <option value="gitlab">GitLab</option>
+                  <option value="gitea">Gitea</option>
                 </select>
                 <input
                   type="text"
@@ -3831,7 +3793,7 @@
                 id="pr-changes-input"
                 class="input-box"
                 rows="4"
-                placeholder="Describe the changes or issue to remediate (e.g. 'Add cluster gke-tpuv6-dws to environments/gca-gke-test with Cloud TPU v6e Trillium nodepool')..."
+                placeholder="Describe the changes or issue to remediate (e.g. 'Add cluster gke-tpuv6-dws to environments/prod with Cloud TPU v6e Trillium nodepool')..."
                 style="
                   width: 100%;
                   font-size: 12.5px;
@@ -4020,6 +3982,7 @@
           busyUntil: typeof t.busyUntil === "number" ? t.busyUntil : 0,
           unread: !!t.unread,
           unreadFrom: typeof t.unreadFrom === "number" ? t.unreadFrom : 0,
+          wakeOpen: !!t.wakeOpen,
           started: !!t.started,
         };
       }
@@ -4098,7 +4061,8 @@
             ? mine.busyUntil
             : t.busyUntil || 0;
           mine.unread = onScreen(mine.id) ? false : t.unread;
-          if (mine.unread && !mine.unreadFrom) mine.unreadFrom = t.unreadFrom;
+          if (!mine.unread) mine.unreadFrom = 0;
+          else if (!mine.unreadFrom) mine.unreadFrom = t.unreadFrom;
           return mine;
         });
         threads.forEach((mine) => {
@@ -4221,9 +4185,13 @@
       function showUpdates(t, messages) {
         (messages || []).forEach((m) => {
           if (m.id <= t.mark) return;
-          if (m.author === "kanban")
+          if (m.author === "kanban") {
+            t.wakeOpen = true;
             deliver(t, m.content, "Specialist report", m);
-          else if (m.role === "assistant") deliver(t, m.content, "update", m);
+          } else if (m.role === "assistant") {
+            t.wakeOpen = false;
+            deliver(t, m.content, "update", m);
+          }
           advanceMark(t, m.id);
         });
         refreshDelegationPills(t.id);
@@ -4300,7 +4268,7 @@
         // run during this turn and land inside its range. A user row other than
         // the typed message starts such a wake; its agent replies are shown.
         if (turnAt >= 0 && replyAt > turnAt) {
-          let inWake = false;
+          let inWake = !!t.wakeOpen;
           messages.slice(turnAt + 1, replyAt).forEach((m) => {
             if (m.role === "user") {
               inWake = true;
@@ -4308,8 +4276,10 @@
                 deliver(t, m.content, "Specialist report", m);
             } else if (inWake && m.id > t.mark) {
               deliver(t, m.content, "update", m);
+              inWake = false;
             }
           });
+          t.wakeOpen = inWake;
         }
         if (replyAt >= 0) {
           const replyMsg = messages[replyAt];
@@ -4683,7 +4653,7 @@
         html = html.replace(
           /(^|\s)\$([a-z][a-z0-9_-]{2,63})/g,
           (m0, pre, name) =>
-            SKILL_BY_NAME[name] || skillUsage.has(name)
+            Object.hasOwn(SKILL_BY_NAME, name) || skillUsage.has(name)
               ? `${pre}<button type="button" class="skill-pill cat-${escapeHtml(skillInfo(name).cat)}" data-skill="${escapeHtml(name)}">&#9889; ${escapeHtml(name)}</button>`
               : m0,
         );
@@ -5051,9 +5021,9 @@
       }
 
       function updateComposer() {
-        const busy = !!(activeId && inflight[activeId]);
+        const busy = isThreadBusy(findThread(activeId));
         $("btn-send").disabled = busy;
-        document.querySelectorAll(".chip").forEach((c) => {
+        document.querySelectorAll(".chip[data-prompt]").forEach((c) => {
           c.disabled = busy;
         });
       }
@@ -5365,6 +5335,7 @@
       function selectChannel(name) {
         view = name;
         sessionStorage.setItem(VIEW_KEY, name);
+        $("prompt-input").value = "";
         showView("feed");
         feedNew = new Set(
           channelPosts[name].filter(postUnread).map((p) => p.id),
@@ -5536,6 +5507,7 @@
         openSide("post");
         pane.id = id;
         pane.latestId = null;
+        $("side-input").value = "";
         $("side-title").innerText = "Thread";
         $("side-sub").innerText = post ? postSubject(post) : id;
         $("side-body").replaceChildren(
@@ -5762,12 +5734,32 @@
             prompt: "@scheduler Summarise the latest scheduled check results",
           },
         ];
+        const normAgent = (s) =>
+          String(s || "")
+            .toLowerCase()
+            .replace(/\s*[·(].*$/, "")
+            .replace(/^@/, "")
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "");
         seenSpecialists.forEach((info, name) => {
-          if (!list.some((a) => a.name === name || a.handle === name)) {
+          const handle = name.startsWith("@")
+            ? name
+            : `@${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+          const key = normAgent(name);
+          const handleKey = normAgent(handle);
+          if (
+            !list.some(
+              (a) =>
+                a.name === name ||
+                a.handle === name ||
+                a.handle === handle ||
+                normAgent(a.name) === key ||
+                normAgent(a.handle) === key ||
+                normAgent(a.handle) === handleKey,
+            )
+          ) {
             list.push({
-              handle: name.startsWith("@")
-                ? name
-                : `@${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+              handle,
               name,
               role: `Kanban specialist (${info.count} ${info.count === 1 ? "report" : "reports"})`,
               defaultAgent: false,
@@ -5868,6 +5860,7 @@
         t.unreadFrom = 0;
         activeId = id;
         view = "thread";
+        $("prompt-input").value = "";
         sessionStorage.setItem(ACTIVE_KEY, id);
         sessionStorage.setItem(VIEW_KEY, "thread");
         feedNew = new Set();
@@ -6036,7 +6029,7 @@
           sessionStorage.setItem(ACTIVE_KEY, t.id);
           clearStream();
         }
-        if (inflight[t.id]) return;
+        if (isThreadBusy(t)) return;
         if (!t.started) clearStream();
         if (!t.title) t.title = threadTitle(text);
         t.started = true;
@@ -6089,7 +6082,7 @@
 
       function sendFromInput() {
         const input = $("prompt-input");
-        if (activeId && inflight[activeId]) return;
+        if (isThreadBusy(findThread(activeId))) return;
         const text = input.value;
         input.value = "";
         submitMessage(text);
@@ -6501,6 +6494,44 @@
           cat: "lifecycle",
           desc: "Generates Kubernetes manifests with sensible defaults for requests, probes and policies.",
         },
+        {
+          name: "gke-load-bearing-change",
+          cat: "gitops",
+          agent: "cluster",
+          desc: "Evaluates and verifies load-bearing infrastructure and cluster changes before rolling them out.",
+        },
+        {
+          name: "gke-rightsizing-checks",
+          cat: "scaling",
+          agent: "cluster",
+          desc: "Validates CPU and memory right-sizing proposals against historical usage and burst margins.",
+        },
+        {
+          name: "support-escalation-bundle",
+          cat: "troubleshoot",
+          agent: "tse",
+          desc: "Collects diagnostic evidence and support bundle artifacts for technical support escalations.",
+        },
+        {
+          name: "gcp-terraform",
+          cat: "gitops",
+          desc: "Authors and reviews Google Cloud Terraform modules, state layouts and declarative changes.",
+        },
+        {
+          name: "gitops-helm-chart",
+          cat: "gitops",
+          desc: "Packages, templates and updates Helm charts and values files in GitOps repositories.",
+        },
+        {
+          name: "kube-agents-feedback",
+          cat: "lifecycle",
+          desc: "Prepares structured product feedback and issue reports for the kube-agents platform.",
+        },
+        {
+          name: "upgrade-readiness-brief",
+          cat: "lifecycle",
+          desc: "Produces a pre-upgrade readiness brief covering deprecated APIs, PDBs and addon compatibility.",
+        },
       ];
 
       const SKILL_BY_NAME = Object.fromEntries(
@@ -6508,12 +6539,12 @@
       );
       const SKILLS_DOC_BASE =
         "https://github.com/gke-labs/kube-agents/tree/main/";
-      // A catalog entry with agent: "cluster" lives under the Cluster Agent's
-      // skills; every other entry under the Platform Agent's.
+      // A catalog entry with agent: "cluster" or "tse" lives under that
+      // specialist's skills directory; every other entry under Platform Agent's.
       function skillDir(info) {
-        return info && info.agent === "cluster"
-          ? "agents/cluster/skills/"
-          : "agents/platform/skills/";
+        if (info && info.agent === "cluster") return "agents/cluster/skills/";
+        if (info && info.agent === "tse") return "agents/tse/skills/";
+        return "agents/platform/skills/";
       }
       const FEEDBACK_REPO = "gke-labs/kube-agents";
       // Placeholder address for private feedback until a real alias exists.
@@ -6534,13 +6565,13 @@
       let skillFilterCat = "all";
 
       function skillInfo(name) {
-        return (
-          SKILL_BY_NAME[name] || {
-            name,
-            cat: "lifecycle",
-            desc: "Skill reported by the agent; not in the console's catalog.",
-          }
-        );
+        return Object.hasOwn(SKILL_BY_NAME, name)
+          ? SKILL_BY_NAME[name]
+          : {
+              name,
+              cat: "lifecycle",
+              desc: "Skill reported by the agent; not in the console's catalog.",
+            };
       }
 
       // Each (session, source, skill) is counted once, so polls and redraws
@@ -7027,6 +7058,8 @@
         return `${g ? g.repository : repos[0].repository}${repos.length > 1 ? ` +${repos.length - 1} more` : ""}`;
       }
 
+      let lastRepos = null;
+
       async function renderSideRepos() {
         const listEl = $("side-repos-list");
         const countEl = $("side-repos-count");
@@ -7041,6 +7074,7 @@
             const res = await fetch("/api/repositories");
             if (res.ok) {
               const data = await res.json();
+              lastRepos = data;
               repos = data.repositories || [];
               topo = data.topology || "none";
               if (lastInsights) {
@@ -7073,15 +7107,13 @@
           </div>
           <div style="display:flex;justify-content:center;gap:6px;">
             <button type="button" class="btn-msg-act" id="side-empty-connect-infra" style="font-size:11.5px;padding:4px 10px;">
-              <span>+</span> Connect Infra Repo
+              <span>+</span> Configure Repositories
             </button>
           </div>
         </div>`;
           const btnInfra = $("side-empty-connect-infra");
           if (btnInfra) {
-            btnInfra.addEventListener("click", () =>
-              quickConnectRepo("fkc1e100/kube-agents-infra", "gitops", "infra"),
-            );
+            btnInfra.addEventListener("click", openReposModal);
           }
           return;
         }
@@ -7142,6 +7174,13 @@
         repo = (repo || "").trim();
         if (!repo) return;
         role = role || "managed";
+        const defaultForge =
+          (lastRepos &&
+            Array.isArray(lastRepos.forges) &&
+            lastRepos.forges[0]) ||
+          null;
+        const provider = (defaultForge && defaultForge.provider) || "github";
+        const forge = (defaultForge && defaultForge.name) || provider;
         try {
           const res = await fetch("/api/repositories/connect", {
             method: "POST",
@@ -7153,16 +7192,19 @@
               repository: repo,
               role: role,
               category: category,
-              base_branch: "main",
-              provider: "github",
-              forge: "github",
+              provider: provider,
+              forge: forge,
             }),
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
+            throw new Error(
+              (err && (err.detail || err.error || err.message)) ||
+                `HTTP ${res.status}`,
+            );
           }
           const data = await res.json();
+          lastRepos = data;
           if (lastInsights) {
             lastInsights.repositories = data.repositories;
             lastInsights.topology = data.topology;
@@ -7196,9 +7238,13 @@
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
+            throw new Error(
+              (err && (err.detail || err.error || err.message)) ||
+                `HTTP ${res.status}`,
+            );
           }
           const data = await res.json();
+          lastRepos = data;
           if (lastInsights) {
             lastInsights.repositories = data.repositories;
             lastInsights.topology = data.topology;
@@ -7234,9 +7280,10 @@
           select.innerHTML = "";
           if (repos.length === 0) {
             const opt = document.createElement("option");
-            opt.value = defaultRepo || "fkc1e100/kube-agents-infra";
-            opt.textContent =
-              defaultRepo || "fkc1e100/kube-agents-infra (unregistered)";
+            opt.value = defaultRepo || "";
+            opt.textContent = defaultRepo
+              ? `${defaultRepo} (unregistered)`
+              : "— Connect a repository first —";
             select.appendChild(opt);
           } else {
             repos.forEach((r) => {
@@ -7327,12 +7374,17 @@
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
+            throw new Error(
+              (err && (err.detail || err.error || err.message)) ||
+                `HTTP ${res.status}`,
+            );
           }
           const data = await res.json();
           closeSubmitPRModal();
 
           if (data.prompt) {
+            if (view !== "thread" || isThreadBusy(findThread(activeId)))
+              newChat();
             submitMessage(data.prompt);
           }
         } catch (err) {
@@ -7434,16 +7486,21 @@
               r.querySelector(".custom-repo-path")?.value || ""
             ).trim();
             if (path) {
+              const role =
+                r.querySelector(".custom-repo-role")?.value || "managed";
               list.push({
                 forge:
                   r.querySelector(".custom-repo-provider")?.value || "github",
                 provider:
                   r.querySelector(".custom-repo-provider")?.value || "github",
                 repository: path,
-                role: r.querySelector(".custom-repo-role")?.value || "managed",
-                base_branch: (
-                  r.querySelector(".custom-repo-branch")?.value || ""
-                ).trim(),
+                role: role,
+                base_branch:
+                  role === "context"
+                    ? ""
+                    : (
+                        r.querySelector(".custom-repo-branch")?.value || ""
+                      ).trim(),
                 category:
                   r.querySelector(".custom-repo-cat")?.value || "custom",
               });
@@ -7454,11 +7511,18 @@
       }
 
       function generateHelmYAMLFromList(repos) {
-        let yaml =
-          "platformAgent:\n  integration:\n    forges:\n      - name: github\n        provider: github\n";
-        const hasGitLab = repos.some((r) => r.provider === "gitlab");
-        if (hasGitLab) {
-          yaml += "      - name: gitlab\n        provider: gitlab\n";
+        let yaml = "platformAgent:\n  integration:\n    forges:\n";
+        const seenForges = new Set();
+        repos.forEach((r) => {
+          const name = r.forge || r.provider || "github";
+          const prov = r.provider || name || "github";
+          if (!seenForges.has(name)) {
+            seenForges.add(name);
+            yaml += `      - name: ${name}\n        provider: ${prov}\n`;
+          }
+        });
+        if (seenForges.size === 0) {
+          yaml += "      - name: github\n        provider: github\n";
         }
         yaml += "    repositories:\n";
         if (repos.length === 0) {
@@ -7466,7 +7530,7 @@
         } else {
           repos.forEach((r) => {
             yaml += `      - forge: ${r.forge || r.provider || "github"}\n        repository: ${r.repository}\n        role: ${r.role || "gitops"}\n`;
-            if (r.base_branch) {
+            if (r.base_branch && r.role !== "context") {
               yaml += `        baseBranch: ${r.base_branch}\n`;
             }
           });
@@ -7490,6 +7554,7 @@
         row.style.padding = "8px 10px";
         row.style.marginBottom = "4px";
         row.id = `custom-repo-row-${id}`;
+        const isContext = data.role === "context";
         row.innerHTML = `
         <div style="display:grid;grid-template-columns:110px 100px 90px 1fr 100px 28px;gap:6px;align-items:center;">
           <select class="input-box custom-repo-cat" style="padding:4px 6px;font-size:11.5px;">
@@ -7502,17 +7567,34 @@
           <select class="input-box custom-repo-role" style="padding:4px 6px;font-size:11.5px;">
             <option value="gitops" ${data.role === "gitops" ? "selected" : ""}>gitops</option>
             <option value="managed" ${!data.role || data.role === "managed" ? "selected" : ""}>managed</option>
-            <option value="context" ${data.role === "context" ? "selected" : ""}>context</option>
+            <option value="context" ${isContext ? "selected" : ""}>context</option>
           </select>
           <select class="input-box custom-repo-provider" style="padding:4px 6px;font-size:11.5px;">
             <option value="github" ${!data.provider || data.provider === "github" ? "selected" : ""}>GitHub</option>
             <option value="gitlab" ${data.provider === "gitlab" ? "selected" : ""}>GitLab</option>
+            <option value="gitea" ${data.provider === "gitea" ? "selected" : ""}>Gitea</option>
           </select>
           <input type="text" class="input-box custom-repo-path" value="${escapeHtml(data.repository || "")}" placeholder="org/repo or URL" style="padding:4px 6px;font-size:11.5px;font-family:var(--font-mono);" />
-          <input type="text" class="input-box custom-repo-branch" value="${escapeHtml(data.base_branch || "main")}" placeholder="main" style="padding:4px 6px;font-size:11.5px;font-family:var(--font-mono);" title="Base branch" />
+          <input type="text" class="input-box custom-repo-branch" value="${escapeHtml(isContext ? "" : data.base_branch || "main")}" placeholder="${isContext ? "n/a (context)" : "main"}" ${isContext ? "disabled" : ""} style="padding:4px 6px;font-size:11.5px;font-family:var(--font-mono);" title="Base branch" />
           <button type="button" class="btn-close" style="font-size:15px;line-height:1;width:24px;height:24px;" title="Remove repository">&times;</button>
         </div>
       `;
+        const roleSelect = row.querySelector(".custom-repo-role");
+        const branchInput = row.querySelector(".custom-repo-branch");
+        if (roleSelect && branchInput) {
+          roleSelect.addEventListener("change", () => {
+            if (roleSelect.value === "context") {
+              branchInput.value = "";
+              branchInput.placeholder = "n/a (context)";
+              branchInput.disabled = true;
+            } else {
+              branchInput.disabled = false;
+              branchInput.placeholder = "main";
+              if (!branchInput.value) branchInput.value = "main";
+            }
+            updateLiveHelmYAML();
+          });
+        }
         row.querySelector(".btn-close").addEventListener("click", () => {
           row.remove();
           updateLiveHelmYAML();
@@ -7544,6 +7626,7 @@
           const res = await fetch("/api/repositories");
           if (res.ok) {
             const data = await res.json();
+            lastRepos = data;
             repos = data.repositories || repos;
             if (data.topology && data.topology !== "none") {
               topo = data.topology;
@@ -7553,23 +7636,29 @@
           console.warn("Could not fetch /api/repositories:", e);
         }
 
-        // Populate Split panel
-        const iamRepo = repos.find(
-          (r) =>
-            r.category === "iam" ||
-            /(iam|rbac|policy|security)/i.test(r.repository),
-        );
-        const infraRepo = repos.find(
+        // Populate Split panel: each repository is assigned to at most one slot
+        const usedSplit = new Set();
+        const pickSplitRepo = (pred) => {
+          const found = repos.find((r) => !usedSplit.has(r) && pred(r));
+          if (found) usedSplit.add(found);
+          return found || null;
+        };
+        const infraRepo = pickSplitRepo(
           (r) =>
             r.category === "infra" ||
             /(infra|platform|cluster)/i.test(r.repository) ||
             r.role === "gitops",
         );
-        const workloadsRepo = repos.find(
+        const iamRepo = pickSplitRepo(
+          (r) =>
+            r.category === "iam" ||
+            /(iam|rbac|policy|security)/i.test(r.repository),
+        );
+        const workloadsRepo = pickSplitRepo(
           (r) =>
             r.category === "workloads" ||
             /(app|workload|service)/i.test(r.repository) ||
-            (r !== iamRepo && r !== infraRepo),
+            true,
         );
 
         $("repo-split-iam-enable").checked = !!iamRepo;
@@ -7667,9 +7756,6 @@
           }
           return;
         }
-        if (gitopsCount === 0 && list.length > 0) {
-          list[0].role = "gitops";
-        }
 
         saveBtn.disabled = true;
         saveBtn.textContent = "Applying to cluster…";
@@ -7689,9 +7775,13 @@
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
-            throw new Error(err.message || `HTTP ${res.status}`);
+            throw new Error(
+              (err && (err.detail || err.error || err.message)) ||
+                `HTTP ${res.status}`,
+            );
           }
           const data = await res.json();
+          lastRepos = data;
           if (lastInsights) {
             lastInsights.repositories = data.repositories || list;
           }
@@ -7701,8 +7791,7 @@
             alertEl.style.background = "#e6f4ea";
             alertEl.style.color = "#137333";
             alertEl.style.border = "1px solid #ceead6";
-            alertEl.textContent =
-              "✓ Repositories updated and reconciled on cluster.";
+            alertEl.textContent = "✓ Repositories saved to PlatformAgent.";
           }
           setTimeout(() => {
             closeReposModal();
@@ -7793,7 +7882,7 @@
         // Update wrapper tooltip
         const wrap = $("header-model-wrap");
         if (wrap) {
-          wrap.title = `Active Model: ${activeModel} (${activeProvider})\nTarget: ${activeTarget}${data.reasoning_level ? "\nReasoning: " + data.reasoning_level : ""}\nClick dropdown to change model on the fly via LiteLLM.`;
+          wrap.title = `Preferred Model: ${activeModel} (${activeProvider})\nTarget: ${activeTarget}${data.reasoning_level ? "\nReasoning: " + data.reasoning_level : ""}\nClick dropdown to record preferred model on PlatformAgent and generate Helm values.`;
         }
 
         // Group models by provider
@@ -7865,7 +7954,7 @@
           reasoningSelect.disabled = !supportsReasoning;
           if (reasoningWrap) {
             reasoningWrap.title = supportsReasoning
-              ? `Reasoning & Thinking Level: ${data.reasoning_level || "dynamic"}\nClick dropdown to change on the fly.`
+              ? `Reasoning & Thinking Level: ${data.reasoning_level || "dynamic"}\nClick dropdown to record preferred reasoning level on PlatformAgent.`
               : `Reasoning Level: active model (${activeModel}) does not support reasoning configuration.`;
           }
         }
@@ -8137,7 +8226,7 @@
           (c.name ? ` --gke-cluster-name="${c.name}"` : "") +
           (c.location ? ` --gcp-region="${c.location}"` : "");
         const script = `curl -fsSL ${UPGRADE_SCRIPT_URL.replaceAll("{version}", v)} | bash -s -- --non-interactive${flags}`;
-        const bundle = `curl -fsSL ${UPGRADE_BUNDLE_URL.replaceAll("{version}", v)} | tar -xz && ./upgrade.sh --non-interactive${flags}`;
+        const bundle = `curl -fsSL ${UPGRADE_BUNDLE_URL.replaceAll("{version}", v)} | tar -xz && cd kube-agents-${v} && ./upgrade.sh --non-interactive${flags}`;
         return { script, bundle };
       }
 
@@ -8215,20 +8304,28 @@
             renderUpgradeModal();
             return;
           }
-        } catch (e) {}
+          alert(
+            "Could not remove patch: " +
+              ((data && (data.detail || data.error)) || resp.status),
+          );
+        } catch (e) {
+          alert("Network error: " + e.message);
+        }
       }
 
       function renderUpgradeModal() {
         const r = lastRelease;
         if (!r) return;
-        if (!r.latest) r.latest = r.running;
         const env = lastEnvironment || {};
         const ins = lastInsights || {};
         const inst = env.install || {};
         const repos = (ins.repositories || []).filter(
           (x) => x.role === "gitops" || x.role === "managed",
         );
-        const cmds = upgradeCommands(r, env, ins);
+        const canUpgrade = r.status === "behind" && !!r.latest;
+        const cmds = canUpgrade
+          ? upgradeCommands(r, env, ins)
+          : { script: "", bundle: "" };
         const owner =
           inst.managed_by === "argocd"
             ? `an Argo CD Application (<code>${escapeHtml(inst.argocd_app)}</code>)`
@@ -8338,24 +8435,42 @@
           <div class="skill-card-head"><b>Run from the release bundle</b> <span class="step-detail">downloads the release tarball and runs upgrade.sh</span></div>
           <div class="code-wrap" style="margin-top:6px;"><div class="code-bar"><span>bash</span><div class="code-bar-actions"><button type="button" class="btn-code-act" data-copy-text="bundle">Copy</button></div></div><pre style="white-space:pre-wrap;word-break:break-all;"><code>${escapeHtml(cmds.bundle)}</code></pre></div>
         </div>`;
+        const latestLink = r.latest_url
+          ? ` &middot; <a href="${escapeHtml(r.latest_url)}" target="_blank" rel="noopener">release notes &nearr;</a>`
+          : "";
+        const latestClause = r.latest
+          ? ` &middot; latest release <b>${escapeHtml(r.latest)}</b>${r.latest_at ? ` (published ${escapeHtml(r.latest_at.slice(0, 10))})` : ""}${latestLink}`
+          : r.status === "disabled"
+            ? " &middot; release check disabled"
+            : " &middot; release check unavailable";
         const headline = isPatched
-          ? `Running <b>${runningDisp}</b> (${prsCount} PR${prsCount === 1 ? "" : "s"} applied on <b>${escapeHtml(r.running)}</b>) &middot; latest release <b>${escapeHtml(r.latest)}</b>${r.latest_at ? ` (published ${escapeHtml(r.latest_at.slice(0, 10))})` : ""} &middot; <a href="${escapeHtml(r.latest_url)}" target="_blank" rel="noopener">release notes &nearr;</a>`
+          ? `Running <b>${runningDisp}</b> (${prsCount} PR${prsCount === 1 ? "" : "s"} applied on <b>${escapeHtml(r.running)}</b>)${latestClause}`
           : r.status === "latest"
-            ? `Running <b>${escapeHtml(r.running)}</b> (up to date with latest release <b>${escapeHtml(r.latest)}</b>${r.latest_at ? `, published ${escapeHtml(r.latest_at.slice(0, 10))}` : ""}) &middot; <a href="${escapeHtml(r.latest_url)}" target="_blank" rel="noopener">release notes &nearr;</a>`
-            : `Running <b>${escapeHtml(r.running)}</b>${r.running_kind === "source" ? " (build from source)" : ""} &rarr; <b>${escapeHtml(r.latest)}</b> available${r.latest_at ? ` (published ${escapeHtml(r.latest_at.slice(0, 10))})` : ""} &middot; <a href="${escapeHtml(r.latest_url)}" target="_blank" rel="noopener">release notes &nearr;</a>`;
+            ? `Running <b>${escapeHtml(r.running)}</b> (up to date with latest release <b>${escapeHtml(r.latest)}</b>${r.latest_at ? `, published ${escapeHtml(r.latest_at.slice(0, 10))}` : ""})${latestLink}`
+            : r.status === "ahead"
+              ? `Running <b>${escapeHtml(r.running)}</b> (pre-release build, ahead of latest release <b>${escapeHtml(r.latest)}</b>)${latestLink}`
+              : canUpgrade
+                ? `Running <b>${escapeHtml(r.running)}</b>${r.running_kind === "source" ? " (build from source)" : ""} &rarr; <b>${escapeHtml(r.latest)}</b> available${r.latest_at ? ` (published ${escapeHtml(r.latest_at.slice(0, 10))})` : ""}${latestLink}`
+                : `Running <b>${escapeHtml(r.running)}</b>${r.running_kind === "source" ? " (build from source)" : ""}${latestClause}`;
+        const upgradeCardsHtml = canUpgrade
+          ? gitopsFirst
+            ? prCard + scriptCard + bundleCard
+            : scriptCard + bundleCard + prCard
+          : "";
         $("upgrade-body").innerHTML = `
         <p style="margin:0 0 10px;font-size:13px;">${headline}</p>
         <p class="about-caption" style="margin:0 0 10px;">This install is owned by ${owner}.</p>
         ${patchesCard}
-        ${gitopsFirst ? prCard + scriptCard + bundleCard : scriptCard + bundleCard + prCard}
+        ${upgradeCardsHtml}
         <p class="about-caption" style="margin-top:6px;">Before upgrading: read the release notes for breaking changes, and see <a href="https://gke-labs.github.io/kube-agents/deploy/rollback/" target="_blank" rel="noopener">Rolling back a release &nearr;</a>.</p>`;
         const ask = $("upgrade-ask-btn");
         if (ask)
           ask.addEventListener("click", () => {
             closeUpgrade();
             // A thread with a turn running would drop the request at
-            // submitMessage's inflight guard, so it gets a fresh chat instead.
-            if (view !== "thread" || inflight[activeId]) newChat();
+            // submitMessage's busy guard, so it gets a fresh chat instead.
+            if (view !== "thread" || isThreadBusy(findThread(activeId)))
+              newChat();
             submitMessage(upgradePrompt(r));
           });
         $("upgrade-body")
@@ -8421,7 +8536,6 @@
       function openUpgrade() {
         const r = lastRelease;
         if (!r) return;
-        if (!r.latest) r.latest = r.running;
         renderUpgradeModal();
         $("upgrade-modal").hidden = false;
         if (!lastEnvironment) {
@@ -8493,7 +8607,11 @@
         lines.push(
           `- Version: ${releaseText()} · Helm revision ${v.helm_revision || "?"}`,
         );
-        if (lastRelease && lastRelease.detail)
+        if (
+          lastRelease &&
+          lastRelease.detail &&
+          ["latest", "behind", "ahead"].includes(lastRelease.status)
+        )
           lines.push(`- Release check: ${lastRelease.detail}`);
         lines.push(`- Agent runtime: Hermes ${v.hermes || "?"}`);
         lines.push(`- Installed: ${fmtDate(inst.installed_at)}`);
@@ -9793,7 +9911,7 @@
       wireAutocomplete($("prompt-input"), "centre-ac", sendFromInput);
       $("side-send").addEventListener("click", sendFromSide);
       wireAutocomplete($("side-input"), "side-ac", sendFromSide);
-      document.querySelectorAll(".chip").forEach((chip) => {
+      document.querySelectorAll(".chip[data-prompt]").forEach((chip) => {
         chip.addEventListener("click", () =>
           submitMessage(chip.dataset.prompt),
         );
@@ -9999,16 +10117,6 @@
           quickConnectRepo(repo, role);
         });
       }
-      document.querySelectorAll(".quick-preset-chip").forEach((chip) => {
-        chip.addEventListener("click", (e) => {
-          e.stopPropagation();
-          quickConnectRepo(
-            chip.dataset.repo,
-            chip.dataset.role,
-            chip.dataset.cat,
-          );
-        });
-      });
       const submitPRClose = $("submit-pr-close-btn");
       if (submitPRClose)
         submitPRClose.addEventListener("click", closeSubmitPRModal);

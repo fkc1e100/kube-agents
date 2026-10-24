@@ -89,6 +89,7 @@ func TestRepositoriesEndpoints(t *testing.T) {
 		ListenPort: "8080",
 		ModelName:  "gemini-3.5-flash",
 	})
+	s.kube = nil
 
 	// 1. Initial GET /api/repositories with no repos
 	req := httptest.NewRequest(http.MethodGet, "/api/repositories", nil)
@@ -272,5 +273,97 @@ func TestRepositoriesEndpoints(t *testing.T) {
 	}
 	if len(disconnectRes.Repositories) != 1 {
 		t.Fatalf("len(disconnectRes.Repositories) = %d, want 1 after disconnect", len(disconnectRes.Repositories))
+	}
+
+	// 9. Context repository with base_branch must be rejected (400)
+	ctxWithBranch := repoConnectRequest{
+		Repository: "org/runbooks",
+		Role:       "context",
+		BaseBranch: "main",
+	}
+	rawCtxBranch, _ := json.Marshal(ctxWithBranch)
+	req = httptest.NewRequest(http.MethodPost, "/api/repositories/connect", bytes.NewReader(rawCtxBranch))
+	req.Host = "localhost"
+	rec = httptest.NewRecorder()
+	s.handleRepositoriesConnect(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("connect context repo with base_branch status = %d, want 400", rec.Code)
+	}
+}
+
+func TestSaveRepositoriesPreservesUnknownClusterFields(t *testing.T) {
+	var patchedBody map[string]any
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"spec": map[string]any{
+					"integration": map[string]any{
+						"forges": []any{
+							map[string]any{
+								"name":     "github",
+								"provider": "github",
+								"auth":     map[string]any{"secretName": "gh-app-creds"},
+							},
+						},
+						"repositories": []any{
+							map[string]any{
+								"forge":      "github",
+								"repository": "org/infra",
+								"role":       "gitops",
+								"webhook":    map[string]any{"enabled": true},
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodPatch {
+			_ = json.NewDecoder(r.Body).Decode(&patchedBody)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer fakeAPI.Close()
+
+	s := newServer(config{
+		PodNamespace:      "kubeagents-system",
+		PlatformAgentName: "platform-agent",
+	})
+	s.kube = &kubeClient{base: fakeAPI.URL, token: "sa-token", client: fakeAPI.Client()}
+
+	err := s.saveRepositoriesToCluster(
+		httptest.NewRequest(http.MethodPost, "/api/repositories", nil).Context(),
+		"monorepo",
+		[]repositoryInfo{{Forge: "github", Provider: "github", Repository: "org/infra", Role: "gitops", BaseBranch: "main"}},
+		[]forgeInfo{{Name: "github", Provider: "github"}},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("saveRepositoriesToCluster: %v", err)
+	}
+	spec, _ := patchedBody["spec"].(map[string]any)
+	integ, _ := spec["integration"].(map[string]any)
+	if _, hasGitHubField := integ["github"]; hasGitHubField {
+		t.Errorf("patch unexpectedly wrote spec.integration.github: %+v", integ)
+	}
+	forges, _ := integ["forges"].([]any)
+	if len(forges) != 1 {
+		t.Fatalf("forges = %+v, want 1 entry", forges)
+	}
+	forge0, _ := forges[0].(map[string]any)
+	if forge0["auth"] == nil {
+		t.Errorf("forge auth field was stripped: %+v", forge0)
+	}
+	repos, _ := integ["repositories"].([]any)
+	if len(repos) != 1 {
+		t.Fatalf("repositories = %+v, want 1 entry", repos)
+	}
+	repo0, _ := repos[0].(map[string]any)
+	if repo0["webhook"] == nil {
+		t.Errorf("repository webhook field was stripped: %+v", repo0)
 	}
 }

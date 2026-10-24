@@ -238,6 +238,9 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		out.send(eventError, s.streamFailure(ctx, err, sid))
 		return
 	}
+	if delegatedReply, dErr := s.awaitDelegatedKanbanReply(ctx, sid, beforeID, reply); dErr == nil && strings.TrimSpace(delegatedReply) != "" {
+		reply = delegatedReply
+	}
 	replyID := s.replyMessageID(ctx, sid, beforeID, reply)
 	out.send(eventReply, chatResponse{SessionID: sid, Reply: reply, BeforeID: beforeID, ReplyID: replyID, Created: created})
 }

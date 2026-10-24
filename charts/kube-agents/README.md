@@ -535,7 +535,9 @@ agent's Google Cloud identity for the console's About panel; the Terraform
 composition fills them from the IAM module, and the console never reads IAM
 itself. With `webConsole.environment.enabled` (the default) the chart also
 renders the console's ServiceAccount, a ClusterRole that lists nodes,
-namespaces, pods and workloads, and a namespaced Role. `values.yaml` describes
+namespaces, pods and workloads, and a namespaced Role that lists ReplicaSets and
+gets/patches the `PlatformAgent` resource (for repository topology, preferred
+model annotations, and applied PR annotations). `values.yaml` describes
 each toggle. The
 [Web console page](https://gke-labs.github.io/kube-agents/deploy/web-console/)
 is canonical for what it does and how it is reached.

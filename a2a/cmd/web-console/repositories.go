@@ -6,8 +6,19 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+)
+
+var (
+	validBaseBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	validForgeNamePattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	allowedForgeProviders  = map[string]bool{
+		"github": true,
+		"gitlab": true,
+		"gitea":  true,
+	}
 )
 
 const (
@@ -119,7 +130,27 @@ func validateBaseBranch(b string) error {
 	if strings.HasSuffix(b, "/") || strings.HasSuffix(b, ".") || strings.HasSuffix(b, ".lock") {
 		return fmt.Errorf("baseBranch may not end with '/', '.', or '.lock'")
 	}
+	if !validBaseBranchPattern.MatchString(b) {
+		return fmt.Errorf("baseBranch contains invalid characters")
+	}
 	return nil
+}
+
+func deriveTopology(repos []repositoryInfo, explicit string) string {
+	top := strings.ToLower(strings.TrimSpace(explicit))
+	if len(repos) == 0 {
+		return "none"
+	}
+	if top != "" && top != "none" {
+		return top
+	}
+	if len(repos) == 1 && repos[0].Role == "gitops" {
+		return "monorepo"
+	}
+	if len(repos) > 1 {
+		return "split"
+	}
+	return "custom"
 }
 
 func generateHelmValuesYAML(forges []forgeInfo, repos []repositoryInfo) string {
@@ -160,12 +191,14 @@ func generateHelmValuesYAML(forges []forgeInfo, repos []repositoryInfo) string {
 }
 
 func (s *server) currentRepositories(ctx context.Context) []repositoryInfo {
-	s.reposMu.RLock()
-	if s.cachedRepos != nil {
-		defer s.reposMu.RUnlock()
-		return s.cachedRepos
+	if s.kube == nil {
+		s.reposMu.RLock()
+		if s.cachedRepos != nil {
+			defer s.reposMu.RUnlock()
+			return s.cachedRepos
+		}
+		s.reposMu.RUnlock()
 	}
-	s.reposMu.RUnlock()
 
 	s.refreshRepositoriesFromCluster(ctx)
 
@@ -183,7 +216,7 @@ func (s *server) currentRepositories(ctx context.Context) []repositoryInfo {
 func (s *server) refreshRepositoriesFromCluster(ctx context.Context) {
 	s.reposMu.Lock()
 	defer s.reposMu.Unlock()
-	if s.cachedRepos != nil {
+	if s.kube == nil && s.cachedRepos != nil {
 		return
 	}
 
@@ -191,34 +224,33 @@ func (s *server) refreshRepositoriesFromCluster(ctx context.Context) {
 	if repos == nil {
 		repos = []repositoryInfo{}
 	}
-	topology := "none"
+	explicitTopology := ""
 	forges := []forgeInfo{{Name: "github", Provider: "github"}}
 
 	if s.kube != nil {
 		var pa platformAgentCRForRepos
 		path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
-		if err := s.kube.get(ctx, path, &pa); err == nil && pa.Spec.Integration != nil {
-			if len(pa.Spec.Integration.Forges) > 0 {
-				forges = pa.Spec.Integration.Forges
+		if err := s.kube.get(ctx, path, &pa); err == nil {
+			if pa.Metadata.Annotations != nil {
+				explicitTopology = pa.Metadata.Annotations[repoTopologyAnnotation]
 			}
-			forgeMap := map[string]forgeInfo{}
-			for _, f := range forges {
-				forgeMap[f.Name] = f
-			}
-
-			// Read metadata annotations if present
-			var catMap map[string]string
-			if rawMeta := pa.Metadata.Annotations[repoMetadataAnnotation]; rawMeta != "" {
-				var meta repoMetadataPayload
-				if err := json.Unmarshal([]byte(rawMeta), &meta); err == nil {
-					catMap = meta.Categories
+			if pa.Spec.Integration != nil {
+				if len(pa.Spec.Integration.Forges) > 0 {
+					forges = pa.Spec.Integration.Forges
 				}
-			}
-			if top := pa.Metadata.Annotations[repoTopologyAnnotation]; top != "" {
-				topology = top
-			}
+				forgeMap := map[string]forgeInfo{}
+				for _, f := range forges {
+					forgeMap[f.Name] = f
+				}
 
-			if len(pa.Spec.Integration.Repositories) > 0 {
+				var catMap map[string]string
+				if rawMeta := pa.Metadata.Annotations[repoMetadataAnnotation]; rawMeta != "" {
+					var meta repoMetadataPayload
+					if err := json.Unmarshal([]byte(rawMeta), &meta); err == nil {
+						catMap = meta.Categories
+					}
+				}
+
 				crRepos := make([]repositoryInfo, 0, len(pa.Spec.Integration.Repositories))
 				for _, r := range pa.Spec.Integration.Repositories {
 					fName := r.Forge
@@ -251,20 +283,12 @@ func (s *server) refreshRepositoriesFromCluster(ctx context.Context) {
 				}
 				repos = crRepos
 			}
+		} else if s.cachedRepos != nil {
+			return
 		}
 	}
 
-	if topology == "none" || topology == "" {
-		if len(repos) == 1 && repos[0].Role == "gitops" {
-			topology = "monorepo"
-		} else if len(repos) > 1 {
-			topology = "split"
-		} else if len(repos) == 0 {
-			topology = "none"
-		} else {
-			topology = "custom"
-		}
-	}
+	topology := deriveTopology(repos, explicitTopology)
 
 	for i := range repos {
 		if repos[i].Category == "" {
@@ -278,7 +302,6 @@ func (s *server) refreshRepositoriesFromCluster(ctx context.Context) {
 	s.cachedRepos = repos
 	s.cachedTopology = topology
 	s.cachedForges = forges
-	s.cfg.Repositories = repos
 }
 
 func (s *server) handleRepositoriesGet(w http.ResponseWriter, r *http.Request) {
@@ -327,8 +350,17 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 		if f.Name == "" {
 			continue
 		}
+		if !validForgeNamePattern.MatchString(f.Name) {
+			writeError(w, http.StatusBadRequest, "invalid_forge", fmt.Sprintf("Forge name %q is invalid.", f.Name))
+			return
+		}
+		f.Provider = strings.ToLower(strings.TrimSpace(f.Provider))
 		if f.Provider == "" {
 			f.Provider = "github"
+		}
+		if !allowedForgeProviders[f.Provider] {
+			writeError(w, http.StatusBadRequest, "invalid_provider", fmt.Sprintf("Provider %q is invalid; must be github, gitlab, or gitea.", f.Provider))
+			return
 		}
 		forgesNeeded[f.Name] = f
 	}
@@ -378,9 +410,17 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 		if r.Provider == "" {
 			r.Provider = "github"
 		}
+		if !allowedForgeProviders[r.Provider] {
+			writeError(w, http.StatusBadRequest, "invalid_provider", fmt.Sprintf("Repository %q has invalid provider %q; must be github, gitlab, or gitea.", r.Repository, r.Provider))
+			return
+		}
 		r.Forge = strings.TrimSpace(r.Forge)
 		if r.Forge == "" {
 			r.Forge = r.Provider
+		}
+		if !validForgeNamePattern.MatchString(r.Forge) {
+			writeError(w, http.StatusBadRequest, "invalid_forge", fmt.Sprintf("Repository %q has invalid forge name %q.", r.Repository, r.Forge))
+			return
 		}
 
 		if _, exists := forgesNeeded[r.Forge]; !exists {
@@ -411,18 +451,7 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 		forgesList = append(forgesList, forgeInfo{Name: "github", Provider: "github"})
 	}
 
-	topology := strings.ToLower(strings.TrimSpace(req.Topology))
-	if topology == "" {
-		if len(validatedRepos) == 1 && validatedRepos[0].Role == "gitops" {
-			topology = "monorepo"
-		} else if len(validatedRepos) > 1 {
-			topology = "split"
-		} else if len(validatedRepos) == 0 {
-			topology = "none"
-		} else {
-			topology = "custom"
-		}
-	}
+	topology := deriveTopology(validatedRepos, req.Topology)
 
 	ctx, cancel := context.WithTimeout(r.Context(), repositoriesTimeout)
 	defer cancel()
@@ -443,15 +472,77 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) saveRepositoriesToCluster(ctx context.Context, topology string, validatedRepos []repositoryInfo, forgesList []forgeInfo, categories map[string]string) error {
 	if s.kube != nil {
-		crdRepos := make([]platformAgentRepoSpec, 0, len(validatedRepos))
-		for _, vr := range validatedRepos {
-			spec := platformAgentRepoSpec{
-				Forge:      vr.Forge,
-				Repository: vr.Repository,
-				Role:       vr.Role,
-				BaseBranch: vr.BaseBranch,
+		path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
+		existingForges := map[string]map[string]any{}
+		existingRepos := map[string]map[string]any{}
+		var rawCR map[string]any
+		if err := s.kube.get(ctx, path, &rawCR); err == nil {
+			if spec, ok := rawCR["spec"].(map[string]any); ok {
+				if integ, ok := spec["integration"].(map[string]any); ok {
+					if rawForges, ok := integ["forges"].([]any); ok {
+						for _, item := range rawForges {
+							if fm, ok := item.(map[string]any); ok {
+								if name, _ := fm["name"].(string); name != "" {
+									existingForges[name] = fm
+								}
+							}
+						}
+					}
+					if rawRepos, ok := integ["repositories"].([]any); ok {
+						for _, item := range rawRepos {
+							if rm, ok := item.(map[string]any); ok {
+								fName, _ := rm["forge"].(string)
+								if fName == "" {
+									fName = "github"
+								}
+								rName, _ := rm["repository"].(string)
+								if rName != "" {
+									existingRepos[strings.ToLower(fName+":"+rName)] = rm
+								}
+							}
+						}
+					}
+				}
 			}
-			crdRepos = append(crdRepos, spec)
+		}
+
+		mergedForges := make([]map[string]any, 0, len(forgesList))
+		for _, f := range forgesList {
+			fm := map[string]any{}
+			if prev, ok := existingForges[f.Name]; ok {
+				for k, v := range prev {
+					fm[k] = v
+				}
+			}
+			fm["name"] = f.Name
+			fm["provider"] = f.Provider
+			if f.Host != "" {
+				fm["host"] = f.Host
+			}
+			if f.Namespace != "" {
+				fm["namespace"] = f.Namespace
+			}
+			mergedForges = append(mergedForges, fm)
+		}
+
+		mergedRepos := make([]map[string]any, 0, len(validatedRepos))
+		for _, vr := range validatedRepos {
+			rm := map[string]any{}
+			key := strings.ToLower(vr.Forge + ":" + vr.Repository)
+			if prev, ok := existingRepos[key]; ok {
+				for k, v := range prev {
+					rm[k] = v
+				}
+			}
+			rm["forge"] = vr.Forge
+			rm["repository"] = vr.Repository
+			rm["role"] = vr.Role
+			if vr.BaseBranch != "" {
+				rm["baseBranch"] = vr.BaseBranch
+			} else {
+				delete(rm, "baseBranch")
+			}
+			mergedRepos = append(mergedRepos, rm)
 		}
 
 		metadataJSON, _ := json.Marshal(repoMetadataPayload{Categories: categories})
@@ -465,14 +556,12 @@ func (s *server) saveRepositoriesToCluster(ctx context.Context, topology string,
 			},
 			"spec": map[string]any{
 				"integration": map[string]any{
-					"github":       nil,
-					"forges":       forgesList,
-					"repositories": crdRepos,
+					"forges":       mergedForges,
+					"repositories": mergedRepos,
 				},
 			},
 		}
 
-		path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
 		if _, err := s.kube.doJSON(ctx, http.MethodPatch, path, patch, nil); err != nil {
 			return err
 		}
@@ -482,7 +571,6 @@ func (s *server) saveRepositoriesToCluster(ctx context.Context, topology string,
 	s.cachedRepos = validatedRepos
 	s.cachedTopology = topology
 	s.cachedForges = forgesList
-	s.cfg.Repositories = validatedRepos
 	s.reposMu.Unlock()
 	return nil
 }
@@ -538,8 +626,9 @@ func (s *server) handleRepositoriesConnect(w http.ResponseWriter, r *http.Reques
 	}
 
 	baseBranch := strings.TrimSpace(req.BaseBranch)
-	if baseBranch == "" && role != "context" {
-		baseBranch = "main"
+	if role == "context" && baseBranch != "" {
+		writeError(w, http.StatusBadRequest, "invalid_base_branch", fmt.Sprintf("Repository %q has role 'context'; context repositories cannot set a baseBranch.", repoName))
+		return
 	}
 	if err := validateBaseBranch(baseBranch); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_base_branch", fmt.Sprintf("Invalid base branch: %v", err))
@@ -550,9 +639,17 @@ func (s *server) handleRepositoriesConnect(w http.ResponseWriter, r *http.Reques
 	if provider == "" {
 		provider = "github"
 	}
+	if !allowedForgeProviders[provider] {
+		writeError(w, http.StatusBadRequest, "invalid_provider", fmt.Sprintf("Provider %q is invalid; must be github, gitlab, or gitea.", provider))
+		return
+	}
 	forge := strings.TrimSpace(req.Forge)
 	if forge == "" {
 		forge = provider
+	}
+	if !validForgeNamePattern.MatchString(forge) {
+		writeError(w, http.StatusBadRequest, "invalid_forge", fmt.Sprintf("Forge name %q is invalid.", forge))
+		return
 	}
 
 	category := strings.ToLower(strings.TrimSpace(req.Category))
@@ -599,17 +696,22 @@ func (s *server) handleRepositoriesConnect(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.reposMu.RLock()
-	topology := s.cachedTopology
-	forges := s.cachedForges
+	forges := make([]forgeInfo, len(s.cachedForges))
+	copy(forges, s.cachedForges)
 	s.reposMu.RUnlock()
 
-	if topology == "" || topology == "none" {
-		if len(existingList) > 1 {
-			topology = "split"
-		} else {
-			topology = "monorepo"
+	hasForge := false
+	for _, f := range forges {
+		if f.Name == forge {
+			hasForge = true
+			break
 		}
 	}
+	if !hasForge {
+		forges = append(forges, forgeInfo{Name: forge, Provider: provider})
+	}
+
+	topology := deriveTopology(existingList, "")
 
 	categories := make(map[string]string)
 	for _, r := range existingList {
@@ -660,13 +762,10 @@ func (s *server) handleRepositoriesDisconnect(w http.ResponseWriter, r *http.Req
 	}
 
 	s.reposMu.RLock()
-	topology := s.cachedTopology
 	forges := s.cachedForges
 	s.reposMu.RUnlock()
 
-	if len(newList) == 0 {
-		topology = "none"
-	}
+	topology := deriveTopology(newList, "")
 
 	categories := make(map[string]string)
 	for _, r := range newList {

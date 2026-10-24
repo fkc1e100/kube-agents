@@ -102,7 +102,8 @@ var (
 	// event triage ID from eight hex digits of a UUID; _session_id makes a
 	// scheduled ID from cron-<slug>-<YYYYMMDD>. Under spec.mode: next,
 	// hermes-bridge creates chat sessions over the gateway API with IDs
-	// prefixed a2a-ctx-.
+	// prefixed a2a-ctx-. (Follow-up #3928 tracks unifying the scheduled
+	// session producer contract across spec.mode: next.)
 	eventTriageIDPattern      = regexp.MustCompile(`^k8s-evt-[0-9a-f]{8}$`)
 	scheduledIDPattern        = regexp.MustCompile(`^cron-[a-z0-9_-]{1,80}-[0-9]{8}$`)
 	a2aBridgeSessionIDPattern = regexp.MustCompile(`^a2a-ctx-[A-Za-z0-9_.:-]+$`)

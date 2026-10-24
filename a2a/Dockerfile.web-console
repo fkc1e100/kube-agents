@@ -1,9 +1,13 @@
 # The web console image: a browser chat page for the Platform Agent, served
 # from inside the cluster for installs with no chat platform configured.
 #
-# It reaches the Hermes gateway on the agent Service and nothing else, and it
-# is reachable only through `kubectl port-forward` — the chart renders it
-# behind a ClusterIP Service and a deny-all ingress NetworkPolicy. See
+# It reaches the Hermes gateway on the agent Service for chat and session
+# routes, LiteLLM for metrics and `/api/assist`, the Kubernetes API when
+# `webConsole.environment.enabled` is true (`GET /api/environment` and
+# `PlatformAgent` reads/patches), and `api.github.com` when `RELEASE_CHECK` is
+# enabled (`GET /api/release`). It is reachable through `kubectl port-forward`
+# by default — the chart renders it behind a ClusterIP Service and a deny-all
+# ingress NetworkPolicy. See
 # docs/site/src/content/docs/deploy/web-console.md.
 #
 # Build from the a2a/ module root:

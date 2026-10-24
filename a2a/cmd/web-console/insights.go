@@ -195,10 +195,19 @@ func (s *server) handleInsights(w http.ResponseWriter, r *http.Request) {
 // currentModel returns the live model from LiteLLM, cached briefly so screen
 // loads and tab polls see live updates without doubling queries.
 func (s *server) currentModel(ctx context.Context) modelInfo {
+	s.model.mu.Lock()
+	if !s.model.readAt.IsZero() && time.Since(s.model.readAt) < modelCacheTTL {
+		v := s.model.value
+		s.model.mu.Unlock()
+		return v
+	}
+	s.model.mu.Unlock()
+
 	fallback := modelInfo{Name: s.cfg.ModelName, Provider: s.cfg.ModelProvider}
-	if s.cfg.LiteLLMURL == "" && s.fetchModel == nil {
+	if s.cfg.LiteLLMURL == "" && s.fetchModel == nil && s.kube == nil {
 		return fallback
 	}
+
 	s.model.refresh.Lock()
 	defer s.model.refresh.Unlock()
 	s.model.mu.Lock()
@@ -216,6 +225,15 @@ func (s *server) currentModel(ctx context.Context) modelInfo {
 		v = s.model.value
 		s.model.mu.Unlock()
 		if v.Name != "" {
+			if activeModel != "" {
+				v.Name = activeModel
+			}
+			if clusterReasoning != "" {
+				v.ReasoningLevel = clusterReasoning
+			}
+			s.model.mu.Lock()
+			s.model.value, s.model.readAt = v, time.Now()
+			s.model.mu.Unlock()
 			return v
 		}
 		if activeModel != "" {
@@ -224,6 +242,9 @@ func (s *server) currentModel(ctx context.Context) modelInfo {
 		if clusterReasoning != "" {
 			fallback.ReasoningLevel = clusterReasoning
 		}
+		s.model.mu.Lock()
+		s.model.value, s.model.readAt = fallback, time.Now()
+		s.model.mu.Unlock()
 		return fallback
 	}
 	if activeModel != "" {
@@ -268,7 +289,13 @@ func (s *server) fetchLiveModel(ctx context.Context, baseURL string) (modelInfo,
 	if err != nil {
 		return modelInfo{}, err
 	}
-	return parseLiteLLMModelInfo(body, s.cfg.AssistModel, s.cfg.ModelName, s.cfg.ModelProvider)
+	preferred := s.cfg.AssistModel
+	s.model.mu.Lock()
+	if s.model.value.Name != "" {
+		preferred = s.model.value.Name
+	}
+	s.model.mu.Unlock()
+	return parseLiteLLMModelInfo(body, preferred, s.cfg.ModelName, s.cfg.ModelProvider)
 }
 
 func parseLiteLLMModelInfo(body []byte, preferredModel, defaultName, defaultProvider string) (modelInfo, error) {
@@ -363,6 +390,14 @@ func (s *server) currentUsage(ctx context.Context) usageInfo {
 	if s.cfg.LiteLLMPeersHost == "" {
 		return usageInfo{Error: errUsageDisabled}
 	}
+	s.usage.mu.Lock()
+	if !s.usage.readAt.IsZero() && time.Since(s.usage.readAt) < usageCacheTTL {
+		v := s.usage.value
+		s.usage.mu.Unlock()
+		return v
+	}
+	s.usage.mu.Unlock()
+
 	s.usage.refresh.Lock()
 	defer s.usage.refresh.Unlock()
 	s.usage.mu.Lock()

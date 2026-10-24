@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,9 +18,10 @@ const (
 	activeModelAnnotation    = "kubeagents.x-k8s.io/active-model"
 	activeTargetAnnotation   = "kubeagents.x-k8s.io/active-model-target"
 	reasoningLevelAnnotation = "kubeagents.x-k8s.io/reasoning-level"
-	litellmConfigMapName     = "litellm-config"
 	modelsTimeout            = 15 * time.Second
 )
+
+var validModelTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/@:-]{0,127}$`)
 
 type ModelOption struct {
 	ID                string `json:"id"`
@@ -37,6 +39,7 @@ type ModelsResponse struct {
 	ActiveProvider string        `json:"active_provider"`
 	ActiveTarget   string        `json:"active_target"`
 	ReasoningLevel string        `json:"reasoning_level,omitempty"`
+	HelmValuesYAML string        `json:"helm_values_yaml,omitempty"`
 	Models         []ModelOption `json:"models"`
 }
 
@@ -167,14 +170,18 @@ var probeCache = modelProbeCache{
 // through the inference gateway before adding it or switching to it.
 func (s *server) testModel(ctx context.Context, modelID, target string) error {
 	if s.cfg.LiteLLMURL == "" {
-		return nil
+		return errors.New("no inference gateway (LITELLM_URL) configured")
 	}
-	modelQuery := modelID
-	if modelQuery == "" {
-		modelQuery = target
+	primary := target
+	fallback := modelID
+	if primary == "" {
+		primary = modelID
+		fallback = ""
+	} else if fallback == primary || fallback == defaultAssistModel || fallback == "hermes-agent" {
+		fallback = ""
 	}
 	payload := map[string]any{
-		"model": modelQuery,
+		"model": primary,
 		"messages": []map[string]string{
 			{"role": "user", "content": "ping"},
 		},
@@ -208,109 +215,124 @@ func (s *server) testModel(ctx context.Context, modelID, target string) error {
 			lastErr = fmt.Errorf("could not reach inference gateway: %w", err)
 			continue
 		}
-		defer drainAndClose(resp)
-		if resp.StatusCode == http.StatusOK {
+		statusCode := resp.StatusCode
+		detail := upstreamErrorDetail(resp)
+		drainAndClose(resp)
+		if statusCode == http.StatusOK {
 			return nil
 		}
-		detail := upstreamErrorDetail(resp)
-		// If model alias failed and target is different, try target directly
-		if target != "" && target != modelQuery {
-			payload["model"] = target
+		// If explicit target was not mapped directly in LiteLLM, try the modelID alias
+		if fallback != "" {
+			payload["model"] = fallback
 			b2, _ := json.Marshal(payload)
-			req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.LiteLLMURL+"/v1/chat/completions", bytes.NewReader(b2))
-			req2.Header.Set("Content-Type", contentTypeJSON)
-			if s.cfg.APIServerKey != "" {
-				req2.Header.Set("Authorization", bearerPrefix+s.cfg.APIServerKey)
-			}
-			resp2, err2 := s.client.Do(req2)
-			if err2 == nil {
-				defer drainAndClose(resp2)
-				if resp2.StatusCode == http.StatusOK {
-					return nil
+			req2, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.LiteLLMURL+"/v1/chat/completions", bytes.NewReader(b2))
+			if reqErr == nil {
+				req2.Header.Set("Content-Type", contentTypeJSON)
+				if s.cfg.APIServerKey != "" {
+					req2.Header.Set("Authorization", bearerPrefix+s.cfg.APIServerKey)
 				}
-				detail = upstreamErrorDetail(resp2)
+				resp2, err2 := s.client.Do(req2)
+				if err2 == nil {
+					status2 := resp2.StatusCode
+					detail2 := upstreamErrorDetail(resp2)
+					drainAndClose(resp2)
+					if status2 == http.StatusOK {
+						return nil
+					}
+					detail = detail2
+				}
 			}
+			payload["model"] = primary
 		}
-		// If 404 or 400 (model definitely not found/invalid in publisher), no need to retry
-		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest {
-			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, detail)
+		if statusCode == http.StatusNotFound || statusCode == http.StatusBadRequest {
+			return fmt.Errorf("HTTP %d: %s", statusCode, detail)
 		}
-		lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, detail)
+		lastErr = fmt.Errorf("HTTP %d: %s", statusCode, detail)
 	}
 	return lastErr
 }
 
-// probeCandidateModels tests the candidate models against the environment
-// and returns only those verified to work in the current cluster.
-func (s *server) probeCandidateModels(ctx context.Context, candidates []ModelOption) []ModelOption {
-	if s.cfg.LiteLLMURL == "" {
-		out := make([]ModelOption, len(candidates))
-		copy(out, candidates)
-		for i := range out {
-			out[i].Verified = true
+// catalogModelsWithStatus returns the candidate model catalog, probing all
+// candidates only when probeAll is true. Without probeAll, candidates carry
+// Verified from prior probes (or when matching the active model on a cluster
+// with LiteLLM configured), avoiding an 11-request fan-out on cold GETs.
+func (s *server) catalogModelsWithStatus(ctx context.Context, candidates []ModelOption, activeModel, activeTarget string, probeAll bool) []ModelOption {
+	if probeAll && s.cfg.LiteLLMURL != "" {
+		probeCache.mu.RLock()
+		cacheValid := time.Since(probeCache.lastRun) < 5*time.Minute && len(probeCache.tested) > 0
+		probeCache.mu.RUnlock()
+
+		if !cacheValid {
+			var wg sync.WaitGroup
+			results := make(map[string]bool)
+			var resultsMu sync.Mutex
+
+			for _, opt := range candidates {
+				wg.Add(1)
+				go func(m ModelOption) {
+					defer wg.Done()
+					probeCtx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
+					defer cancel()
+					err := s.testModel(probeCtx, m.ID, m.ModelTarget)
+					resultsMu.Lock()
+					results[m.ModelTarget] = (err == nil)
+					if err != nil {
+						log.Printf(logPrefix+"model probe failed for %s (%s): %v", m.ID, m.ModelTarget, err)
+					} else {
+						log.Printf(logPrefix+"model probe succeeded for %s (%s)", m.ID, m.ModelTarget)
+					}
+					resultsMu.Unlock()
+				}(opt)
+			}
+			wg.Wait()
+
+			probeCache.mu.Lock()
+			probeCache.tested = results
+			probeCache.lastRun = time.Now()
+			probeCache.mu.Unlock()
 		}
-		return out
 	}
 
 	probeCache.mu.RLock()
-	cacheValid := time.Since(probeCache.lastRun) < 5*time.Minute && len(probeCache.tested) > 0
 	cachedResults := make(map[string]bool, len(probeCache.tested))
 	for k, v := range probeCache.tested {
 		cachedResults[k] = v
 	}
 	probeCache.mu.RUnlock()
 
-	activeModel, activeTarget, _ := s.getActiveModelFromCluster(ctx)
-	if activeTarget != "" {
-		cachedResults[activeTarget] = true
-	}
-	if activeModel != "" {
-		for _, opt := range candidates {
-			if opt.ID == activeModel {
-				cachedResults[opt.ModelTarget] = true
-			}
-		}
-	}
-
-	if !cacheValid {
-		var wg sync.WaitGroup
-		results := make(map[string]bool)
-		var resultsMu sync.Mutex
-
-		for _, opt := range candidates {
-			wg.Add(1)
-			go func(m ModelOption) {
-				defer wg.Done()
-				probeCtx, cancel := context.WithTimeout(ctx, 3500*time.Millisecond)
-				defer cancel()
-				err := s.testModel(probeCtx, m.ID, m.ModelTarget)
-				resultsMu.Lock()
-				results[m.ModelTarget] = (err == nil)
-				if err != nil {
-					log.Printf(logPrefix+"model probe failed for %s (%s): %v", m.ID, m.ModelTarget, err)
-				} else {
-					log.Printf(logPrefix+"model probe succeeded for %s (%s)", m.ID, m.ModelTarget)
-				}
-				resultsMu.Unlock()
-			}(opt)
-		}
-		wg.Wait()
-
-		probeCache.mu.Lock()
-		probeCache.tested = results
-		probeCache.lastRun = time.Now()
-		cachedResults = results
-		probeCache.mu.Unlock()
-	}
-
-	verified := make([]ModelOption, 0, len(candidates))
+	out := make([]ModelOption, 0, len(candidates))
 	for _, opt := range candidates {
-		if cachedResults[opt.ModelTarget] {
+		isActive := (activeModel != "" && opt.ID == activeModel) || (activeTarget != "" && opt.ModelTarget == activeTarget)
+		if cachedResults[opt.ModelTarget] || (s.cfg.LiteLLMURL != "" && isActive) {
 			opt.Verified = true
-			verified = append(verified, opt)
 		}
+		if probeAll && s.cfg.LiteLLMURL != "" && !opt.Verified && !isActive {
+			continue
+		}
+		out = append(out, opt)
 	}
-	return verified
+	return out
+}
+
+func generateModelHelmValuesYAML(modelID, provider, target, reasoningLevel string) string {
+	if modelID == "" {
+		return ""
+	}
+	if provider == "" {
+		provider = "vertex_ai"
+	}
+	if target == "" {
+		target = provider + "/" + modelID
+	}
+	var sb strings.Builder
+	sb.WriteString("platformAgent:\n  llm:\n")
+	sb.WriteString(fmt.Sprintf("    provider: %s\n", provider))
+	sb.WriteString(fmt.Sprintf("    model: %s\n", modelID))
+	sb.WriteString(fmt.Sprintf("    modelTarget: %s\n", target))
+	if reasoningLevel != "" {
+		sb.WriteString(fmt.Sprintf("    reasoningLevel: %s\n", reasoningLevel))
+	}
+	return sb.String()
 }
 
 func (s *server) getActiveModelFromCluster(ctx context.Context) (string, string, string) {
@@ -341,10 +363,21 @@ func findCatalogOption(id, target string) (ModelOption, bool) {
 	return ModelOption{}, false
 }
 
-func (s *server) getModelsResponse(ctx context.Context) ModelsResponse {
+func (s *server) getModelsResponse(ctx context.Context, probeAll ...bool) ModelsResponse {
 	activeModel, activeTarget, clusterReasoning := s.getActiveModelFromCluster(ctx)
 	activeProvider := ""
 	reasoningLevel := clusterReasoning
+
+	s.model.mu.Lock()
+	cachedModel := s.model.value
+	s.model.mu.Unlock()
+	if activeModel == "" && cachedModel.Name != "" {
+		activeModel = cachedModel.Name
+		activeProvider = cachedModel.Provider
+		if reasoningLevel == "" {
+			reasoningLevel = cachedModel.ReasoningLevel
+		}
+	}
 
 	// Read live model info from LiteLLM / cached insights model
 	liveInfo, _ := s.readModel(ctx)
@@ -376,18 +409,19 @@ func (s *server) getModelsResponse(ctx context.Context) ModelsResponse {
 		reasoningLevel = liveInfo.ReasoningLevel
 	}
 
-	// Probe candidate models to only include models verified to work in this environment
-	verifiedModels := s.probeCandidateModels(ctx, candidateModelCatalog)
+	shouldProbe := len(probeAll) > 0 && probeAll[0]
+	verifiedModels := s.catalogModelsWithStatus(ctx, candidateModelCatalog, activeModel, activeTarget, shouldProbe)
 
 	models := make([]ModelOption, len(verifiedModels))
 	copy(models, verifiedModels)
 
-	// Ensure active model is in the catalog and marked verified
 	foundActive := false
 	for i, m := range models {
-		if m.ID == activeModel || m.ModelTarget == activeTarget {
+		if m.ID == activeModel || (activeTarget != "" && m.ModelTarget == activeTarget) {
 			foundActive = true
-			models[i].Verified = true
+			if s.cfg.LiteLLMURL != "" {
+				models[i].Verified = true
+			}
 			if activeTarget == "" {
 				activeTarget = m.ModelTarget
 			}
@@ -421,6 +455,9 @@ func (s *server) getModelsResponse(ctx context.Context) ModelsResponse {
 		if catReasoning == "" && supports {
 			catReasoning = "dynamic"
 		}
+		probeCache.mu.RLock()
+		customVerified := probeCache.tested[activeTarget] || s.cfg.LiteLLMURL != ""
+		probeCache.mu.RUnlock()
 		customOpt := ModelOption{
 			ID:                activeModel,
 			Name:              name,
@@ -428,7 +465,7 @@ func (s *server) getModelsResponse(ctx context.Context) ModelsResponse {
 			ModelTarget:       activeTarget,
 			SupportsReasoning: supports,
 			ReasoningLevel:    catReasoning,
-			Verified:          true,
+			Verified:          customVerified,
 			Description:       desc,
 		}
 		models = append([]ModelOption{customOpt}, models...)
@@ -449,6 +486,7 @@ func (s *server) getModelsResponse(ctx context.Context) ModelsResponse {
 		ActiveProvider: activeProvider,
 		ActiveTarget:   activeTarget,
 		ReasoningLevel: reasoningLevel,
+		HelmValuesYAML: generateModelHelmValuesYAML(activeModel, activeProvider, activeTarget, reasoningLevel),
 		Models:         models,
 	}
 }
@@ -457,7 +495,8 @@ func (s *server) handleModelsGet(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), modelsTimeout)
 	defer cancel()
 
-	resp := s.getModelsResponse(ctx)
+	probeAll := r.URL.Query().Get("probe") == "1" || strings.EqualFold(r.URL.Query().Get("probe"), "true")
+	resp := s.getModelsResponse(ctx, probeAll)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -474,6 +513,14 @@ func (s *server) handleModelsTest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_target", "Model name or model_target is required.")
 		return
 	}
+	if modelID != "" && !validModelTokenPattern.MatchString(modelID) {
+		writeError(w, http.StatusBadRequest, "invalid_model", "Model name contains invalid characters.")
+		return
+	}
+	if target != "" && !validModelTokenPattern.MatchString(target) {
+		writeError(w, http.StatusBadRequest, "invalid_target", "Model target contains invalid characters.")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), modelsTimeout)
 	defer cancel()
 	if err := s.testModel(ctx, modelID, target); err != nil {
@@ -484,6 +531,11 @@ func (s *server) handleModelsTest(w http.ResponseWriter, r *http.Request) {
 			"error":    err.Error(),
 		})
 		return
+	}
+	if target != "" {
+		probeCache.mu.Lock()
+		probeCache.tested[target] = true
+		probeCache.mu.Unlock()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model":    modelID,
@@ -526,6 +578,9 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 	if activeModel == "" {
 		activeModel = s.cfg.AssistModel
 		if activeModel == "" || activeModel == defaultAssistModel {
+			activeModel = s.cfg.ModelName
+		}
+		if activeModel == "" {
 			activeModel = "gemini-3.5-flash"
 		}
 	}
@@ -534,7 +589,6 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 	if (modelID == "" || modelID == activeModel) && reqReasoning != "" {
 		modelID = activeModel
 
-		// 1. Update PlatformAgent annotation for reasoning level
 		if s.kube != nil && s.cfg.PodNamespace != "" {
 			patch := map[string]any{
 				"metadata": map[string]any{
@@ -546,10 +600,11 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 			path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
 			if _, err := s.kube.doJSON(ctx, http.MethodPatch, path, patch, nil); err != nil {
 				log.Printf(logPrefix+"could not persist %s on PlatformAgent: %v", reasoningLevelAnnotation, err)
+				writeError(w, http.StatusInternalServerError, "persist_failed", fmt.Sprintf("Failed to update PlatformAgent annotations: %v", err))
+				return
 			}
 		}
 
-		// 2. Update in-memory server state
 		s.model.mu.Lock()
 		s.model.value.ReasoningLevel = reqReasoning
 		s.model.readAt = time.Now()
@@ -557,17 +612,26 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 
 		resp := s.getModelsResponse(ctx)
 		resp.ReasoningLevel = reqReasoning
+		resp.HelmValuesYAML = generateModelHelmValuesYAML(resp.ActiveModel, resp.ActiveProvider, resp.ActiveTarget, reqReasoning)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	if len(modelID) > 128 || strings.ContainsAny(modelID, " \t\r\n'\"`") {
+	if !validModelTokenPattern.MatchString(modelID) {
 		writeError(w, http.StatusBadRequest, "invalid_model", "Model name contains invalid characters.")
 		return
 	}
 
 	provider := strings.TrimSpace(req.Provider)
+	if provider != "" && !validModelTokenPattern.MatchString(provider) {
+		writeError(w, http.StatusBadRequest, "invalid_provider", "Provider name contains invalid characters.")
+		return
+	}
 	target := strings.TrimSpace(req.ModelTarget)
+	if target != "" && !validModelTokenPattern.MatchString(target) {
+		writeError(w, http.StatusBadRequest, "invalid_target", "Model target contains invalid characters.")
+		return
+	}
 	reasoningLevel := reqReasoning
 	supportsReasoning := false
 
@@ -601,19 +665,28 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		target = provider + "/" + modelID
 	}
+	if !validModelTokenPattern.MatchString(modelID) || !validModelTokenPattern.MatchString(provider) || !validModelTokenPattern.MatchString(target) {
+		writeError(w, http.StatusBadRequest, "invalid_model", "Model, provider, or target contains invalid characters.")
+		return
+	}
 	if supportsReasoning && reasoningLevel == "" {
 		reasoningLevel = "dynamic"
 	}
 
-	// Pre-flight check: test that the model works prior to changing cluster state!
-	if err := s.testModel(ctx, modelID, target); err != nil {
-		log.Printf(logPrefix+"model pre-flight test failed for %s (%s): %v", modelID, target, err)
-		writeError(w, http.StatusUnprocessableEntity, "model_test_failed",
-			fmt.Sprintf("Pre-flight check failed: model %s (%s) did not respond successfully in this environment: %v. Active model was not changed.", modelID, target, err))
-		return
+	// Pre-flight check when an inference gateway is configured
+	if s.cfg.LiteLLMURL != "" {
+		if err := s.testModel(ctx, modelID, target); err != nil {
+			log.Printf(logPrefix+"model pre-flight test failed for %s (%s): %v", modelID, target, err)
+			writeError(w, http.StatusUnprocessableEntity, "model_test_failed",
+				fmt.Sprintf("Pre-flight check failed: model %s (%s) did not respond successfully in this environment: %v. Active model was not changed.", modelID, target, err))
+			return
+		}
+		probeCache.mu.Lock()
+		probeCache.tested[target] = true
+		probeCache.mu.Unlock()
 	}
 
-	// 1. Update PlatformAgent annotations
+	// Record model selection on PlatformAgent annotations
 	if s.kube != nil && s.cfg.PodNamespace != "" {
 		annotations := map[string]string{
 			activeModelAnnotation:  modelID,
@@ -630,37 +703,11 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 		path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
 		if _, err := s.kube.doJSON(ctx, http.MethodPatch, path, patch, nil); err != nil {
 			log.Printf(logPrefix+"could not persist annotations on PlatformAgent: %v", err)
+			writeError(w, http.StatusInternalServerError, "persist_failed", fmt.Sprintf("Failed to update PlatformAgent annotations: %v", err))
+			return
 		}
 	}
 
-	// 2. Update ConfigMap litellm-config
-	if s.kube != nil && s.cfg.PodNamespace != "" {
-		cmPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", s.cfg.PodNamespace, litellmConfigMapName)
-		var cm struct {
-			Data map[string]string `json:"data"`
-		}
-		if err := s.kube.get(ctx, cmPath, &cm); err == nil && cm.Data != nil {
-			rawConfig := cm.Data["config.yaml"]
-			if rawConfig != "" {
-				updatedConfig := updateConfigYAMLWithModel(rawConfig, modelID, target)
-				patchCM := map[string]any{
-					"data": map[string]string{
-						"config.yaml": updatedConfig,
-					},
-				}
-				if _, err := s.kube.doJSON(ctx, http.MethodPatch, cmPath, patchCM, nil); err != nil {
-					log.Printf(logPrefix+"could not patch %s ConfigMap: %v", litellmConfigMapName, err)
-				} else {
-					log.Printf(logPrefix+"updated %s with model %s (%s)", litellmConfigMapName, modelID, target)
-					// Delete litellm pods to trigger immediate reload
-					s.restartLiteLLMPods(ctx)
-				}
-			}
-		}
-	}
-
-	// 3. Update in-memory server state
-	s.cfg.AssistModel = modelID
 	s.model.mu.Lock()
 	s.model.value = modelInfo{
 		Name:           modelID,
@@ -670,90 +717,12 @@ func (s *server) handleModelsPost(w http.ResponseWriter, r *http.Request) {
 	s.model.readAt = time.Now()
 	s.model.mu.Unlock()
 
-	// Invalidate probe cache so active model is fresh
-	probeCache.mu.Lock()
-	probeCache.tested[target] = true
-	probeCache.mu.Unlock()
-
 	writeJSON(w, http.StatusOK, ModelsResponse{
 		ActiveModel:    modelID,
 		ActiveProvider: provider,
 		ActiveTarget:   target,
 		ReasoningLevel: reasoningLevel,
+		HelmValuesYAML: generateModelHelmValuesYAML(modelID, provider, target, reasoningLevel),
 		Models:         s.getModelsResponse(ctx).Models,
 	})
-}
-
-func (s *server) restartLiteLLMPods(ctx context.Context) {
-	if s.kube == nil || s.cfg.PodNamespace == "" {
-		return
-	}
-	deployPath := fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/litellm", s.cfg.PodNamespace)
-	patch := map[string]any{
-		"spec": map[string]any{
-			"template": map[string]any{
-				"metadata": map[string]any{
-					"annotations": map[string]string{
-						"kubectl.kubernetes.io/restartedAt": time.Now().UTC().Format(time.RFC3339),
-					},
-				},
-			},
-		},
-	}
-	if _, err := s.kube.doJSON(ctx, http.MethodPatch, deployPath, patch, nil); err != nil {
-		log.Printf(logPrefix+"could not trigger rolling update of litellm: %v", err)
-	} else {
-		log.Printf(logPrefix + "triggered zero-downtime rolling update of litellm deployment")
-	}
-}
-
-// updateConfigYAMLWithModel updates model-default and hermes-agent targets in
-// the LiteLLM config.yaml while preserving all other configuration and indentation.
-func updateConfigYAMLWithModel(rawYAML, modelName, modelTarget string) string {
-	lines := strings.Split(rawYAML, "\n")
-	out := make([]string, 0, len(lines)+4)
-	inModelDefault := false
-	inHermesAgent := false
-	hasAlias := false
-
-	modelNamePattern := regexp.MustCompile(`^\s*-\s*model_name:\s*(.+)$`)
-	aliasExactPattern := regexp.MustCompile(`^\s*-\s*model_name:\s*` + regexp.QuoteMeta(modelName) + `\s*$`)
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-
-		if aliasExactPattern.MatchString(trimmed) {
-			hasAlias = true
-		}
-
-		if m := modelNamePattern.FindStringSubmatch(trimmed); len(m) > 1 {
-			name := strings.Trim(m[1], `"' `)
-			inModelDefault = (name == "model-default")
-			inHermesAgent = (name == "hermes-agent")
-		}
-
-		if (inModelDefault || inHermesAgent) && strings.HasPrefix(trimmed, "model:") {
-			indent := line[:strings.Index(line, "model:")]
-			out = append(out, indent+"model: "+modelTarget)
-			inModelDefault = false
-			inHermesAgent = false
-			continue
-		}
-
-		out = append(out, line)
-	}
-
-	result := strings.Join(out, "\n")
-
-	// If the newly selected model alias isn't in model_list, add it before litellm_settings with 2-space indent
-	if !hasAlias && !strings.Contains(result, "model_name: "+modelName) {
-		newEntry := fmt.Sprintf("  - model_name: %s\n    litellm_params:\n      model: %s\n", modelName, modelTarget)
-		if idx := strings.Index(result, "litellm_settings:"); idx >= 0 {
-			result = result[:idx] + newEntry + result[idx:]
-		} else {
-			result += "\n" + newEntry
-		}
-	}
-
-	return result
 }

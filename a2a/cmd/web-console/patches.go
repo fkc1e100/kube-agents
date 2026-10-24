@@ -63,7 +63,10 @@ func (s *server) getAppliedPRs(ctx context.Context) []AppliedPR {
 		return prs
 	}
 
-	prs := s.readAppliedPRsFromCluster(ctx)
+	prs, ok := s.readAppliedPRsFromCluster(ctx)
+	if !ok {
+		return []AppliedPR{}
+	}
 	if prs == nil {
 		prs = []AppliedPR{}
 	}
@@ -74,9 +77,9 @@ func (s *server) getAppliedPRs(ctx context.Context) []AppliedPR {
 	return out
 }
 
-func (s *server) readAppliedPRsFromCluster(ctx context.Context) []AppliedPR {
+func (s *server) readAppliedPRsFromCluster(ctx context.Context) ([]AppliedPR, bool) {
 	if s.kube == nil || s.cfg.PodNamespace == "" {
-		return nil
+		return nil, true
 	}
 	var pa struct {
 		Metadata struct {
@@ -85,18 +88,18 @@ func (s *server) readAppliedPRsFromCluster(ctx context.Context) []AppliedPR {
 	}
 	path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
 	if err := s.kube.get(ctx, path, &pa); err != nil {
-		return nil
+		return nil, false
 	}
 	raw := pa.Metadata.Annotations[appliedPRsAnnotation]
 	if strings.TrimSpace(raw) == "" {
-		return nil
+		return nil, true
 	}
 	var prs []AppliedPR
 	if err := json.Unmarshal([]byte(raw), &prs); err != nil {
 		log.Printf(logPrefix+"could not parse %s annotation: %v", appliedPRsAnnotation, err)
-		return nil
+		return nil, true
 	}
-	return prs
+	return prs, true
 }
 
 func (s *server) saveAppliedPRs(ctx context.Context, prs []AppliedPR) error {
@@ -144,10 +147,10 @@ func (s *server) handlePatchesGet(w http.ResponseWriter, r *http.Request) {
 		runningTag = strings.TrimPrefix(s.cfg.ImageTag, "v")
 	}
 	if runningTag == "" {
-		runningTag = "0.13.0"
+		runningTag = "unknown"
 	}
 	runningDisplay := runningTag
-	if len(prs) > 0 {
+	if len(prs) > 0 && runningTag != "unknown" {
 		runningDisplay = runningTag + "+"
 	}
 
@@ -171,6 +174,14 @@ func (s *server) handlePatchesPost(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	current := s.getAppliedPRs(ctx)
+	if s.kube != nil && s.cfg.PodNamespace != "" {
+		if live, ok := s.readAppliedPRsFromCluster(ctx); ok {
+			if live == nil {
+				live = []AppliedPR{}
+			}
+			current = live
+		}
+	}
 	repo := s.cfg.ReleaseRepo
 	if repo == "" {
 		repo = defaultReleaseRepo
@@ -276,10 +287,10 @@ func (s *server) handlePatchesPost(w http.ResponseWriter, r *http.Request) {
 		runningTag = strings.TrimPrefix(s.cfg.ImageTag, "v")
 	}
 	if runningTag == "" {
-		runningTag = "0.13.0"
+		runningTag = "unknown"
 	}
 	runningDisplay := runningTag
-	if len(updated) > 0 {
+	if len(updated) > 0 && runningTag != "unknown" {
 		runningDisplay = runningTag + "+"
 	}
 

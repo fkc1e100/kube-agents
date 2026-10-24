@@ -552,6 +552,8 @@ func (s *server) resolveSourceBuild(ctx context.Context, out *releaseResponse, p
 		out.Running = version
 		if out.IsPatched {
 			out.RunningDisplay = version + "+"
+		} else {
+			out.RunningDisplay = version
 		}
 		switch {
 		case cmp.AheadBy == 0 && version == out.Latest:
@@ -567,6 +569,11 @@ func (s *server) resolveSourceBuild(ctx context.Context, out *releaseResponse, p
 	}
 	oldest := strings.TrimPrefix(published[len(published)-1].TagName, "v")
 	out.Running = "older than " + oldest
+	if out.IsPatched {
+		out.RunningDisplay = out.Running + "+"
+	} else {
+		out.RunningDisplay = out.Running
+	}
 	out.Status, out.Detail = "behind", fmt.Sprintf("A build from source older than every release checked (back to %s); release %s is available.", oldest, out.Latest)
 	return nil
 }

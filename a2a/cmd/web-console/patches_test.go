@@ -263,3 +263,63 @@ func TestPatchesIntegratedWithRelease(t *testing.T) {
 		t.Errorf("expected detail to mention PR patch, got %q", rel2.Detail)
 	}
 }
+
+func TestPatchesTransientReadErrorDoesNotOverwriteAnnotation(t *testing.T) {
+	var mu sync.Mutex
+	failGet := true
+	patchCalled := false
+
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.Method == http.MethodGet {
+			if failGet {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"metadata": map[string]any{
+					"annotations": map[string]string{
+						appliedPRsAnnotation: `[{"pr":1001,"title":"existing"}]`,
+					},
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodPatch {
+			patchCalled = true
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer fakeAPI.Close()
+
+	s := newServer(config{
+		PodNamespace:      "kubeagents-system",
+		PlatformAgentName: "platform-agent",
+	})
+	s.kube = &kubeClient{base: fakeAPI.URL, token: "sa-token", client: fakeAPI.Client()}
+
+	// First GET fails transiently; patchesLoaded must stay false
+	if prs := s.getAppliedPRs(context.Background()); len(prs) != 0 {
+		t.Fatalf("expected 0 PRs on failed GET, got %d", len(prs))
+	}
+	if s.patchesLoaded {
+		t.Fatalf("patchesLoaded was set to true on transient cluster read failure")
+	}
+	if patchCalled {
+		t.Fatalf("unexpected PATCH during GET")
+	}
+
+	// Subsequent GET succeeds and loads PR #1001
+	mu.Lock()
+	failGet = false
+	mu.Unlock()
+	prs := s.getAppliedPRs(context.Background())
+	if len(prs) != 1 || prs[0].PR != 1001 {
+		t.Fatalf("expected existing PR #1001 after recovery, got %+v", prs)
+	}
+}

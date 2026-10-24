@@ -834,12 +834,12 @@ func TestAllowedHostsConfiguration(t *testing.T) {
 		HermesURL:    upstream.URL,
 		APIServerKey: testKey,
 		ClusterName:  "c1",
-		AllowedHosts: []string{"136.81.134.102", "136.81.134.102.sslip.io", "custom.domain.internal"},
+		AllowedHosts: []string{"136.81.134.102", "136.81.134.102.sslip.io", "custom.domain.internal:8443"},
 	}
 	s := newServer(cfg)
 	h := s.routes()
 
-	// Allowed hosts answer with 200
+	// Allowed hosts answer with 200 (including port-qualified entry normalized in newServer)
 	for _, host := range []string{"136.81.134.102:443", "136.81.134.102.sslip.io", "custom.domain.internal:8080", "localhost:8080"} {
 		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/api/status", nil)
 		if rec := serve(h, req); rec.Code != http.StatusOK {
@@ -855,13 +855,21 @@ func TestAllowedHostsConfiguration(t *testing.T) {
 		t.Errorf("chat via configured AllowedHost: status %d, want 200", rec.Code)
 	}
 
+	// Cross-origin request between two different allowed hosts is refused
+	chatCrossAllowed := chatReq(`{"message":"hi"}`)
+	chatCrossAllowed.Host = "136.81.134.102"
+	chatCrossAllowed.Header.Set("Origin", "https://custom.domain.internal")
+	if rec := serve(h, chatCrossAllowed); rec.Code != http.StatusForbidden {
+		t.Errorf("chat with Origin of another AllowedHost: status %d, want 403", rec.Code)
+	}
+
 	// Foreign host not in AllowedHosts is refused
 	reqForeign := httptest.NewRequest(http.MethodGet, "http://unknown.attacker.example:8080/api/status", nil)
 	if rec := serve(h, reqForeign); rec.Code != http.StatusForbidden {
 		t.Errorf("Host unknown.attacker.example: status %d, want 403", rec.Code)
 	}
 
-	// Wildcard ALLOWED_HOSTS="*" allows any host
+	// Wildcard ALLOWED_HOSTS="*" is ignored and refused
 	wildcardCfg := config{
 		HermesURL:    upstream.URL,
 		APIServerKey: testKey,
@@ -872,8 +880,8 @@ func TestAllowedHostsConfiguration(t *testing.T) {
 	hWild := sWild.routes()
 
 	reqAny := httptest.NewRequest(http.MethodGet, "http://any-domain-whatsoever.example:8080/api/status", nil)
-	if rec := serve(hWild, reqAny); rec.Code != http.StatusOK {
-		t.Errorf("wildcard allowed host: status %d, want 200", rec.Code)
+	if rec := serve(hWild, reqAny); rec.Code != http.StatusForbidden {
+		t.Errorf("wildcard allowed host: status %d, want 403", rec.Code)
 	}
 }
 
@@ -1626,8 +1634,12 @@ func TestPageUpgradeCommandsUseDocumentedUpgradeScriptAndBundle(t *testing.T) {
 // visible and must not hand a request to a thread that has a turn running.
 func TestPageEntryPointsReachAVisibleIdleThread(t *testing.T) {
 	ask := pageSnippet(t, `ask.addEventListener("click"`, "\n          });\n")
-	if !strings.Contains(ask, `if (view !== "thread" || inflight[activeId]) newChat();`) {
+	if !strings.Contains(ask, `isThreadBusy(findThread(activeId))`) || !strings.Contains(ask, "newChat();") {
 		t.Errorf("Ask the agent can send into a busy thread:\n%s", ask)
+	}
+	propose := pageJS(t, "sendPRProposalToAgent")
+	if !strings.Contains(propose, `isThreadBusy(findThread(activeId))`) || !strings.Contains(propose, "newChat();") {
+		t.Errorf("sendPRProposalToAgent can send into a busy or non-thread view:\n%s", propose)
 	}
 	palette := pageSnippet(t, `sub: c.local ? "Action" : "Prompt",`, "handleSlashCommand(c.token, \"centre\");")
 	for _, want := range []string{"else newChat();", "PALETTE_STREAM_COMMANDS.has(c.local)", `view !== "thread"`} {
@@ -1639,6 +1651,19 @@ func TestPageEntryPointsReachAVisibleIdleThread(t *testing.T) {
 	escapeArm := pageSnippet(t, escape[len(escape)-len(`if (e.key === "Escape") {`):], "return;")
 	if !strings.Contains(escapeArm, "e.stopPropagation();") {
 		t.Errorf("Escape in the autocomplete popup reaches the document handler:\n%s", escapeArm)
+	}
+}
+
+func TestIsTerminalKanbanStatus(t *testing.T) {
+	for _, s := range []string{"completed", "done", "failed", "blocked", "cancelled", "canceled", "aborted", "gave_up", "gave up (retries exhausted)"} {
+		if !isTerminalKanbanStatus(s) {
+			t.Errorf("isTerminalKanbanStatus(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"in_progress", "ready", "timed out; dispatcher will retry", "timed_out", "crashed (worker exited); dispatcher will retry"} {
+		if isTerminalKanbanStatus(s) {
+			t.Errorf("isTerminalKanbanStatus(%q) = true, want false", s)
+		}
 	}
 }
 
@@ -1666,21 +1691,35 @@ func TestPageUsageEmailDoesNotAskForAMissingJob(t *testing.T) {
 }
 
 // Every catalog entry's SKILL.md link and "Lives at" line must point at a
-// file in the tree.
+// file in the tree, and SKILL_CATALOG must stay in parity with knownPlatformSkills.
 func TestSkillCatalogPointsAtSkillsInTheTree(t *testing.T) {
-	entry := regexp.MustCompile(`\{\s*name:\s*"([a-z0-9-]+)",\s*cat:\s*"[a-z]+",\s*(agent:\s*"cluster",\s*)?desc:`)
+	entry := regexp.MustCompile(`\{\s*name:\s*"([a-z0-9-]+)",\s*cat:\s*"[a-z]+",\s*(?:agent:\s*"(cluster|tse)",\s*)?desc:`)
 	matches := entry.FindAllStringSubmatch(pageSource(t), -1)
 	if len(matches) < 40 {
 		t.Fatalf("found %d SKILL_CATALOG entries; the pattern no longer matches the catalog", len(matches))
 	}
+	inCatalog := make(map[string]bool, len(matches))
 	for _, m := range matches {
+		inCatalog[m[1]] = true
 		dir := "platform"
 		if m[2] != "" {
-			dir = "cluster"
+			dir = m[2]
 		}
 		path := "../../../agents/" + dir + "/skills/" + m[1] + "/SKILL.md"
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("catalog skill %s: %v", m[1], err)
+		}
+	}
+	knownSet := make(map[string]bool, len(knownPlatformSkills))
+	for _, name := range knownPlatformSkills {
+		knownSet[name] = true
+		if !inCatalog[name] {
+			t.Errorf("knownPlatformSkills entry %q is missing from SKILL_CATALOG", name)
+		}
+	}
+	for name := range inCatalog {
+		if !knownSet[name] {
+			t.Errorf("SKILL_CATALOG entry %q is missing from knownPlatformSkills", name)
 		}
 	}
 }

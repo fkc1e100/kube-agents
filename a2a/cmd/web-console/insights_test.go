@@ -203,6 +203,7 @@ func TestInsightsModelIdentityAndClusterFromEnv(t *testing.T) {
 	t.Setenv(envProjectID, "p")
 	t.Setenv(envLocation, "us-central1")
 	t.Setenv(envLiteLLMPeersHost, "")
+	t.Setenv(envLiteLLMURL, "")
 	got := decode[insightsResponse](t, serve(newServer(loadConfig()).routes(), insightsReq()))
 	if got.Model != (modelInfo{Name: "gemini-3.5-flash", Provider: "vertex_ai"}) {
 		t.Errorf("model = %+v", got.Model)

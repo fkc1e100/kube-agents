@@ -6282,6 +6282,7 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
             out = self._bootstrap_over(tmp, "PROJECT_ID=p\n", "PARAM_ENABLE_WEB_CONSOLE=true")
         self.assertIn("--enable-web-console=true applies to this run only", out)
         self.assertIn("records no WEB_CONSOLE_ENABLED", out)
+        self.assertIn("upgrade.sh and --menu take no --enable-web-console", out)
         self.assertIn(
             "or repeat --enable-web-console on every later install.sh run.",
             out,

@@ -3,24 +3,27 @@ The web console: a browser chat page for the Platform Agent, for installs with
 no chat platform configured. docs/site/src/content/docs/deploy/web-console.md
 is the user-facing page.
 
-Access is `kubectl port-forward` and nothing else, and three things here hold
+Access is `kubectl port-forward` by default, and three things here hold
 that line. The Service is ClusterIP with no way to change its type. The
 NetworkPolicy refuses all ingress from the pod network, so no other workload
 can reach the console and borrow the agent API key it holds — port-forwards
 enter from the node, which NetworkPolicy does not govern, and so do kubelet
-probes. And the binary refuses any Host that is not loopback, so a forwarded
-port cannot be reached through a rebinding DNS name in the operator's browser.
+probes. And the binary refuses any Host that is not loopback by default, so a
+forwarded port cannot be reached through a rebinding DNS name in the
+operator's browser.
 
 One replica on purpose: a port-forward lands on one pod, and the console keeps
 which sessions have a turn in flight in memory.
 
 The metrics banner reads LiteLLM's Prometheus counters from every replica. The
-headless Service below gives the console their pod IPs through DNS, so it needs
-no Kubernetes API access. litellm-policy (this chart's copy, and the
-operator's) admits every pod in the namespace on 8080, and the console's own
-NetworkPolicy governs ingress only, so the fetch is allowed both ways. The
-model and the agent identity are passed in as env at install; the console has
-no credentials to read IAM.
+headless Service below gives the console their pod IPs through DNS.
+litellm-policy (this chart's copy, and the operator's) admits every pod in the
+namespace on 8080, and the console's own NetworkPolicy governs ingress only, so
+the fetch is allowed both ways. Install-time model and agent identity defaults
+are passed in as env; when `webConsole.environment.enabled` is true, the
+console also reads and patches the `PlatformAgent` resource (for repository
+topology, preferred model annotations, and applied PR annotations). The console
+has no credentials to read cloud IAM.
 */ -}}
 {{- if .Values.webConsole.enabled }}
 {{- if not .Values.platformAgent.enabled }}
@@ -133,7 +136,7 @@ spec:
             {{- if and $ns (not (contains "/" $name)) (not (contains "://" $name)) }}
             {{- $name = printf "%s/%s" $ns $name }}
             {{- end }}
-            {{- $repoList = append $repoList (dict "forge" (.forge | default "github") "provider" $f.provider "host" $f.host "repository" $name "role" (.role | default "gitops")) }}
+            {{- $repoList = append $repoList (dict "forge" (.forge | default "github") "provider" $f.provider "host" $f.host "repository" $name "role" (.role | default "gitops") "baseBranch" (.baseBranch | default "")) }}
             {{- end }}
             {{- if and (not $repoList) $integ.github $integ.github.gitRepo }}
             {{- $repoList = append $repoList (dict "forge" "github" "provider" "github" "host" "" "repository" $integ.github.gitRepo "role" "gitops") }}
@@ -266,12 +269,12 @@ spec:
 {{- if .Values.webConsole.environment.enabled }}
 ---
 {{- /*
-GET /api/environment: the install in versions, dates and counts, for a
-feedback report. The console counts nodes, namespaces, pods and controllers
-with list calls and discards the items; it reads the PlatformAgent for the
-install date and phase, and the namespace's ReplicaSets for the last rollout.
-No secrets, no configmaps, no reads of object content leave the pod: the
-route returns numbers, versions and timestamps only.
+Kubernetes API access for GET /api/environment and PlatformAgent state: the
+ClusterRole counts nodes, namespaces, pods and controllers with list calls and
+discards the items; the namespaced Role lists ReplicaSets for the last rollout
+and gets/patches the named PlatformAgent resource (recording repository
+topology, preferred model annotations, and applied PR annotations). No secrets
+or configmaps are read or modified.
 */}}
 apiVersion: v1
 kind: ServiceAccount
@@ -337,14 +340,6 @@ rules:
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["list"]
-  - apiGroups: ["apps"]
-    resources: ["deployments"]
-    resourceNames: ["litellm"]
-    verbs: ["get", "patch"]
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["litellm-config"]
-    verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -360,8 +355,8 @@ roleRef:
   kind: Role
   name: {{ .Release.Name }}-web-console-environment
 subjects:
-- kind: ServiceAccount
-  name: {{ .Release.Name }}-web-console
-  namespace: {{ .Release.Namespace }}
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-web-console
+    namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- end }}
