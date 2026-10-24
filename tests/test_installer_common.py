@@ -146,13 +146,15 @@ def _autopilot_describe_stub(version="1.31.5-gke.1023000"):
     """A `clusters describe` stub for an Autopilot cluster.
 
     The generator asks twice on this path — autopilot.enabled first, then
-    currentMasterVersion for the gVisor floor — so the stub answers on the
-    --format it is given. An empty `version` stands for a version that
-    could not be read.
+    currentMasterVersion for the gVisor floor (plus the NetworkPolicy probe
+    when WEB_CONSOLE_ENABLED and ACCEPT_NO_NETWORK_POLICY are both set) — so
+    the stub answers on the --format it is given. An empty `version` stands
+    for a version that could not be read.
     """
     return (
         'case "$*" in\n'
         f"  *currentMasterVersion*) printf '{version}\\n' ;;\n"
+        '  *datapathProvider*) printf "RUNNING,ADVANCED_DATAPATH,False\\n" ;;\n'
         "  *) printf 'True\\n' ;;\n"
         "esac\n"
         "exit 0"
@@ -573,11 +575,42 @@ class InstallerCommonTest(unittest.TestCase):
                     "WEB_CONSOLE_ENABLED": "true",
                     "ACCEPT_NO_NETWORK_POLICY": "true",
                 },
-                describe_stub='printf "False\\n"',
+                describe_stub=(
+                    'case "$*" in\n'
+                    '  *datapathProvider*) printf "RUNNING,,False\\n" ;;\n'
+                    '  *) printf "False\\n" ;;\n'
+                    'esac\n'
+                    'exit 0'
+                ),
             )
             self.assertIn("rc=1", proc.stdout, proc.stderr)
             self.assertIn(
                 "WEB_CONSOLE_ENABLED=true cannot be combined with ACCEPT_NO_NETWORK_POLICY=true",
+                proc.stdout + proc.stderr,
+            )
+            self.assertFalse(dest.exists())
+
+    def test_tfvars_reports_unreadable_cluster_when_probing_web_console_network_policy(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            dest = pathlib.Path(out_dir) / "terraform.tfvars"
+            proc = self._run(
+                f'rc=0; write_tfvars_from_state "{dest}" || rc=$?; echo "rc=$rc"',
+                env={
+                    "API_SERVER_KEY": "k",
+                    "WEB_CONSOLE_ENABLED": "true",
+                    "ACCEPT_NO_NETWORK_POLICY": "true",
+                },
+                describe_stub=(
+                    'case "$*" in\n'
+                    '  *datapathProvider*) exit 1 ;;\n'
+                    '  *) printf "False\\n" ;;\n'
+                    'esac\n'
+                    'exit 0'
+                ),
+            )
+            self.assertIn("rc=1", proc.stdout, proc.stderr)
+            self.assertIn(
+                "Could not query NetworkPolicy configuration for existing cluster",
                 proc.stdout + proc.stderr,
             )
             self.assertFalse(dest.exists())
@@ -602,6 +635,25 @@ class InstallerCommonTest(unittest.TestCase):
             )
             self.assertIn("rc=0", proc.stdout, proc.stderr)
             self.assertIn("web_console_enabled      = true", dest.read_text())
+
+    def test_tfvars_allows_web_console_with_stale_accept_on_autopilot_or_created_cluster(self):
+        for label, describe_stub in (
+            ("adopted_autopilot", _autopilot_describe_stub()),
+            ("created_cluster", 'echo "NOT_FOUND" >&2; exit 1'),
+        ):
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as out_dir:
+                dest = pathlib.Path(out_dir) / "terraform.tfvars"
+                proc = self._run(
+                    f'rc=0; write_tfvars_from_state "{dest}" || rc=$?; echo "rc=$rc"',
+                    env={
+                        "API_SERVER_KEY": "k",
+                        "WEB_CONSOLE_ENABLED": "true",
+                        "ACCEPT_NO_NETWORK_POLICY": "true",
+                    },
+                    describe_stub=describe_stub,
+                )
+                self.assertIn("rc=0", proc.stdout, proc.stderr)
+                self.assertIn("web_console_enabled      = true", dest.read_text())
 
     # ── the cert-manager probe: a Deployment alone cannot say whose it is ────
 

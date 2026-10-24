@@ -1517,9 +1517,14 @@
           markKnown: !!t.markKnown,
           updated: typeof t.updated === "number" ? t.updated : nowSeconds(),
           viewedAt: typeof t.viewedAt === "number" ? t.viewedAt : 0,
+          busyUntil: typeof t.busyUntil === "number" ? t.busyUntil : 0,
           unread: !!t.unread,
           started: !!t.started,
         };
+      }
+
+      function isThreadBusy(t) {
+        return !!(t && (inflight[t.id] || (t.busyUntil || 0) > nowSeconds()));
       }
 
       function parseThreads(raw) {
@@ -1576,6 +1581,8 @@
         }
         sessionStorage.removeItem(LEGACY_SESSION_KEY);
         sessionStorage.removeItem(LEGACY_MARK_KEY);
+        const removedAtLoad = loadRemovedIds();
+        threads = threads.filter((t) => !removedAtLoad.has(t.id));
         const active = sessionStorage.getItem(ACTIVE_KEY) || legacy || "";
         activeId = findThread(active)
           ? active
@@ -1587,7 +1594,11 @@
       }
 
       function saveThreads() {
-        localStorage.setItem(THREADS_KEY, JSON.stringify(threads));
+        const removed = loadRemovedIds();
+        localStorage.setItem(
+          THREADS_KEY,
+          JSON.stringify(threads.filter((t) => !removed.has(t.id))),
+        );
       }
 
       // Another tab saved the list. Take it, keeping the higher mark of any
@@ -1609,6 +1620,9 @@
           if ((t.viewedAt || 0) > (mine.viewedAt || 0)) {
             mine.viewedAt = t.viewedAt;
           }
+          mine.busyUntil = inflight[mine.id]
+            ? mine.busyUntil
+            : t.busyUntil || 0;
           if (!onScreen(mine.id) && t.mark > mine.mark) {
             mine.mark = t.mark;
             mine.markKnown = true;
@@ -1623,10 +1637,9 @@
               (onScreen(mine.id) && !removed.has(mine.id))) &&
             !merged.some((t) => t.id === mine.id)
           ) {
-            if (removed.delete(mine.id)) saveRemovedIds(removed);
             mine.viewedAt = Math.max(mine.viewedAt || 0, nowSeconds());
             merged.unshift(mine);
-            retained = true;
+            if (!removed.has(mine.id)) retained = true;
           }
         });
         threads = merged;
@@ -1687,8 +1700,9 @@
 
       // Removes a thread from this list only. The agent's session stays.
       function removeThread(id) {
-        if (inflight[id]) return false;
-        threads = threads.filter((t) => t.id !== id);
+        const t = findThread(id);
+        if (inflight[id] || isThreadBusy(t)) return false;
+        threads = threads.filter((item) => item.id !== id);
         delete notices[id];
         delete lastTurnMeta[id];
         const removed = loadRemovedIds();
@@ -1865,6 +1879,28 @@
           advanceMark(t, replyId);
         }
         advanceMark(t, data.latest_id);
+      }
+
+      // When a turn fails or the stream breaks after the user message was sent,
+      // Hermes may already have recorded the user row in state.db. Advance the
+      // mark past that user row (while showing any earlier updates before it)
+      // so the next poll does not display the user's own prompt a second time;
+      // leave any later rows unmarked for the next poll once the turn finishes.
+      async function reconcileTurnErrorMark(t, typed) {
+        const data = await fetchNewMessages(t);
+        if (!data) return;
+        const messages = data.messages || [];
+        const same = (a, b) => (a || "").trim() === (b || "").trim();
+        let turnAt = -1;
+        messages.forEach((m, i) => {
+          if (turnAt >= 0 || m.id <= t.mark) return;
+          if (m.role === "user" && same(m.content, typed)) turnAt = i;
+        });
+        if (turnAt < 0) return;
+        if (t.markKnown) {
+          showUpdates(t, messages.slice(0, turnAt), messages[turnAt]);
+        }
+        advanceMark(t, messages[turnAt].id);
       }
 
       // Puts a thread on screen from its transcript: clears its dot, renders
@@ -2222,16 +2258,22 @@
       // formatting so bold can wrap a code span without matching inside one.
       function replaceCodeSpans(line, codes) {
         const runs = [];
-        const re = /`+/g;
+        const re = /(\\*)(`+)/g;
         let m;
         while ((m = re.exec(line)) !== null) {
-          runs.push({ start: m.index, end: re.lastIndex, len: m[0].length });
+          runs.push({
+            start: m.index + m[1].length,
+            end: re.lastIndex,
+            len: m[2].length,
+            escaped: m[1].length % 2 === 1,
+          });
         }
         if (runs.length < 2) return line;
         let out = "";
         let cursor = 0;
         for (let i = 0; i < runs.length; i++) {
           const open = runs[i];
+          if (open.escaped) continue;
           let closeIdx = -1;
           for (let j = i + 1; j < runs.length; j++) {
             if (runs[j].len === open.len) {
@@ -2260,23 +2302,89 @@
         return out;
       }
 
+      function renderEmphasis(text) {
+        const runs = [];
+        const re = /\*+/g;
+        let m;
+        while ((m = re.exec(text)) !== null) {
+          const start = m.index;
+          const end = re.lastIndex;
+          const before = start === 0 ? " " : text[start - 1];
+          const after = end >= text.length ? " " : text[end];
+          runs.push({
+            start,
+            end,
+            len: m[0].length,
+            origLen: m[0].length,
+            canOpen: !/\s/.test(after),
+            canClose: !/\s/.test(before),
+            openTags: [],
+            closeTags: [],
+          });
+        }
+        if (runs.length < 2) return text;
+        for (let c = 0; c < runs.length; c++) {
+          const closer = runs[c];
+          if (!closer.canClose) continue;
+          while (closer.len > 0) {
+            let openerIdx = -1;
+            for (let o = c - 1; o >= 0; o--) {
+              const opener = runs[o];
+              if (opener.len === 0 || !opener.canOpen) continue;
+              if (
+                (opener.canClose || closer.canOpen) &&
+                (opener.origLen + closer.origLen) % 3 === 0 &&
+                (opener.origLen % 3 !== 0 || closer.origLen % 3 !== 0)
+              ) {
+                continue;
+              }
+              openerIdx = o;
+              break;
+            }
+            if (openerIdx < 0) break;
+            const opener = runs[openerIdx];
+            const use = opener.len >= 2 && closer.len >= 2 ? 2 : 1;
+            const tag = use === 2 ? "strong" : "em";
+            opener.len -= use;
+            closer.len -= use;
+            opener.openTags.unshift(`<${tag}>`);
+            closer.closeTags.push(`</${tag}>`);
+            for (let k = openerIdx + 1; k < c; k++) {
+              runs[k].canOpen = false;
+            }
+          }
+        }
+        let out = "";
+        let pos = 0;
+        for (let i = 0; i < runs.length; i++) {
+          const r = runs[i];
+          out += text.slice(pos, r.start);
+          out += r.closeTags.join("") + "*".repeat(r.len) + r.openTags.join("");
+          pos = r.end;
+        }
+        out += text.slice(pos);
+        return out;
+      }
+
       function renderInline(text) {
         const codes = [];
+        const escapes = [];
         let html = escapeHtml(String(text).replace(/\x00/g, ""))
           .split(/\n{2,}/)
           .map((para) => {
             let p = replaceCodeSpans(para, codes);
-            p = p.replace(
-              /(?<!\*)\*\*\*(?![\s*])((?:[^*]|\*(?!\*)|\*\*(?!\*))+?)(?<![\s*])\*\*\*(?!\*)/g,
-              "<em><strong>$1</strong></em>",
-            );
-            p = p.replace(
-              /(?<!\*)\*\*(?![\s*])((?:[^*]|\*(?!\*))+?)(?<![\s*])\*\*(?!\*)/g,
-              "<strong>$1</strong>",
-            );
-            return p;
+            p = p.replace(/\\([\\`*_~[\]()#+\-.!])/g, (_, ch) => {
+              const idx = escapes.length;
+              escapes.push(ch);
+              return `\x00ESC${idx}\x00`;
+            });
+            return renderEmphasis(p);
           })
           .join("\n\n");
+        html = html.replace(
+          /\x00ESC(\d+)\x00/g,
+          (_, idx) => escapes[Number(idx)],
+        );
         html = html.replace(
           /\x00CODE(\d+)\x00/g,
           (_, idx) => codes[Number(idx)],
@@ -2298,7 +2406,7 @@
         text = String(text).replace(/\r\n/g, "\n");
         let html = "";
         let pos = 0;
-        const openRe = /(?:^|\n)([ ]*)(`{3,}|~{3,})([^\n]*)\n/g;
+        const openRe = /(?:^|\n)([ \t]*)(`{3,}|~{3,})([^\n]*)\n/g;
         let openMatch;
         while ((openMatch = openRe.exec(text)) !== null) {
           if (openMatch.index < pos) continue;
@@ -2313,7 +2421,7 @@
           const fenceLen = openMatch[2].length;
           const startCode = openRe.lastIndex;
           const closeRe = new RegExp(
-            `^[ ]*(${fenceChar}{${fenceLen},}) *(?=\\n|$)`,
+            `^[ \\t]*(${fenceChar}{${fenceLen},})[ \\t]*(?=\\n|$)`,
             "gm",
           );
           closeRe.lastIndex = startCode;
@@ -2333,7 +2441,7 @@
             .split("\n")
             .map((line) => {
               let k = 0;
-              while (k < indent && line[k] === " ") k++;
+              while (k < indent && (line[k] === " " || line[k] === "\t")) k++;
               return line.slice(k);
             })
             .join("\n");
@@ -2645,7 +2753,7 @@
                   const classes = ["rail-item"];
                   if (onScreen(t.id)) classes.push("active");
                   if (t.unread) classes.push("unread");
-                  const busy = !!inflight[t.id];
+                  const busy = isThreadBusy(t);
                   const dot = busy
                     ? `<span class="thread-dot busy" title="A turn is running"></span>`
                     : t.unread
@@ -3296,6 +3404,7 @@
         if (!t.title) t.title = threadTitle(text);
         t.started = true;
         t.updated = nowSeconds();
+        t.busyUntil = nowSeconds() + 900;
         const turn = startInflight(t.id, text);
         saveThreads();
         appendMessage("user", text);
@@ -3335,16 +3444,21 @@
                 outcome.beforeId,
                 outcome.replyId,
               );
-            } else if (onScreen(t.id)) {
-              appendMessage("agent", outcome.error, "error");
             } else {
-              (notices[t.id] = notices[t.id] || []).push(outcome.error);
-              t.unread = true;
-              saveThreads();
+              if (onScreen(t.id)) {
+                appendMessage("agent", outcome.error, "error");
+              } else {
+                (notices[t.id] = notices[t.id] || []).push(outcome.error);
+                t.unread = true;
+                saveThreads();
+              }
+              await reconcileTurnErrorMark(t, text);
             }
           }
         } finally {
           delete inflight[t.id];
+          t.busyUntil = 0;
+          saveThreads();
           threadsChanged();
         }
       }

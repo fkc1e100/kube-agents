@@ -1682,6 +1682,95 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   listener({ key: "Enter", shiftKey: false, isComposing: false, keyCode: 13, preventDefault() {} });
   assert.equal(sent, 1, "plain Enter submits once");
 }
+
+// 12. reconcileTurnErrorMark advances mark past the user row on stream error so
+// pollThread does not duplicate the user prompt and shows the background reply.
+{
+  const idErr = "web-console-" + "9".repeat(32);
+  let pollStep = 0;
+  const ctxErr = makeHarness(async () => {
+    pollStep++;
+    if (pollStep === 1) {
+      // During reconcileTurnErrorMark: user row is in state.db, reply not yet written.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          latest_id: 11,
+          messages: [
+            { id: 11, role: "user", author: "user", content: "broken stream prompt" },
+          ],
+        }),
+      };
+    }
+    // Next pollThread after background turn completes on server.
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 12,
+        messages: [
+          { id: 12, role: "assistant", author: "agent", content: "background finished reply" },
+        ],
+      }),
+    };
+  });
+  vm.runInContext(
+    "const te = addThread(" + JSON.stringify(idErr) + ", '', true);" +
+    "activateThread(te, { latest_id: 10, messages: [] });",
+    ctxErr
+  );
+  ctxErr.getState().appended.length = 0;
+  await vm.runInContext("reconcileTurnErrorMark(te, 'broken stream prompt')", ctxErr);
+  assert.equal(vm.runInContext("te.mark", ctxErr), 11, "mark must advance to the user row id");
+  await vm.runInContext("pollThread(te)", ctxErr);
+  assert.deepEqual(
+    ctxErr.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [{ author: "agent", text: "background finished reply", tag: "update" }],
+    "pollThread after stream error must show only the finished reply, never the user prompt a second time"
+  );
+}
+
+// 13. busyUntil blocks removeThread across tabs and mergeStoredThreads never
+// resurrects a removed thread in localStorage.
+{
+  const idBusy = "web-console-" + "a".repeat(32);
+  const tabA = makeHarness();
+  const tabB = makeHarness();
+  vm.runInContext(
+    "const tb = addThread(" + JSON.stringify(idBusy) + ", 'Busy chat', true);" +
+    "tb.busyUntil = nowSeconds() + 900; startInflight(tb.id, 'hi'); saveThreads();",
+    tabA
+  );
+  const storedBusy = tabA.getState().local.get("kube-agents-web-console-threads");
+  vm.runInContext("mergeStoredThreads(" + JSON.stringify(storedBusy) + ")", tabB);
+  assert.equal(
+    vm.runInContext("removeThread(" + JSON.stringify(idBusy) + ")", tabB),
+    false,
+    "Tab B must refuse removeThread while Tab A's turn has busyUntil set"
+  );
+
+  // Even if another tab writes idBusy to REMOVED_KEY and clears THREADS_KEY while
+  // Tab A has inflight[idBusy], Tab A keeps its in-memory turn without re-adding
+  // idBusy to localStorage THREADS_KEY or deleting it from REMOVED_KEY.
+  tabA.getState().local.set("kube-agents-web-console-removed", JSON.stringify([idBusy]));
+  tabA.getState().local.set("kube-agents-web-console-threads", "[]");
+  vm.runInContext("mergeStoredThreads('[]')", tabA);
+  assert.ok(
+    vm.runInContext("!!findThread(" + JSON.stringify(idBusy) + ")", tabA),
+    "Tab A keeps in-flight thread in memory"
+  );
+  assert.equal(
+    tabA.getState().local.get("kube-agents-web-console-threads"),
+    "[]",
+    "Tab A must not write a removed thread back to localStorage THREADS_KEY"
+  );
+  assert.equal(
+    tabA.getState().local.get("kube-agents-web-console-removed"),
+    JSON.stringify([idBusy]),
+    "Tab A must not delete idBusy from REMOVED_KEY"
+  );
+}
 `)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

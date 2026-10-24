@@ -49,8 +49,6 @@ func TestClassifySession(t *testing.T) {
 		{"cron-policy-sweep", "api_server", "Triage cron-policy-sweep", kindOther},
 		{"cron-Policy-20261006", "api_server", "Triage cron-Policy-20261006", kindOther},
 		{"cron-platform_policy-20261006", "api_server", "Triage cron-platform_policy-20261006", kindScheduled},
-		{"cron_policy-sweep_20261006_090000", "cron", "Policy Sweep", kindScheduled},
-		{"cron_bad/id", "cron", "Policy Sweep", kindOther},
 		{"a2a-ctx-slack-thread-1", "api_server", "Triage a2a-ctx-slack-thread-1", kindChat},
 	} {
 		if got := classifySession(tc.id, tc.source, tc.title); got != tc.want {

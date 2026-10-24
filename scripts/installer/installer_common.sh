@@ -4457,6 +4457,27 @@ gke_describe_error_is_not_found() {
   printf '%s' "${1:-}" | grep -qiE "$GKE_CLUSTER_NOT_FOUND_PATTERN"
 }
 
+is_existing_cluster_network_policy_satisfied() {
+  local project_id="$1" cluster_name="$2" region="$3"
+  local create_cluster_flag="${4:-${TFVARS_CREATE_CLUSTER:-true}}"
+  [ "$create_cluster_flag" = "false" ] || return 0
+
+  local cluster_info
+  cluster_info=$(trap - ERR; gcloud container clusters describe "$cluster_name" \
+    --location="$region" --project="$project_id" \
+    --format="csv[no-heading](status,networkConfig.datapathProvider,networkPolicy.enabled)" 2>/dev/null || echo "")
+  local status="" dp_provider="" legacy_np=""
+  if [ -n "$cluster_info" ]; then
+    IFS=',' read -r status dp_provider legacy_np <<< "$cluster_info" || true
+  fi
+  if [ -z "$status" ]; then
+    return 2
+  fi
+  [ "$dp_provider" != "ADVANCED_DATAPATH" ] || return 0
+  [ "$legacy_np" = "True" ] || [ "$legacy_np" = "true" ] || return 1
+  return 0
+}
+
 
 # Writes the terraform.tfvars the full-install composition consumes, from the
 # install.env variable set in the environment (load it first). The same
@@ -4962,29 +4983,29 @@ write_tfvars_from_state() {
     return 1
   fi
   # Refused here for upgrade.sh and the Day-2 menu, which regenerate from
-  # install.env without install.sh's preflight, when the cluster still enforces
-  # no NetworkPolicy. install.sh (which passes KUBE_AGENTS_GENERATE_API_SERVER_KEY=true)
-  # defers this check to check_existing_cluster_network_policy_preflight. On an
-  # adopted Standard cluster that has since enabled Dataplane V2 or Calico (the
-  # "confine it later" route), the live probe below finds enforcement active and
-  # lets upgrade.sh and --menu proceed despite a stale ACCEPT_NO_NETWORK_POLICY=true.
+  # Refused when the web console is on and the operator has accepted an
+  # unconfined cluster: the web console holds the Platform Agent's API key with
+  # no login of its own, and its deny-all-ingress NetworkPolicy is the only
+  # thing keeping other pods in the cluster from reaching it. Checked here so
+  # upgrade.sh and `install.sh --menu` cannot write a tfvars that enables the
+  # console when both keys are set in install.env without install.sh's
+  # preflight, when the cluster still enforces no NetworkPolicy. install.sh
+  # (which passes KUBE_AGENTS_GENERATE_API_SERVER_KEY=true) defers this check to
+  # check_existing_cluster_network_policy_preflight. On an adopted cluster that
+  # enforces NetworkPolicy (Autopilot, or a Standard cluster that has since
+  # enabled Dataplane V2 or Calico on the "confine it later" route), the live
+  # probe below finds enforcement active and lets upgrade.sh and --menu proceed
+  # despite a stale ACCEPT_NO_NETWORK_POLICY=true.
   if ! is_truthy "${KUBE_AGENTS_GENERATE_API_SERVER_KEY:-false}" && \
      is_truthy "${ACCEPT_NO_NETWORK_POLICY:-false}" && \
      is_truthy "${WEB_CONSOLE_ENABLED:-$DEFAULT_ENABLE_WEB_CONSOLE}"; then
-    local np_enforced_now="false"
-    if [ "$create_cluster" = "false" ] && [ "$cluster_mode" = "standard" ]; then
-      local np_cluster_info np_status="" np_dp_provider="" np_legacy=""
-      np_cluster_info="$(trap - ERR; gcloud container clusters describe "${CLUSTER_NAME}" \
-        --location "${REGION}" --project "${PROJECT_ID}" \
-        --format="csv[no-heading](status,networkConfig.datapathProvider,networkPolicy.enabled)" 2>/dev/null || true)"
-      if [ -n "$np_cluster_info" ]; then
-        IFS=',' read -r np_status np_dp_provider np_legacy <<< "$np_cluster_info" || true
-      fi
-      if [ "$np_dp_provider" = "ADVANCED_DATAPATH" ] || [ "$np_legacy" = "True" ] || [ "$np_legacy" = "true" ]; then
-        np_enforced_now="true"
-      fi
-    fi
-    if [ "$np_enforced_now" != "true" ]; then
+    local np_rc=0
+    is_existing_cluster_network_policy_satisfied "${PROJECT_ID}" "${CLUSTER_NAME}" "${REGION}" "$create_cluster" || np_rc=$?
+    if [ "$np_rc" -eq 2 ]; then
+      print_error "Could not query NetworkPolicy configuration for existing cluster '${CLUSTER_NAME}'."
+      print_info "Failed to read cluster details from GCP while validating WEB_CONSOLE_ENABLED=true with ACCEPT_NO_NETWORK_POLICY=true. Check cluster name, region, permissions, and network connectivity."
+      return 1
+    elif [ "$np_rc" -ne 0 ]; then
       print_error "WEB_CONSOLE_ENABLED=true cannot be combined with ACCEPT_NO_NETWORK_POLICY=true."
       print_info "The web console holds the Platform Agent's API key with no login of its own, and its NetworkPolicy is what keeps other pods in the cluster from reaching it. Enable NetworkPolicy enforcement on the cluster (and remove any stale ACCEPT_NO_NETWORK_POLICY=true from install.env if the cluster already enforces it), or set WEB_CONSOLE_ENABLED=false in install.env."
       return 1
