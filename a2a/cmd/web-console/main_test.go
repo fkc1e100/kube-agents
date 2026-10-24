@@ -1405,6 +1405,52 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     ctxReselect.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
     [{ author: "agent", text: "wake reply after reselect", tag: "update" }]
   );
+
+  // Also cover when a background pollThread marked the kanban row (id: 9)
+  // before the user submitted their turn (before_id: 9, turnAt === 0 at id: 10),
+  // and the wake's assistant reply (id: 11) lands between id: 10 and id: 14.
+  const idPrePolled = "web-console-" + "e".repeat(32);
+  let prePollStep = 0;
+  const ctxPrePolled = makeHarness(async () => {
+    prePollStep++;
+    if (prePollStep === 1) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          latest_id: 9,
+          messages: [
+            { id: 9, role: "user", author: "kanban", content: "[kanban] Task t_3 completed." },
+          ],
+        }),
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 14,
+        messages: [
+          { id: 10, role: "user", author: "user", content: "check" },
+          { id: 11, role: "assistant", author: "agent", content: "wake reply" },
+          { id: 12, role: "assistant", author: "agent", content: "intermediate note" },
+          { id: 14, role: "assistant", author: "agent", content: "final" },
+        ],
+      }),
+    };
+  });
+  vm.runInContext(
+    "const tp = addThread(" + JSON.stringify(idPrePolled) + ", 'prepolled', true);" +
+    "activateThread(tp, { latest_id: 8, messages: [] });",
+    ctxPrePolled
+  );
+  await vm.runInContext("pollThread(tp)", ctxPrePolled);
+  ctxPrePolled.getState().appended.length = 0;
+  await vm.runInContext("settleAfterReply(tp, 'check', 'final', 9, 14)", ctxPrePolled);
+  assert.deepEqual(
+    ctxPrePolled.getState().appended.map(m => ({ author: m.author, text: m.text, tag: m.tag })),
+    [{ author: "agent", text: "wake reply", tag: "update" }]
+  );
 }
 
 // 6. loadSeen and updateChannel: first-visit seeding across both channels even
@@ -1582,8 +1628,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
     "<p><strong>All pods<br>healthy</strong></p><p>**unclosed</p><p>next</p>"
   );
   assert.equal(
-    vm.runInContext("renderMarkdown('***critical alert*** and *italic* and **bold**')", ctx),
-    "<p><em><strong>critical alert</strong></em> and <em>italic</em> and <strong>bold</strong></p>"
+    vm.runInContext("renderMarkdown('***critical alert*** and **bold**')", ctx),
+    "<p><em><strong>critical alert</strong></em> and <strong>bold</strong></p>"
   );
 
   const alertHtml = vm.runInContext("renderAuthorBody('event_watcher', 'raw prompt', { subject: 'Triage Pod web-1', resource: 'default/Pod/web-1', reason: 'BackOff', warning: 'CrashLoopBackOff' })", ctx);

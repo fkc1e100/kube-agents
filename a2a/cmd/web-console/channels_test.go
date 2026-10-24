@@ -37,6 +37,7 @@ func TestChannelsListTheirOwnKindOnly(t *testing.T) {
 	fake, h := setup(t)
 	fake.seed("k8s-evt-00000001", "api_server", "Triage k8s-evt-00000001")
 	fake.seed("cron-sweep-20261006", "api_server", "Triage cron-sweep-20261006")
+	fake.seed("cron_daily-audit_20261006_120000", "cron", "Daily Audit")
 	fake.seed("slack-1", "slack", "Triage k8s-evt-00000002")
 	fake.mu.Lock()
 	fake.post("k8s-evt-00000001", "user", "Pod web-7 is crashlooping.\nDetail")
@@ -80,8 +81,18 @@ func TestChannelsListTheirOwnKindOnly(t *testing.T) {
 	}
 
 	sched := decode[channelList](t, serve(h, channelReq("scheduled")))
-	if len(sched.Posts) != 1 || sched.Posts[0].ID != "cron-sweep-20261006" || sched.Posts[0].Kind != kindScheduled {
-		t.Errorf("scheduled = %+v, want only cron-sweep-20261006", sched)
+	if len(sched.Posts) != 2 {
+		t.Fatalf("scheduled = %+v, want both cron-sweep-20261006 and cron_daily-audit_20261006_120000", sched)
+	}
+	schedIDs := map[string]bool{}
+	for _, p := range sched.Posts {
+		if p.Kind != kindScheduled {
+			t.Errorf("scheduled post %s has kind %s", p.ID, p.Kind)
+		}
+		schedIDs[p.ID] = true
+	}
+	if !schedIDs["cron-sweep-20261006"] || !schedIDs["cron_daily-audit_20261006_120000"] {
+		t.Errorf("scheduled IDs = %+v", schedIDs)
 	}
 }
 

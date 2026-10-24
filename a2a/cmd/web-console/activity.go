@@ -57,6 +57,9 @@ const (
 	// gateway API: the event watcher's triage sessions, scheduled checks, and
 	// this console's. Slack and Google Chat sessions carry their own source.
 	sourceAPIServer = "api_server"
+	// sourceCron is the Hermes source of a session created by Hermes' own
+	// in-process cron scheduler (cron_<job_id>_<timestamp>).
+	sourceCron = "cron"
 
 	// titlePrefix is what session_kv_server.py's _create_gateway_session puts
 	// before the session ID in the title of every session it opens: the
@@ -86,9 +89,9 @@ const (
 	// kept, oldest first.
 	transcriptMaxRows = 200
 	transcriptTimeout = 5 * time.Second
-	// scheduledReportMarker prefixes user messages posted by
-	// session_kv_server.py's _run_relay_turn into a cron-... session, so later
-	// sub-daily runs are distinguished from a console user's reply.
+	// scheduledReportMarker prefixes user messages posted by a scheduled relay
+	// turn into an existing cron-... session, so later sub-daily runs are
+	// distinguished from a console user's reply.
 	scheduledReportMarker = "[scheduled]"
 )
 
@@ -98,12 +101,17 @@ var (
 	// and refuses anything that could change the upstream path.
 	transcriptIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
-	// The session IDs session_kv_server.py mints. create_session makes an
-	// event triage ID from eight hex digits of a UUID. _cron_report_session_id
-	// makes a scheduled check's ID from a slug of the profile and job (lower
-	// case, [a-z0-9_-], at most 80 characters) and the UTC day.
-	eventTriageIDPattern = regexp.MustCompile(`^k8s-evt-[0-9a-f]{8}$`)
-	scheduledIDPattern   = regexp.MustCompile(`^cron-[a-z0-9_-]{1,80}-[0-9]{8}$`)
+	// The session IDs session_kv_server.py and Hermes mint. create_session
+	// makes an event triage ID from eight hex digits of a UUID. Scheduled
+	// checks either come from the Hermes cron scheduler (source="cron",
+	// cron_<job_id>_<YYYYMMDD>_<HHMMSS>) or a gateway scheduled session
+	// (source="api_server", cron-<slug>-<YYYYMMDD>). Under spec.mode: next,
+	// hermes-bridge creates chat sessions over the gateway API with IDs
+	// prefixed a2a-ctx-.
+	eventTriageIDPattern      = regexp.MustCompile(`^k8s-evt-[0-9a-f]{8}$`)
+	scheduledIDPattern        = regexp.MustCompile(`^cron-[a-z0-9_-]{1,80}-[0-9]{8}$`)
+	hermesCronIDPattern       = regexp.MustCompile(`^cron_[A-Za-z0-9_.-]{1,100}$`)
+	a2aBridgeSessionIDPattern = regexp.MustCompile(`^a2a-ctx-[A-Za-z0-9_.:-]+$`)
 
 	// cardTitlePattern finds the card title an event triage prompt spells
 	// out ("- `title`: `Triage ns/Kind/name (Reason) on cluster`"; see
@@ -139,7 +147,13 @@ func classifySession(id, source, title string) string {
 		return kindConsole
 	case source == "":
 		return kindOther
+	case source == sourceCron && hermesCronIDPattern.MatchString(id):
+		return kindScheduled
+	case source == sourceCron:
+		return kindOther
 	case source != sourceAPIServer:
+		return kindChat
+	case a2aBridgeSessionIDPattern.MatchString(id):
 		return kindChat
 	case title != titlePrefix+id:
 		return kindOther
@@ -271,8 +285,8 @@ func (s *server) summarize(ctx context.Context, sid string) (sessionSummary, boo
 	return out, true
 }
 
-// stripScheduledMarker removes a leading [scheduled] marker line written by
-// session_kv_server.py's _run_relay_turn and reports whether it was present.
+// stripScheduledMarker removes a leading [scheduled] marker line written by a
+// scheduled relay turn and reports whether it was present.
 func stripScheduledMarker(text string) (string, bool) {
 	trimmed := strings.TrimLeft(text, " \t\r\n")
 	if rest, ok := strings.CutPrefix(trimmed, scheduledReportMarker); ok {

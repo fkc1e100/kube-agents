@@ -1758,10 +1758,13 @@
             advanceMark(t, m.id);
             return;
           }
-          if (m.author === "kanban")
+          if (m.author === "kanban") {
             deliver(t, m.content, "Specialist report", m);
-          else if (m.role === "assistant") deliver(t, m.content, "update", m);
-          else if (m.role === "user") deliver(t, m.content, "You", m);
+            t.wakeOpen = true;
+          } else if (m.role === "assistant") {
+            deliver(t, m.content, "update", m);
+            t.wakeOpen = false;
+          } else if (m.role === "user") deliver(t, m.content, "You", m);
           advanceMark(t, m.id);
         });
       }
@@ -1840,7 +1843,7 @@
               ? messages.slice(0, replyAt)
               : [];
         if (midTurnSlice.length > 0) {
-          let inWake = !!(turnAt < 0 && t.wakeOpen);
+          let inWake = !!t.wakeOpen;
           t.wakeOpen = false;
           midTurnSlice.forEach((m) => {
             if (m.role === "user") {
