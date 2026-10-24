@@ -825,66 +825,6 @@ func TestEveryRouteHasItsGuards(t *testing.T) {
 	}
 }
 
-func TestAllowedHostsConfiguration(t *testing.T) {
-	fake, _ := setupServer(t)
-	upstream := httptest.NewServer(fake)
-	t.Cleanup(upstream.Close)
-
-	cfg := config{
-		HermesURL:    upstream.URL,
-		APIServerKey: testKey,
-		ClusterName:  "c1",
-		AllowedHosts: []string{"136.81.134.102", "136.81.134.102.sslip.io", "custom.domain.internal:8443"},
-	}
-	s := newServer(cfg)
-	h := s.routes()
-
-	// Allowed hosts answer with 200 (including port-qualified entry normalized in newServer)
-	for _, host := range []string{"136.81.134.102:443", "136.81.134.102.sslip.io", "custom.domain.internal:8080", "localhost:8080"} {
-		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/api/status", nil)
-		if rec := serve(h, req); rec.Code != http.StatusOK {
-			t.Errorf("Host %s: status %d, want 200", host, rec.Code)
-		}
-	}
-
-	// Chat request with matching Host and Origin passes
-	chatAllowed := chatReq(`{"message":"hi"}`)
-	chatAllowed.Host = "136.81.134.102"
-	chatAllowed.Header.Set("Origin", "https://136.81.134.102")
-	if rec := serve(h, chatAllowed); rec.Code != http.StatusOK {
-		t.Errorf("chat via configured AllowedHost: status %d, want 200", rec.Code)
-	}
-
-	// Cross-origin request between two different allowed hosts is refused
-	chatCrossAllowed := chatReq(`{"message":"hi"}`)
-	chatCrossAllowed.Host = "136.81.134.102"
-	chatCrossAllowed.Header.Set("Origin", "https://custom.domain.internal")
-	if rec := serve(h, chatCrossAllowed); rec.Code != http.StatusForbidden {
-		t.Errorf("chat with Origin of another AllowedHost: status %d, want 403", rec.Code)
-	}
-
-	// Foreign host not in AllowedHosts is refused
-	reqForeign := httptest.NewRequest(http.MethodGet, "http://unknown.attacker.example:8080/api/status", nil)
-	if rec := serve(h, reqForeign); rec.Code != http.StatusForbidden {
-		t.Errorf("Host unknown.attacker.example: status %d, want 403", rec.Code)
-	}
-
-	// Wildcard ALLOWED_HOSTS="*" is ignored and refused
-	wildcardCfg := config{
-		HermesURL:    upstream.URL,
-		APIServerKey: testKey,
-		ClusterName:  "c1",
-		AllowedHosts: []string{"*"},
-	}
-	sWild := newServer(wildcardCfg)
-	hWild := sWild.routes()
-
-	reqAny := httptest.NewRequest(http.MethodGet, "http://any-domain-whatsoever.example:8080/api/status", nil)
-	if rec := serve(hWild, reqAny); rec.Code != http.StatusForbidden {
-		t.Errorf("wildcard allowed host: status %d, want 403", rec.Code)
-	}
-}
-
 func TestHealthzAnswersAnyHost(t *testing.T) {
 	_, h := setup(t)
 	req := httptest.NewRequest(http.MethodGet, "http://10.0.0.5:8080/healthz", nil)

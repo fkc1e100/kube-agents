@@ -25,8 +25,7 @@ limitations under the License.
 // pods/portforward on the namespace. Three checks in this file keep that
 // boundary from being bypassed through the operator's own browser:
 //
-//   - every route but /healthz refuses a Host header that is not loopback
-//     (or explicitly listed in ALLOWED_HOSTS / WEB_CONSOLE_ALLOWED_HOSTS),
+//   - every route but /healthz refuses a Host header that is not loopback,
 //     which defeats DNS rebinding against the forwarded port;
 //   - POST /api/chat and /api/chat/stream require a custom header and a
 //     JSON body, so a page on another origin cannot send a turn without a
@@ -103,8 +102,6 @@ const (
 	envProjectID    = "PROJECT_ID"
 	envLocation     = "LOCATION"
 
-	envAllowedHosts           = "ALLOWED_HOSTS"
-	envWebConsoleAllowedHosts = "WEB_CONSOLE_ALLOWED_HOSTS"
 	// The model, usage and identity sources the insights banner reads; see
 	// insights.go.
 	envModelName        = "MODEL_NAME"
@@ -262,7 +259,6 @@ type config struct {
 	ReleaseCheck  bool
 	ReleaseRepo   string
 	GitHubAPIBase string
-	AllowedHosts  []string
 }
 
 func loadConfig() config {
@@ -295,31 +291,12 @@ func loadConfig() config {
 		ReleaseCheck:  envBool(envReleaseCheck, true),
 		ReleaseRepo:   envOr(envReleaseRepo, defaultReleaseRepo),
 		GitHubAPIBase: gitHubAPIBase,
-		AllowedHosts:  parseAllowedHostsEnv(os.Getenv(envAllowedHosts), os.Getenv(envWebConsoleAllowedHosts)),
 	}
 	if !releaseRepoPat.MatchString(cfg.ReleaseRepo) {
 		log.Printf(logPrefix+"%s=%q is not owner/name; using %s", envReleaseRepo, cfg.ReleaseRepo, defaultReleaseRepo)
 		cfg.ReleaseRepo = defaultReleaseRepo
 	}
 	return cfg
-}
-
-func parseAllowedHostsEnv(primary, fallback string) []string {
-	raw := strings.TrimSpace(primary)
-	if raw == "" {
-		raw = strings.TrimSpace(fallback)
-	}
-	if raw == "" {
-		return nil
-	}
-	var out []string
-	for _, part := range strings.Split(raw, ",") {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }
 
 // envBool reads an on/off setting; unset or unrecognised values give the
@@ -488,9 +465,6 @@ type server struct {
 	patchesMu        sync.RWMutex
 	cachedAppliedPRs []AppliedPR
 	patchesLoaded    bool
-
-	// allowedHosts contains hosts accepted by requireLocalHost beyond default loopbacks.
-	allowedHosts map[string]bool
 }
 
 func newServer(cfg config) *server {
@@ -508,17 +482,6 @@ func newServer(cfg config) *server {
 		streamCeiling:          streamTurnCeiling,
 		delegationPollInterval: defaultDelegationPollInterval,
 		kube:                   loadKubeClient(),
-		allowedHosts:           make(map[string]bool),
-	}
-	for _, h := range cfg.AllowedHosts {
-		h = hostOnly(h)
-		if h == "*" {
-			log.Printf(logPrefix + "ignoring wildcard '*' in ALLOWED_HOSTS; specify explicit hostnames")
-			continue
-		}
-		if h != "" {
-			s.allowedHosts[h] = true
-		}
 	}
 	s.fetchMetrics = s.fetchPeerMetrics
 	s.fetchModel = s.fetchLiveModel
@@ -566,23 +529,14 @@ func denyFraming(next http.Handler) http.Handler {
 	})
 }
 
-// isAllowedHost reports whether host is an accepted host.
-func (s *server) isAllowedHost(host string) bool {
-	h := hostOnly(host)
-	if loopbackHosts[h] {
-		return true
-	}
-	return s.allowedHosts != nil && s.allowedHosts[h]
-}
-
-// requireLocalHost refuses a request whose Host is not allowed. By default,
-// only loopback hosts (localhost, 127.0.0.1, ::1) are allowed. Additional
-// explicit hosts may be configured via ALLOWED_HOSTS / WEB_CONSOLE_ALLOWED_HOSTS.
+// requireLocalHost refuses a request whose Host is not one the operator's own
+// port-forward would send. A rebinding DNS name resolving to 127.0.0.1 still
+// carries its own name in Host, so it is refused here.
 func (s *server) requireLocalHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.isAllowedHost(r.Host) {
+		if !loopbackHosts[hostOnly(r.Host)] {
 			writeError(w, http.StatusForbidden, "host_not_allowed",
-				"The web console only answers on localhost (or hosts listed in ALLOWED_HOSTS). Reach it with kubectl port-forward.")
+				"The web console only answers on localhost. Reach it with kubectl port-forward.")
 			return
 		}
 		next.ServeHTTP(w, r)

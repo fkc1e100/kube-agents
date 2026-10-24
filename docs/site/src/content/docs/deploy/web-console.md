@@ -85,7 +85,7 @@ The console is reachable through `kubectl port-forward` and no other way. The ch
 
 The console holds the agent's API key, from the same Secret the agent reads, and attaches it to the requests it sends the agent. The key does not reach the browser. There is no login page and no per-user identity: every turn reaches the agent as the console. A port-forward carries no identity of the person behind it, so the page cannot show who is signed in.
 
-Do not expose the console through an unauthenticated LoadBalancer, Ingress or NodePort. Anyone who could reach it would be able to drive the agent and patch the `PlatformAgent` resource. The chart does not offer a way to change the Service type, and apart from its health check the console refuses any request whose `Host` is not `localhost`, `127.0.0.1` or `::1` unless explicit hostnames are configured via `ALLOWED_HOSTS` on the binary behind an authenticating proxy (wildcards such as `*` are refused).
+Do not expose the console through an unauthenticated LoadBalancer, Ingress or NodePort. Anyone who could reach it would be able to drive the agent and patch the `PlatformAgent` resource. The chart does not offer a way to change the Service type, and apart from its health check the console refuses any request whose `Host` is not `localhost`, `127.0.0.1` or `::1`.
 
 ## Turning it on
 
@@ -109,7 +109,7 @@ Then open `http://localhost:8080`. The console pod does not run under gVisor, so
 
 ## Routes
 
-The page uses these routes. All of them answer only a loopback `Host` by default (or an explicit hostname listed in `ALLOWED_HOSTS`), and `POST` routes require the `X-Kube-Agents-Console: 1` header and a matching `Origin` when `Origin` is present.
+The page uses these routes. All of them answer only a loopback `Host`, and `POST` routes require the `X-Kube-Agents-Console: 1` header and a matching `Origin` when `Origin` is present.
 
 | Route                                             | What it returns                                                                                                                                                                                                                                               |
 | :------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

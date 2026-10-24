@@ -325,12 +325,20 @@ func generateModelHelmValuesYAML(modelID, provider, target, reasoningLevel strin
 		target = provider + "/" + modelID
 	}
 	var sb strings.Builder
-	sb.WriteString("platformAgent:\n  llm:\n")
-	sb.WriteString(fmt.Sprintf("    provider: %s\n", provider))
-	sb.WriteString(fmt.Sprintf("    model: %s\n", modelID))
-	sb.WriteString(fmt.Sprintf("    modelTarget: %s\n", target))
+	sb.WriteString("litellm:\n")
+	sb.WriteString(fmt.Sprintf("  modelProvider: %s\n", provider))
+	sb.WriteString(fmt.Sprintf("  modelDefaultName: %s\n", modelID))
+	switch reasoningLevel {
+	case "low", "medium", "high":
+		sb.WriteString(fmt.Sprintf("  reasoningEffort: %s\n", reasoningLevel))
+	case "none":
+		sb.WriteString("  reasoningEffort: \"\"\n")
+	}
+	sb.WriteString("platformAgent:\n  annotations:\n")
+	sb.WriteString(fmt.Sprintf("    %s: %s\n", activeModelAnnotation, modelID))
+	sb.WriteString(fmt.Sprintf("    %s: %s\n", activeTargetAnnotation, target))
 	if reasoningLevel != "" {
-		sb.WriteString(fmt.Sprintf("    reasoningLevel: %s\n", reasoningLevel))
+		sb.WriteString(fmt.Sprintf("    %s: %s\n", reasoningLevelAnnotation, reasoningLevel))
 	}
 	return sb.String()
 }

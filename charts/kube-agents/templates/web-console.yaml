@@ -3,14 +3,13 @@ The web console: a browser chat page for the Platform Agent, for installs with
 no chat platform configured. docs/site/src/content/docs/deploy/web-console.md
 is the user-facing page.
 
-Access is `kubectl port-forward` by default, and three things here hold
+Access is `kubectl port-forward` and nothing else, and three things here hold
 that line. The Service is ClusterIP with no way to change its type. The
 NetworkPolicy refuses all ingress from the pod network, so no other workload
 can reach the console and borrow the agent API key it holds — port-forwards
 enter from the node, which NetworkPolicy does not govern, and so do kubelet
-probes. And the binary refuses any Host that is not loopback by default, so a
-forwarded port cannot be reached through a rebinding DNS name in the
-operator's browser.
+probes. And the binary refuses any Host that is not loopback, so a forwarded
+port cannot be reached through a rebinding DNS name in the operator's browser.
 
 One replica on purpose: a port-forward lands on one pod, and the console keeps
 which sessions have a turn in flight in memory.

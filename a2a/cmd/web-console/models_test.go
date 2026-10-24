@@ -12,9 +12,12 @@ import (
 func TestGenerateModelHelmValuesYAML(t *testing.T) {
 	yaml := generateModelHelmValuesYAML("gemini-3.8-flash", "vertex_ai", "vertex_ai/gemini-3.8-flash", "high")
 	for _, want := range []string{
-		"model: gemini-3.8-flash",
-		"provider: vertex_ai",
-		"reasoningLevel: high",
+		"modelProvider: vertex_ai",
+		"modelDefaultName: gemini-3.8-flash",
+		"reasoningEffort: high",
+		"kubeagents.x-k8s.io/active-model: gemini-3.8-flash",
+		"kubeagents.x-k8s.io/active-model-target: vertex_ai/gemini-3.8-flash",
+		"kubeagents.x-k8s.io/reasoning-level: high",
 	} {
 		if !strings.Contains(yaml, want) {
 			t.Fatalf("generateModelHelmValuesYAML missing %q:\n%s", want, yaml)
@@ -70,8 +73,8 @@ func TestModelsGetAndPost(t *testing.T) {
 	}
 
 	// 3. Verify in-memory state and declarative Helm YAML updated without mutating s.cfg
-	if !strings.Contains(postRes.HelmValuesYAML, "model: gemini-4.0-argon") {
-		t.Errorf("helm_values_yaml missing model: %q", postRes.HelmValuesYAML)
+	if !strings.Contains(postRes.HelmValuesYAML, "modelDefaultName: gemini-4.0-argon") {
+		t.Errorf("helm_values_yaml missing modelDefaultName: %q", postRes.HelmValuesYAML)
 	}
 	m := s.currentModel(context.Background())
 	if m.Name != "gemini-4.0-argon" {
