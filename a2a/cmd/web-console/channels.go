@@ -15,7 +15,8 @@ limitations under the License.
 */
 
 // The channel feeds: event triage sessions under #alerts and scheduled
-// checks under #scheduled, each with its summary line and reply count.
+// checks (reserved pending #3928) under #scheduled, each with its summary line
+// and reply count.
 
 package main
 

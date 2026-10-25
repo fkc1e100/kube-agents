@@ -42,7 +42,7 @@ While a turn runs, a single line in the working row under your message shows wha
 
 If you close or reload the page during a streamed turn, the console keeps reading the agent's stream to its end, so the agent finishes the turn. When you come back, the reply appears in the thread once it lands. If the page loses the stream while it stays open, it says the agent is still finishing the turn, and the reply arrives the same way. A turn still running after 15 minutes is stopped: the console closes the stream, the agent interrupts the run, and the pane shows that the run was interrupted.
 
-The page reads the line from `POST /api/chat/stream`, which relays the agent's event stream. If that route is missing, as on an older console, the page uses `POST /api/chat` and shows a plain "working" line until the reply.
+The page reads the live status, step list and reply stream from `POST /api/chat/stream`, which relays the agent's event stream. If that route is missing, as on an older console, the page falls back to `POST /api/chat` and keeps the status line on "Sending message to the agent…" with the elapsed timer until the reply arrives.
 
 ## Unread counts and notifications
 
@@ -111,15 +111,15 @@ Then open `http://localhost:8080`. The console pod does not run under gVisor, so
 
 The page uses these routes. All of them answer only a loopback `Host`.
 
-| Route                                | What it returns                                                                                                                                                                          |
-| :----------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/channels/{name}/posts`     | Up to 50 posts of `alerts` (event triage) or `scheduled` (scheduled checks), from the agent's 200 most recently active gateway API sessions, with summaries. Any other name is 404.      |
-| `GET /api/sessions/{id}/transcript`  | The newest 200 text messages of an event triage, scheduled or console session. An ID with characters no session ID uses is 400, an unknown session is 404, and any other session is 403. |
-| `GET /api/sessions/{id}/messages`    | New messages on one of the console's own sessions, after a given message ID.                                                                                                             |
-| `GET /api/sessions/recent`           | The agent's 20 most recent sessions with their kind, without reading their messages. The rail's Chat section reads it.                                                                   |
-| `GET /api/status`                    | Whether the console can reach the agent gateway. The top bar's badge reads it.                                                                                                           |
-| `GET /api/insights`                  | The model, the LiteLLM counters, the identity recorded at install, and the cluster.                                                                                                      |
-| `POST /api/chat`, `/api/chat/stream` | One turn, as a single reply or as a stream of status lines then the reply.                                                                                                               |
+| Route                                | What it returns                                                                                                                                                                                                                                                  |
+| :----------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/channels/{name}/posts`     | Up to 50 posts of `alerts` (event triage) or `scheduled` (scheduled checks, reserved until [#3928](https://github.com/gke-labs/kube-agents/issues/3928)), from the agent's 200 most recently active gateway API sessions, with summaries. Any other name is 404. |
+| `GET /api/sessions/{id}/transcript`  | The newest 200 text messages of an event triage, scheduled or console session. An ID with characters no session ID uses is 400, an unknown session is 404, and any other session is 403.                                                                         |
+| `GET /api/sessions/{id}/messages`    | New messages on one of the console's own sessions, after a given message ID.                                                                                                                                                                                     |
+| `GET /api/sessions/recent`           | The agent's 20 most recent sessions with their kind, without reading their messages. The rail's Chat section reads it.                                                                                                                                           |
+| `GET /api/status`                    | Whether the console can reach the agent gateway. The top bar's badge reads it.                                                                                                                                                                                   |
+| `GET /api/insights`                  | The model, the LiteLLM counters, the identity recorded at install, and the cluster.                                                                                                                                                                              |
+| `POST /api/chat`, `/api/chat/stream` | One turn, as a single reply or as a stream of status, step and delta events then the reply.                                                                                                                                                                      |
 
 ## What to expect when something is wrong
 

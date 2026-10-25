@@ -18,9 +18,10 @@ limitations under the License.
 // the kinds the cluster opened itself, and a read-only transcript.
 //
 // Content is shown only for sessions the cluster or this console opened: event
-// triage, scheduled checks, and the console's own sessions. A Slack or Google
-// Chat session is listed by title and never read. Both checks key on Hermes'
-// session source, which only the ingress that created the session sets.
+// triage, scheduled checks (reserved pending #3928), and the console's own
+// sessions. A Slack or Google Chat session is listed by title and never read.
+// Both checks key on Hermes' session source, which only the ingress that
+// created the session sets.
 
 package main
 
@@ -54,8 +55,9 @@ const (
 	authorKanban       = "kanban"
 
 	// sourceAPIServer is the Hermes source of a session created through the
-	// gateway API: the event watcher's triage sessions, scheduled checks, and
-	// this console's. Slack and Google Chat sessions carry their own source.
+	// gateway API: the event watcher's triage sessions, scheduled checks
+	// (reserved pending #3928), and this console's. Slack and Google Chat
+	// sessions carry their own source.
 	sourceAPIServer = "api_server"
 
 	// titlePrefix is what session_kv_server.py's _create_gateway_session puts
@@ -111,8 +113,8 @@ var (
 
 	// cardTitlePattern finds the card title an event triage prompt spells
 	// out ("- `title`: `Triage ns/Kind/name (Reason) on cluster`"; see
-	// _agent_query in session_kv_server.py). Every triage prompt opens with
-	// the same sentence, so that title is the line that tells posts apart.
+	// _build_agent_query in session_kv_server.py). Every triage prompt opens
+	// with the same sentence, so that title is the line that tells posts apart.
 	cardTitlePattern = regexp.MustCompile("(?m)^- `title`: `([^`\n]+)`")
 
 	// Event watcher and kanban notification field patterns.

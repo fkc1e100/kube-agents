@@ -66,24 +66,6 @@ _GCLOUD_CLUSTER_FORBIDDEN = (
     "ERROR: (gcloud.container.clusters.describe) ResponseError: code=403, message=Required container.clusters.get permission."
 )
 
-_SEEDED_INSTALLER_ENV_KEYS = (
-    "ACCEPT_NO_NETWORK_POLICY",
-    "ENABLE_NETWORK_POLICY",
-    "MIGRATE_NODE_POOLS",
-    "GOOGLE_CHAT_ENABLED",
-    "SLACK_ENABLED",
-    "ENABLE_GKE_BACKUP_PLAN",
-    "ENABLE_PUBSUB_PLATFORM",
-    "ENABLE_STOCKOUT_INVESTIGATOR",
-    "ENABLE_DRIFT_DETECTOR",
-    "WEB_CONSOLE_ENABLED",
-    "LITELLM_REDACTION_ENABLED",
-    "LITELLM_REDACTION_IP_ACTION",
-    "LITELLM_REDACTION_IP_ALLOW_CIDRS",
-    "LITELLM_REDACTION_RULES",
-    "SCOPED_SA_POOL_ENABLED",
-)
-
 
 def _run_installer_bash(body, env, cwd=_REPO_ROOT):
     """Run a bash body that sources install.sh, detached from any terminal.
@@ -141,7 +123,6 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
         full_env = get_isolated_test_env(
             overrides=overrides,
             bin_dir=bin_dir,
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         return _run_installer_bash(setup, full_env, cwd=cwd or _REPO_ROOT)
 
@@ -172,7 +153,6 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
         install_script_content = _INSTALL_SH.read_text()
         test_env = get_isolated_test_env(
             overrides={"KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock")},
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         proc = subprocess.run(
             ["bash", "-s", "--", "--help"],
@@ -682,7 +662,6 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             env=get_isolated_test_env(
                 overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)},
                 bin_dir=str(bin_dir),
-                absent=_SEEDED_INSTALLER_ENV_KEYS,
             ),
             cwd=str(outside),
         )
@@ -1126,7 +1105,6 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                     "KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock"),
                     "PATH": str(bin_dir),
                 },
-                absent=_SEEDED_INSTALLER_ENV_KEYS,
             )
             proc = subprocess.run(
                 [
@@ -2864,7 +2842,6 @@ class NonInteractiveRerunInheritanceTest(unittest.TestCase):
                     "MEMORY": "",
                     "MEMORY_PROVIDER": "",
                 },
-                absent=_SEEDED_INSTALLER_ENV_KEYS,
             )
             return subprocess.run(
                 ["bash", "-c",
@@ -6162,10 +6139,7 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
 
     @staticmethod
     def _env(overrides):
-        return get_isolated_test_env(
-            overrides=overrides,
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
-        )
+        return get_isolated_test_env(overrides=overrides)
 
     def test_the_first_run_records_the_export_and_the_next_run_reads_it_back(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -10527,19 +10501,15 @@ echo "$rc" > "{rc_file}"
 
 
 def _env_without_ambient_drift_keys(overrides=None, asked_for=None):
-    """get_isolated_test_env, minus the two keys the drift guards read.
+    """get_isolated_test_env, minus TF_VAR_enable_drift_pubsub.
 
-    get_isolated_test_env starts from os.environ, so anything exported in the
-    shell that runs pytest reaches the script under test. For most keys that
-    is harmless. These two are the guards' own inputs: an exported
-    ENABLE_DRIFT_DETECTOR arrives at parse_args indistinguishable from an
-    operator's choice, and every assertion below about the unset default then
-    turns on whose machine is running. Dropped unless the caller asked for
-    them, in which case the caller's value is the point of the test.
+    get_isolated_test_env already strips SEEDED_INSTALLER_ENV_KEYS (including
+    ENABLE_DRIFT_DETECTOR); TF_VAR_enable_drift_pubsub is the drift guards'
+    other ambient input, dropped unless the caller asked for it in overrides.
     """
     return get_isolated_test_env(
         overrides=overrides,
-        absent=_SEEDED_INSTALLER_ENV_KEYS + ("TF_VAR_enable_drift_pubsub",),
+        absent=("TF_VAR_enable_drift_pubsub",),
     )
 
 
@@ -12443,10 +12413,7 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         )
         overrides = {"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)}
         overrides.update(env_overrides)
-        env = get_isolated_test_env(
-            overrides=overrides,
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
-        )
+        env = get_isolated_test_env(overrides=overrides)
         return subprocess.run(
             ["bash", "-c", script],
             capture_output=True,
@@ -12490,7 +12457,7 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         configuration before parse_args runs. Judging the seeded value with
         ^(true|false)$ in parse_args or later in main() would abort a re-run
         over a spelling the rest of the pipeline honours, naming a flag the
-        operator never passed — and CI exports four of these keys from GitHub
+        operator never passed — and CI exports seven of these keys from GitHub
         vars.
         """
         for flag, key in self.SEEDED_TOGGLE_ENV_KEYS.items():
@@ -12509,7 +12476,6 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                             "KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env),
                             key: value,
                         },
-                        absent=_SEEDED_INSTALLER_ENV_KEYS,
                     )
                     proc = subprocess.run(
                         ["bash", "-c", script],
@@ -12527,14 +12493,6 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         # variables with `=~ ^(true|false)$` or a literal "true"/"false" check
         # after resolve_shared_defaults.
         main_body = _INSTALL_SH.read_text().split("\nmain() {\n", 1)[1]
-        judged_in_main = set(
-            re.findall(r'\[\[\s*!\s*"\$([A-Za-z0-9_]+)"\s*=~\s*\^\(true\|false\)\$\s*\]\]', main_body)
-        )
-        self.assertEqual(
-            judged_in_main,
-            {"enable_gvisor", "PARAM_ENABLE_WEBUI", "vertex_manage_serving_project"},
-            f"main() must not regex-judge seeded toggle PARAMs: {judged_in_main}",
-        )
         seeded_params = [
             "PARAM_ENABLE_GOOGLE_CHAT",
             "PARAM_ENABLE_SLACK",
@@ -12546,6 +12504,13 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
             "PARAM_LITELLM_REDACTION_ENABLED",
             "PARAM_SCOPED_SA_POOL_ENABLED",
         ]
+        judged_in_main = set(
+            re.findall(r'\[\[\s*!\s*"\$([A-Za-z0-9_]+)"\s*=~\s*\^\(true\|false\)\$\s*\]\]', main_body)
+        )
+        self.assertTrue(
+            judged_in_main.isdisjoint(seeded_params),
+            f"main() must not regex-judge seeded toggle PARAMs: {judged_in_main & set(seeded_params)}",
+        )
         for line in main_body.splitlines():
             stripped = line.strip()
             if stripped.startswith("#"):
@@ -12554,7 +12519,7 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                 if param in stripped:
                     self.assertNotRegex(
                         stripped,
-                        r'true\|false|(!=|==|=)\s*"?(true|false)"?|^case\s',
+                        rf'true\|false|"\$\{{?{param}[^"]*"\s*(!=|==?)\s*"?(true|false)"?|"?(true|false)"?\s*(!=|==?)\s*"\$\{{?{param}[^"]*"|^case\s',
                         f"main() must not compare seeded {param} against literal true/false: {stripped}",
                     )
         # Drive main() itself on a non-interactive dry-run with all seeded
@@ -12597,7 +12562,6 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                 text=True,
                 env=get_isolated_test_env(
                     overrides={"KUBE_AGENTS_INSTALL_ENV": str(seeded_env)},
-                    absent=_SEEDED_INSTALLER_ENV_KEYS,
                 ),
                 cwd=str(_REPO_ROOT),
             )

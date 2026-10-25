@@ -1852,24 +1852,16 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   const tabRace = makeHarness(async () => {
     // Simulate Tab A's storage event landing while Tab B's request is in flight.
     vm.runInContext("mergeStoredThreads(" + JSON.stringify(storedBusy) + ")", tabRace);
-    const body = "event: error\ndata: " + JSON.stringify({ error: "turn_in_progress", message: "A turn is already running." }) + "\n\n";
-    let readDone = false;
     return {
-      ok: true,
-      status: 200,
-      headers: { get: h => (h.toLowerCase() === "content-type" ? "text/event-stream" : "") },
-      body: {
-        getReader: () => ({
-          read: async () => {
-            if (readDone) return { done: true, value: undefined };
-            readDone = true;
-            return { done: false, value: new TextEncoder().encode(body) };
-          },
-        }),
-      },
+      ok: false,
+      status: 409,
+      headers: { get: h => (h.toLowerCase() === "content-type" ? "application/json" : "") },
+      text: async () => JSON.stringify({
+        error: "turn_in_progress",
+        detail: "This session already has a turn running.",
+      }),
     };
   });
-  tabRace.TextEncoder = TextEncoder;
   vm.runInContext(
     "const tr = addThread(" + JSON.stringify(idBusy) + ", 'Busy chat', true);" +
     "tr.mark = 1; tr.markKnown = true; activeId = tr.id; view = 'thread';",
@@ -1878,7 +1870,65 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   await vm.runInContext("submitMessage('racing prompt')", tabRace);
   assert.ok(
     vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil > nowSeconds()", tabRace),
-    "submitMessage finally must not clear busyUntil when server returns turn_in_progress"
+    "submitMessage finally must not clear busyUntil when server returns HTTP 409 turn_in_progress"
+  );
+
+  // Stream drop: when the browser loses the SSE stream mid-turn while the server
+  // keeps reading Hermes to done, submitMessage must keep busyUntil set until the
+  // assistant reply arrives via pollThread.
+  let streamLostStep = 0;
+  const tabStreamLost = makeHarness(async url => {
+    streamLostStep++;
+    if (String(url).startsWith("/api/chat/stream")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: h => (h.toLowerCase() === "content-type" ? "text/event-stream" : "") },
+        body: {
+          getReader: () => ({
+            read: async () => {
+              throw new Error("network blip");
+            },
+          }),
+        },
+      };
+    }
+    if (streamLostStep === 2) {
+      // reconcileTurnErrorMark: user row landed in state.db, reply not yet written.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          latest_id: 2,
+          messages: [{ id: 2, role: "user", author: "user", content: "dropped stream prompt" }],
+        }),
+      };
+    }
+    // Subsequent pollThread once the detached turn finishes on the server.
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        latest_id: 3,
+        messages: [{ id: 3, role: "assistant", author: "agent", content: "reply after stream drop" }],
+      }),
+    };
+  });
+  vm.runInContext(
+    "const ts = addThread(" + JSON.stringify(idBusy) + ", 'Busy chat', true);" +
+    "ts.mark = 1; ts.markKnown = true; activeId = ts.id; view = 'thread';",
+    tabStreamLost
+  );
+  await vm.runInContext("submitMessage('dropped stream prompt')", tabStreamLost);
+  assert.ok(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil > nowSeconds()", tabStreamLost),
+    "submitMessage finally must keep busyUntil when the stream breaks mid-turn"
+  );
+  await vm.runInContext("pollThread(findThread(" + JSON.stringify(idBusy) + "))", tabStreamLost);
+  assert.equal(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil", tabStreamLost),
+    0,
+    "pollThread clears busyUntil once the detached turn's assistant reply arrives"
   );
 
   // And if storage ever carries busyUntil: 0 while Tab A still has inflight[idBusy],
@@ -1892,7 +1942,8 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   assert.ok(resavedByA[0].busyUntil > 0, "Tab A must re-save its active busyUntil when storage had busyUntil: 0");
 
   // Reloading mid-turn leaves busyUntil in localStorage with no local inflight entry.
-  // Once the assistant reply arrives via pollThread or activateThread, busyUntil is cleared.
+  // Once the assistant reply arrives via pollThread or activateThread (even when a
+  // kanban wake user row landed after the assistant reply), busyUntil is cleared.
   const tabReloadPoll = makeHarness(async () => ({
     ok: true,
     status: 200,
@@ -1918,17 +1969,23 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   const tabReloadActivate = makeHarness();
   vm.runInContext(
     "mergeStoredThreads(" + JSON.stringify(storedBusy) + ");" +
-    "const ta = findThread(" + JSON.stringify(idBusy) + ");" +
-    "activateThread(ta, { latest_id: 6, messages: [" +
+    "const ta = findThread(" + JSON.stringify(idBusy) + "); ta.mark = 4; ta.markKnown = true;" +
+    "activateThread(ta, { latest_id: 7, messages: [" +
     "  { id: 5, role: 'user', author: 'user', content: 'hi' }," +
-    "  { id: 6, role: 'assistant', author: 'agent', content: 'done' }" +
+    "  { id: 6, role: 'assistant', author: 'agent', content: 'done' }," +
+    "  { id: 7, role: 'user', author: 'kanban', content: '[kanban] Task t_1 completed.' }" +
     "] });",
     tabReloadActivate
   );
   assert.equal(
     vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").busyUntil", tabReloadActivate),
     0,
-    "activateThread must clear busyUntil when the transcript ends with an assistant reply"
+    "activateThread must clear busyUntil when any assistant reply above t.mark landed, even if a kanban wake is last"
+  );
+  assert.equal(
+    vm.runInContext("findThread(" + JSON.stringify(idBusy) + ").wakeOpen", tabReloadActivate),
+    true,
+    "activateThread still marks wakeOpen when the trailing row is a kanban wake"
   );
 
   // Even if another tab writes idBusy to REMOVED_KEY and clears THREADS_KEY while
@@ -2037,6 +2094,37 @@ function makeHarness(fetchImpl, initialLocal = {}, initialSession = {}) {
   getEl("prompt-input").value = "unsent draft before newChat";
   vm.runInContext("newChat()", ctx);
   assert.equal(getEl("prompt-input").value, "", "newChat() must clear #prompt-input");
+
+  // sendFromSide cleans up inflight[pane.id] and pending.side even when a non-SSE
+  // error response's body read (resp.text()) rejects mid-transfer.
+  ctx.appendTo = () => ({});
+  ctx.pollChannels = () => {};
+  ctx.fetch = async url => {
+    if (String(url).startsWith("/api/chat/stream")) {
+      return {
+        ok: false,
+        status: 502,
+        statusText: "Bad Gateway",
+        headers: { get: () => "text/plain" },
+        text: async () => {
+          throw new Error("socket hang up during error body");
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ latest_id: 1, messages: [] }),
+    };
+  };
+  await vm.runInContext("openPost('k8s-evt-1')", ctx);
+  getEl("side-input").value = "reply in side pane";
+  await vm.runInContext("sendFromSide()", ctx);
+  assert.equal(
+    vm.runInContext("!!inflight['k8s-evt-1']", ctx),
+    false,
+    "sendFromSide must clear inflight[pane.id] when error body read rejects"
+  );
 }
 `)
 	out, err := cmd.CombinedOutput()

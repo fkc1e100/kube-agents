@@ -14,16 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// POST /api/chat/stream: one turn, with a live status line while it runs.
+// POST /api/chat/stream: one turn, with live status, step and delta events
+// while it runs.
 //
 // It takes the same request and applies the same checks as POST /api/chat.
 // It calls Hermes' POST /api/sessions/{id}/chat/stream and relays a reduced
 // SSE stream to the page: `status` events carrying one short plain-text line
-// ("Running kubectl_get: pods -n x"), then one `reply` event with the full
-// reply, or one `error` event in /api/chat's error shape. A status line can
-// carry a tool's name with Hermes' short preview of its arguments, or an
-// excerpt of the model's reasoning. Each line is collapsed and cut here; full
-// tool arguments and tool output are not forwarded.
+// ("Running kubectl_get: pods -n x"), `step` events for each thinking excerpt
+// or tool call (`running`, `done`, `failed`), `delta` events with streamed
+// reply text, then one `reply` event with the full reply, or one `error` event
+// in /api/chat's error shape. A status line can carry a tool's name with
+// Hermes' short preview of its arguments, or an excerpt of the model's
+// reasoning. Each line is collapsed and cut here; full tool arguments and tool
+// output are not forwarded.
 //
 // Hermes interrupts a run when the client reading its stream goes away
 // (_drain_session_stream_task_on_disconnect). So the handler reads Hermes'

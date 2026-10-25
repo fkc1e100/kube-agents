@@ -1931,8 +1931,7 @@
         if (
           !inflight[t.id] &&
           t.busyUntil &&
-          lastMsg &&
-          lastMsg.role === "assistant"
+          messages.some((m) => m.role === "assistant" && m.id > t.mark)
         ) {
           t.busyUntil = 0;
         }
@@ -2220,11 +2219,12 @@
       // Reads a response body that may not be JSON (a proxy error page, a
       // port-forward that dropped) without reporting it as a network failure.
       async function readBody(resp) {
-        const text = await resp.text();
+        let text = "";
         try {
+          text = await resp.text();
           return JSON.parse(text);
         } catch (e) {
-          return { detail: text.trim() || resp.statusText };
+          return { detail: text.trim() || resp.statusText || e.message };
         }
       }
 
@@ -2337,6 +2337,7 @@
               error:
                 "The connection to the web console broke off. The agent is still finishing this turn; its reply will appear in this thread once the turn finishes. " +
                 err.message,
+              errorCode: "stream_lost",
             };
           }
         }
@@ -2369,11 +2370,15 @@
         showPending("centre", t.id);
         threadsChanged();
 
-        let turnInProgressElsewhere = false;
+        let keepBusyLease = false;
         try {
           const outcome = await runTurn(t.id, text);
-          if (outcome.errorCode === "turn_in_progress")
-            turnInProgressElsewhere = true;
+          if (
+            outcome.errorCode === "turn_in_progress" ||
+            outcome.errorCode === "stream_lost"
+          ) {
+            keepBusyLease = true;
+          }
           const meta =
             turn.steps && turn.steps.length > 0
               ? {
@@ -2418,7 +2423,9 @@
           }
         } finally {
           delete inflight[t.id];
-          if (!turnInProgressElsewhere) {
+          if (pending.centre && pending.centre.id === t.id)
+            removePending("centre");
+          if (!keepBusyLease) {
             t.busyUntil = 0;
           }
           saveThreads();
@@ -3350,40 +3357,48 @@
         showPending("side", id);
         updateSideComposer();
 
-        const outcome = await runTurn(id, text);
-        const meta =
-          turn.steps && turn.steps.length > 0
-            ? {
-                steps: turn.steps.slice(),
-                elapsed: Math.max(1, Math.round(nowSeconds() - turn.startedAt)),
-                reply: outcome.reply || "",
-                replyId: outcome.replyId,
-              }
-            : null;
-        if (meta && outcome.error === undefined) lastTurnMeta[id] = meta;
-        delete inflight[id];
-        if (pending.side && pending.side.id === id) removePending("side");
-        if (pane.mode === "post" && pane.id === id) {
-          if (outcome.error !== undefined) {
-            appendTo($("side-body"), "agent", outcome.error, "error");
-          } else if (!(await refreshPane(true))) {
-            appendTo(
-              $("side-body"),
-              "agent",
-              outcome.reply || "(The agent returned an empty reply.)",
-              "",
-              undefined,
-              undefined,
-              meta,
-            );
+        try {
+          const outcome = await runTurn(id, text);
+          const meta =
+            turn.steps && turn.steps.length > 0
+              ? {
+                  steps: turn.steps.slice(),
+                  elapsed: Math.max(
+                    1,
+                    Math.round(nowSeconds() - turn.startedAt),
+                  ),
+                  reply: outcome.reply || "",
+                  replyId: outcome.replyId,
+                }
+              : null;
+          if (meta && outcome.error === undefined) lastTurnMeta[id] = meta;
+          delete inflight[id];
+          if (pending.side && pending.side.id === id) removePending("side");
+          if (pane.mode === "post" && pane.id === id) {
+            if (outcome.error !== undefined) {
+              appendTo($("side-body"), "agent", outcome.error, "error");
+            } else if (!(await refreshPane(true))) {
+              appendTo(
+                $("side-body"),
+                "agent",
+                outcome.reply || "(The agent returned an empty reply.)",
+                "",
+                undefined,
+                undefined,
+                meta,
+              );
+            }
+          } else if (outcome.error !== undefined) {
+            (notices[id] = notices[id] || []).push(outcome.error);
+            feedNew.add(id);
+            renderFeed(false);
           }
-        } else if (outcome.error !== undefined) {
-          (notices[id] = notices[id] || []).push(outcome.error);
-          feedNew.add(id);
-          renderFeed(false);
+        } finally {
+          delete inflight[id];
+          if (pending.side && pending.side.id === id) removePending("side");
+          updateSideComposer();
+          pollChannels();
         }
-        updateSideComposer();
-        pollChannels();
       }
 
       let lastInsights = null;

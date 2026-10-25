@@ -190,7 +190,7 @@ jobs:
             exit 1
           fi
           if ! command -v node >/dev/null 2>&1; then
-            echo "::error::'node' is not on PATH. The web-console page harness test would skip and this job would pass regardless."
+            echo "::error::'node' is not on PATH. The web-console page harness test requires 'node'."
             exit 1
           fi
           cd a2a
