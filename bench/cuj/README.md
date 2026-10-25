@@ -15,7 +15,9 @@ To run the 10 read-only harness and WebUI quality/latency validation journeys
 by standing up an ephemeral GKE cluster (`create` mode, which provisions the
 cluster with `--enable-web-console`, connects over a private loopback
 `kubectl port-forward`, and tears the cluster down via `uninstall.sh` when the
-session finishes):
+session finishes; requires sibling PR `#2321`, which adds `--enable-web-console`,
+`webConsole.enabled`, `svc/kube-agents-web-console`, and the Web Console HTTP
+API):
 
 ```bash
 CUJ_WEB_CONSOLE_CLUSTER_MODE=create \
@@ -26,7 +28,8 @@ uv run --project bench pytest -s bench/cuj/harness
 ```
 
 To deploy the Web Console onto an existing GKE cluster (`existing` mode, which
-enables `kube-agents-web-console`, connects over a loopback `port-forward` or a
+enables `kube-agents-web-console` via the `webConsole.enabled` Helm chart
+value from sibling PR `#2321`, connects over a loopback `port-forward` or a
 private `ClusterIP` when `CUJ_WEB_CONSOLE_USE_PRIVATE_IP=true`, and tears the
 unauthenticated Web Console down on exit unless deployed via a private IP):
 

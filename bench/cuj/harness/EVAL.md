@@ -1,12 +1,14 @@
 # Harness & Web Console Quality and Latency Evaluation Suite (`bench/cuj/harness/`)
 
-This document specifies the 10 read-only Critical User Journey (CUJ) evaluations in [`bench/cuj/harness/`](.) (`test_01` through `test_10`). The suite validates response quality, factual grounding, read-only and GitOps safety boundaries, and end-to-end turn latency against either the Admin Portal API or the deployed Web Console HTTP API (`POST /api/chat` and `GET /api/sessions/{session_id}/transcript`).
+This document specifies the 10 read-only Critical User Journey (CUJ) evaluations in [`bench/cuj/harness/`](.) (`test_01` through `test_10`). The suite validates response quality, factual grounding, read-only and GitOps safety boundaries, and end-to-end turn latency against either the Admin Portal API or the deployed Web Console HTTP API (`POST /api/chat` and `GET /api/sessions/{session_id}/transcript`, introduced with `svc/kube-agents-web-console`, `install.sh --enable-web-console`, and `charts/kube-agents` `webConsole.enabled` in sibling PR `#2321`).
 
 ## Running the Evaluation Suite
 
-Because the Web Console holds the agent API key server-side and has no login page of its own, `validate_private_web_console_url` refuses any public IP address or external hostname and accepts only loopback (`127.0.0.1`, `::1`, `localhost`), internal cluster/VPC DNS names (`*.svc.cluster.local`, `*.internal`), or RFC-1918 private IP addresses.
+Because the Web Console holds the agent API key server-side and has no login page of its own, `validate_private_web_console_url` refuses any public IP address or external hostname and accepts only loopback (`127.0.0.1`, `::1`, `localhost`, `127.0.0.0/8`), internal cluster/VPC DNS names (`*.svc`, `*.svc.cluster.local`, `*.cluster.local`, `*.internal`), or private IP ranges (RFC-1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, RFC-6598 `100.64.0.0/10`, and IPv6 `fc00::/7`, `fe80::/10`).
 
 ### Stand Up an Ephemeral Cluster and Tear Down When Done (`create`)
+
+Requires a checkout with sibling PR `#2321` (`install.sh --enable-web-console`). Refuses to run if `CUJ_CLUSTER_NAME` already exists in `CUJ_PROJECT_ID` so teardown never deletes a pre-existing cluster:
 
 ```bash
 CUJ_WEB_CONSOLE_CLUSTER_MODE="create" \
@@ -18,7 +20,7 @@ uv run --project bench pytest -v -s bench/cuj/harness
 
 ### Deploy the Web Console onto an Existing Cluster (`existing`)
 
-By default, `existing` mode enables `kube-agents-web-console`, connects via a loopback `kubectl port-forward`, and tears down the Web Console deployment when the pytest session finishes. When `CUJ_WEB_CONSOLE_USE_PRIVATE_IP="true"` is set inside a VPC-connected runner, the harness resolves the private `ClusterIP` (or internal VPC IP) of `svc/kube-agents-web-console` and retains the private-IP deployment unless `CUJ_TEARDOWN_WEB_CONSOLE="true"` is set:
+Requires a checkout with sibling PR `#2321` (`charts/kube-agents` `webConsole.enabled`). By default, `existing` mode enables `kube-agents-web-console`, connects via a loopback `kubectl port-forward`, and tears down the Web Console deployment when the pytest session finishes. When `CUJ_WEB_CONSOLE_USE_PRIVATE_IP="true"` is set inside a VPC-connected runner, the harness resolves the private `ClusterIP` (or internal VPC IP) of `svc/kube-agents-web-console` and retains the private-IP deployment unless `CUJ_TEARDOWN_WEB_CONSOLE="true"` is set:
 
 ```bash
 CUJ_WEB_CONSOLE_CLUSTER_MODE="existing" \

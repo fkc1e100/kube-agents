@@ -65,46 +65,46 @@ RESTART_RE = re.compile(r"\brestarts?\b", re.IGNORECASE)
 WARNING_RE = re.compile(r"\bwarnings?\b", re.IGNORECASE)
 EVENT_RE = re.compile(r"\bevents?\b", re.IGNORECASE)
 PROCEDURAL_PREFIX_RE = re.compile(
-    r"\b(?:check(?:ed|ing)?|review(?:ed|ing)?|inspect(?:ed|ing)?|audit(?:ed|ing)?"
+    r"^\s*(?:(?:i|we)\s+(?:have\s+|had\s+)?)?"
+    r"(?:check(?:ed|ing)?|review(?:ed|ing)?|inspect(?:ed|ing)?|audit(?:ed|ing)?"
     r"|look(?:ed|ing)?\s+for|quer(?:ied|ying)|examin(?:ed|ing))\s+"
-    r"(?:whether|if|for|the|any|recent|cluster"
-    r"|crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?|restarts?|warnings?)\b",
+    r"(?:whether|if|for|the|any|all|recent|cluster"
+    r"|crash[-_ ]?loop(?:[-_ ]?back[-_ ]?off)?|restarts?|warnings?)\b"
+    r"(?:(?!\b(?:found|detected|observed|recorded|confirmed|show(?:s|ed)?|none|zero|(?<!-)0)\b)[^:])*",
     re.IGNORECASE,
 )
 _COUNT_TOKEN = (
-    r"(?:\d+|zero|no|none|one|two|three|four|five|six|seven|eight|nine|ten"
-    r"|several|multiple)"
+    r"(?<!non-)(?<!-)\b(?:\d+|zero|no|none|one|two|three|four|five|six|seven"
+    r"|eight|nine|ten|several|multiple)\b"
 )
 _NON_TIME_MODIFIER = (
     r"(?!(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|days?|for|across|in)\b)"
     r"[a-z0-9_-]+"
 )
 DIAGNOSTIC_OUTCOME_RE = re.compile(
-    rf"(?<!non-)(?<!-)\b{_COUNT_TOKEN}\s+(?:{_NON_TIME_MODIFIER}\s+){{0,3}}?"
-    rf"(?:pods?|containers?|workloads?|restarts?|warnings?|events?"
+    rf"{_COUNT_TOKEN}\s+(?:{_NON_TIME_MODIFIER}\s+){{0,3}}?"
+    rf"(?:restarts?|warnings?|events?"
     rf"|crash[-_ ]?loop(?:ing|s|[-_ ]?back[-_ ]?off)?)\b"
+    rf"|(?<!non-)(?<!-)\b(?:0|zero|no|none)\s+(?:{_NON_TIME_MODIFIER}\s+){{0,3}}?"
+    rf"(?:pods?|containers?|workloads?)\b"
     rf"|\b(?:crash[-_ ]?loop(?:ing|s|[-_ ]?back[-_ ]?off)?|restarts?(?:\s+counts?)?"
     rf"|warning\s+events?|events?)\b"
-    rf"[^.;\n]{{0,40}}?(?:[:=]\s*(?<!-)\b(?:{_COUNT_TOKEN}|clean|healthy|elevated|high|non-zero)\b"
-    rf"|\b(?:is|are|was|were|at|with|of|have|has)\s+(?<!-)\b(?:{_COUNT_TOKEN}|elevated|high|non-zero|clean|healthy)\b"
-    rf"|\b(?:none|zero|no\s+\w+)\s+(?:were\s+|was\s+)?(?:found|detected|observed|present|recorded|seen)\b)"
-    rf"|\b(?:no|none|zero|without(?:\s+any)?|neither)\b[^.;\n]{{0,40}}?"
+    rf"[^.;\n]{{0,40}}?(?:[:=]\s*(?:{_COUNT_TOKEN}|\b(?:clean|healthy)\b)"
+    rf"|\b(?:is|are|was|were|at|with|of|have|has)\s+(?:{_COUNT_TOKEN}|\b(?:clean|healthy)\b)"
+    rf"|(?<!non-)(?<!-)\b(?:none|zero|no\s+\w+)\s+(?:were\s+|was\s+)?(?:found|detected|observed|present|recorded|seen)\b)"
+    rf"|(?<!non-)(?<!-)\b(?:no|none|zero|without(?:\s+any)?|neither)\b[^.;\n]{{0,40}}?"
     rf"\b(?:crash[-_ ]?loop(?:ing|s|[-_ ]?back[-_ ]?off)?|restarts?|warning\s+events?)\b"
-    rf"|\b(?:found|detected|observed|recorded)\s+{_COUNT_TOKEN}?\s*(?:{_NON_TIME_MODIFIER}\s+){{0,3}}?"
-    rf"(?:crash[-_ ]?loop(?:ing|s|[-_ ]?back[-_ ]?off)?|restarts?|warning\s+events?)\b"
-    rf"|(?<!\bwhether\s)(?<!\bif\s)(?<!\bany\s)\b(?:"
-    rf"{_COUNT_TOKEN}\s+pods?|(?:the\s+)?[a-z0-9-]+\s+pods?|pods?\s+[a-z0-9-]+|[a-z0-9]+-[a-z0-9-]+"
+    rf"|\b(?:found|detected|observed|recorded)\s+(?:{_COUNT_TOKEN}|(?:\s*{_NON_TIME_MODIFIER}){{0,3}}\s+"
+    rf"(?:crash[-_ ]?loop(?:ing|s|[-_ ]?back[-_ ]?off)?|restarts?|warning\s+events?)\b)"
+    rf"|(?<!\bwhether\s)(?<!\bif\s)(?<!\bany\s)(?:"
+    rf"{_COUNT_TOKEN}\s+pods?|\b(?:(?:the\s+)?[a-z0-9-]+\s+pods?|pods?\s+[a-z0-9-]+|[a-z0-9]+-[a-z0-9-]+)"
     rf")\s+(?:is|are|was|were)\s+(?:in\s+)?crash[-_ ]?loop(?:ing|s|[-_ ]?back[-_ ]?off)?\b"
     rf"|\ball\s+(?:\d+\s+)?(?:{_NON_TIME_MODIFIER}\s+){{0,2}}?(?:pods?|containers?|workloads?)\s+(?:are\s+)?(?:healthy|running|ready|clean)\b",
     re.IGNORECASE,
 )
 GATEWAY_RE = re.compile(r"\bplatform-?agent-gateway\b", re.IGNORECASE)
 GATEWAY_ANAPHORA_RE = re.compile(
-    r"\b(?:its|the\s+gateway(?:'s)?|gateway)\s+logs?\b",
-    re.IGNORECASE,
-)
-NON_GATEWAY_SUBJECT_RE = re.compile(
-    r"\b(?:checkout-api|kubelet|warning\s+events?|cluster\s+events?)\b",
+    r"\b(?:its|the\s+gateway(?:'s)?|gateway)\s+(?:recent\s+|last\s+\d+\s+)?logs?\b",
     re.IGNORECASE,
 )
 GATEWAY_STATUS_RE = re.compile(
@@ -212,11 +212,14 @@ def _clause_has_outcome(
             clause
         ):
             continue
-        candidate = clause
-        if PROCEDURAL_PREFIX_RE.search(clause):
-            if ":" not in clause:
-                continue
-            candidate = clause.split(":", 1)[1]
+        proc_match = PROCEDURAL_PREFIX_RE.search(clause)
+        candidate = (
+            clause[proc_match.end() :].lstrip(": ")
+            if proc_match is not None
+            else clause
+        )
+        if not candidate:
+            continue
         if all(pattern.search(clause) for pattern in patterns) and bool(
             DIAGNOSTIC_OUTCOME_RE.search(candidate)
         ):
@@ -230,8 +233,7 @@ def _gateway_status_and_logs_reported(clauses: list[str]) -> bool:
             GATEWAY_RE.search(clause)
             or (
                 GATEWAY_ANAPHORA_RE.search(clause)
-                and idx > 0
-                and GATEWAY_RE.search(clauses[idx - 1])
+                and any(GATEWAY_RE.search(prev) for prev in clauses[:idx])
             )
         )
         if (
@@ -251,10 +253,8 @@ def _gateway_status_and_logs_reported(clauses: list[str]) -> bool:
         if GATEWAY_RE.search(clause):
             gateway_clauses.append(clause)
             gateway_log_candidates.append(clause)
-        elif (
-            idx > 0
-            and GATEWAY_RE.search(clauses[idx - 1])
-            and not NON_GATEWAY_SUBJECT_RE.search(clause)
+        elif GATEWAY_ANAPHORA_RE.search(clause) and any(
+            GATEWAY_RE.search(prev) for prev in clauses[:idx]
         ):
             gateway_log_candidates.append(clause)
 

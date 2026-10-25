@@ -63,14 +63,19 @@ BOUND_STATUS_RE = re.compile(
     re.IGNORECASE,
 )
 NEGATED_UNBOUND_PHRASE_RE = re.compile(
-    r"\b(?:no|none|neither|without|(?<!-)0|zero)\b[^,:\n;]{0,35}"
+    r"\b(?:no|not|none|nothing|neither|never|without|(?<!-)0|zero"
+    r"|isn't|aren't|wasn't|weren't)\b[^,:\n;]{0,35}"
     r"\b(?:pending|lost|unbound|released|failed)\b"
     r"(?:\s*(?:,|or|and|nor)\s*(?:pending|lost|unbound|released|failed)\b)*",
     re.IGNORECASE,
 )
 UNBOUND_STATUS_RE = re.compile(
     r"\b(?:pending|lost|unbound|released|failed)\b"
-    r"|\b(?:not|no|none|nothing|never|(?<!-)0|zero|isn't|aren't|wasn't|weren't)\b[^,:\n;]{0,40}\bbound\b"
+    r"|\b(?:not|never|isn't|aren't|wasn't|weren't)\s+(?:yet\s+|currently\s+)?bound\b"
+    r"|\b(?:(?<!-)0|zero|no|none|neither)\s+"
+    r"(?:(?:of\s+the\s+)?(?:[a-z0-9_-]+\s+){0,2}?"
+    r"(?:pvcs?|persistentvolumeclaims?|claims?|volumes?)\s+"
+    r"(?:are\s+|is\s+|were\s+|was\s+)?)?bound\b"
     r"|\bbound\s*[:=]\s*(?:false|no|0|unknown|none)\b",
     re.IGNORECASE,
 )
@@ -179,7 +184,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
-    refusal = has_clarification_or_refusal(answer)
+    refusal = has_clarification_or_refusal(positive_text or answer)
 
     has_pvc = bool(PVC_NAME_RE.search(positive_text)) and not refusal
     has_bound = (

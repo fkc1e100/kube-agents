@@ -53,7 +53,9 @@ status, and v1.x version in both the task completion summary and the full \
 result. Do not create, modify, or delete any cluster resources."""
 
 _NON_WORKLOAD_SUFFIX = (
-    r"(?!-(?:config|service|svc|netpol|policy|pvc|secret|sa|role|binding|public|host)\b)"
+    r"(?!-(?:config|service|svc|netpol|policy|pvc|secret|sa|role|binding"
+    r"|public|host|metrics|monitoring|gw-chat-metrics|cred-metrics"
+    r"|a2a-metrics|mon-netpol|ingress|egress)\b)"
 )
 HARNESS_WORKLOAD_RE = re.compile(
     rf"\b(?:"
@@ -72,8 +74,13 @@ SHARED_SERVICE_AND_WORKLOAD_NAMES = frozenset(
     }
 )
 WORKLOAD_CONTEXT_RE = re.compile(
-    r"\b(?:pods?|workloads?|deployments?|statefulsets?|containers?)\b"
-    r"|\brunning\s+in\b",
+    r"\b(?:pods?|workloads?|deployments?|statefulsets?|replicasets?|containers?)\b"
+    r"|\b\d+\s*/\s*\d+\s*running\b",
+    re.IGNORECASE,
+)
+NON_POD_SERVICE_LABEL_RE = re.compile(
+    r"\b(?:services?|svc|network\s*polic(?:y|ies)|netpols?|configmaps?|secrets?)\s+"
+    r"(?:running|present|exposed|configured)\s+in\b",
     re.IGNORECASE,
 )
 SERVICE_RE = re.compile(
@@ -89,16 +96,26 @@ CRD_RE = re.compile(
     re.IGNORECASE,
 )
 PAREN_GROUP_RE = re.compile(r"\([^)]*\)")
+NON_CRD_INSTANCE_ABSENCE_RE = re.compile(
+    r"\b(?:with\s+)?(?:no|(?<!-)0|zero|without(?:\s+any)?)\s+"
+    r"(?:[a-z0-9_.-]+\s+){0,2}?"
+    r"(?:instances?|objects?|resources?|crs?|custom\s+resources?"
+    r"|issues?|errors?|problems?|warnings?)"
+    r"(?:\s+(?:exist\w*|found|present|created|deployed|configured|yet))?\b",
+    re.IGNORECASE,
+)
 NEGATED_CRD_SEGMENT_RE = re.compile(
     r"\b(?:no(?!\s+(?:issues?|errors?|problems?|warnings?)\b)"
     r"|not|none|never|neither|without|lacks?|missing|absent"
+    r"|unavailable|removed|deleted|pending|failed"
     r"|failed\s+to\s+(?:find|list|get)|unable\s+to\s+(?:find|list|get)"
     r"|0\s+(?:installed\s+)?crds?)\b",
     re.IGNORECASE,
 )
 NEGATED_CRD_POST_RE = re.compile(
     r"\b(?:no|not|none|never|neither|without|missing|absent|lacks?"
-    r"|uninstalled|unregistered|notfound)\b|n't\b",
+    r"|uninstalled|unregistered|notfound|unavailable|removed|deleted"
+    r"|pending|failed)\b|n't\b",
     re.IGNORECASE,
 )
 K8S_VERSION_RE = re.compile(
@@ -191,7 +208,10 @@ def _reported_crds(clauses: list[str]) -> list[str]:
     for raw_clause in clauses:
         if NEGATED_OR_ERROR_CLAUSE_RE.search(raw_clause):
             continue
-        clause = _strip_non_crd_parens(raw_clause).replace("\u2019", "'")
+        clause = NON_CRD_INSTANCE_ABSENCE_RE.sub(
+            " ",
+            _strip_non_crd_parens(raw_clause).replace("\u2019", "'"),
+        )
         all_matches = list(CRD_RE.finditer(clause))
         if not all_matches:
             continue
@@ -246,10 +266,15 @@ def _positive_workloads_and_services(
     has_namespace = HARNESS_NAMESPACE in positive_text.casefold()
     workload_set: set[str] = set()
     for clause in positive_clauses:
-        has_workload_ctx = bool(WORKLOAD_CONTEXT_RE.search(clause))
+        has_workload_ctx = bool(
+            WORKLOAD_CONTEXT_RE.search(clause)
+        ) and not bool(NON_POD_SERVICE_LABEL_RE.search(clause))
         for match in HARNESS_WORKLOAD_RE.finditer(clause):
             token = match.group(0).casefold()
-            if token in SHARED_SERVICE_AND_WORKLOAD_NAMES and not has_workload_ctx:
+            if (
+                token in SHARED_SERVICE_AND_WORKLOAD_NAMES
+                and not has_workload_ctx
+            ):
                 continue
             workload_set.add(token)
     workloads = sorted(workload_set)

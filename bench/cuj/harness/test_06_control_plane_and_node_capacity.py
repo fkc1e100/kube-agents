@@ -156,7 +156,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
-    refusal = has_clarification_or_refusal(answer)
+    refusal = has_clarification_or_refusal(positive_text or answer)
 
     versions = sorted(
         {m.group(0).casefold() for m in K8S_VERSION_RE.finditer(positive_text)}

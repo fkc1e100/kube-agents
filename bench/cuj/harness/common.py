@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -54,11 +55,16 @@ CLUSTER_LOCATION_ENV = "CUJ_CLUSTER_LOCATION"
 MODEL_PROVIDER_ENV = "CUJ_MODEL_PROVIDER"
 KUBE_CONTEXT_ENV = "CUJ_KUBE_CONTEXT"
 KUBE_NAMESPACE_ENV = "CUJ_NAMESPACE"
+TURN_TIMEOUT_ENV = "CUJ_TIMEOUT"
+POLL_INTERVAL_ENV = "CUJ_POLL_INTERVAL"
 DEFAULT_KUBE_NAMESPACE = "kubeagents-system"
 DEFAULT_CLUSTER_LOCATION = "us-central1"
 DEFAULT_MODEL_PROVIDER = "vertex_ai"
 WEB_CONSOLE_SERVICE_NAME = "kube-agents-web-console"
 WEB_CONSOLE_SERVICE_PORT = 8080
+GATEWAY_DEPLOYMENT_NAME = "platform-agent-gateway"
+HELM_RELEASE_NAME = "kube-agents"
+EPHEMERAL_CLUSTER_PREFIX = "cuj-web-console-"
 WEB_CONSOLE_READY_TIMEOUT_SECONDS = 60.0
 INSTALL_TIMEOUT_SECONDS = 2400.0
 UNINSTALL_TIMEOUT_SECONDS = 1800.0
@@ -126,6 +132,15 @@ FORBIDDEN_OPERATIONS = frozenset(
         "submit_suggestion",
     }
 )
+KNOWN_ROOT_OPERATIONS = frozenset(
+    {
+        "kanban_create",
+        "kanban_get",
+        "kanban_list",
+        "kanban_update",
+        "list_agents",
+    }
+)
 
 PROXY_LEAK_RE = re.compile(
     r"\b(?:model[-_]default|custom\s+provider|provider\s*[:=]\s*['\"]?custom)\b",
@@ -141,7 +156,10 @@ NEGATED_OR_ERROR_CLAUSE_RE = re.compile(
     r"|not\s+(?:checked|inspected|enumerated|retrieved|obtained|attempted"
     r"|in\s+scope|determined)"
     r"|omitted\s+for\s+brevity|out\s+of\s+scope|unknown\s+project"
-    r"|status\s+is\s+unknown|denied|forbidden|permission\s+denied"
+    r"|status\s+is\s+unknown|(?:permission|access)\s+denied"
+    r"|(?:call|request|command|query|list|get|read|access|check|inspection)\s+"
+    r"(?:was\s+|were\s+|is\s+)?(?:denied|forbidden)"
+    r"|(?:denied|forbidden)\s+by\s+(?:rbac|iam|api|server)"
     r"|no\s+(?:[a-z0-9-]+\s+){0,3}?clusters?\s+(?:are\s+|were\s+)?"
     r"(?:found|visible|in\s+scope|present|listed)"
     r"|(?:(?<!-)0|zero)\s+(?:[a-z0-9-]+\s+){0,3}?clusters?\b)\b",
@@ -156,6 +174,12 @@ ZERO_NOTREADY_RE = re.compile(
     r"\b(?:(?<!-)0|no|none|zero)\s+(?:[a-z0-9_-]+\s+){0,2}?not\s*ready\b",
     re.IGNORECASE,
 )
+PROCEDURAL_NODE_READY_LABEL_RE = re.compile(
+    r"(?<!\bin\s)\b(?:nodes?\s+ready\s+(?:status|state|condition|check|summary)"
+    r"|ready\s+(?:status|state|condition|check)\s+(?:of|for)\s+(?:the\s+|cluster\s+)?nodes?"
+    r"|their\s+ready\s+(?:status|state|condition|check|summary))\b",
+    re.IGNORECASE,
+)
 NEGATED_NODE_READY_RE = re.compile(
     r"\b(?:no|not|none|never|neither|(?<!-)0|zero)\b[^,.\n;]{0,60}\bnodes?\b"
     r"|\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,60}"
@@ -167,8 +191,12 @@ NEGATED_NODE_READY_RE = re.compile(
     re.IGNORECASE,
 )
 POSITIVE_NODE_READY_RE = re.compile(
-    r"\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,60}\bready\b"
-    r"|\bready\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,40}\bnodes?\b",
+    r"\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,60}"
+    r"\bready(?!\s+(?:status|state|condition|check|summary)\b)\b"
+    r"|\bnodes?\b(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,60}"
+    r"\bin\s+(?:a\s+|the\s+)?ready\s+(?:state|condition|status)\b"
+    r"|\bready(?!\s+(?:status|state|condition|check|summary)\b)\b"
+    r"(?:(?!\b(?:pods?|containers?|workloads?|services?)\b)[^.\n;]){0,40}\bnodes?\b",
     re.IGNORECASE,
 )
 _NODE_COUNT_WORD = (
@@ -181,8 +209,12 @@ POSITIVE_NODE_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 POSITIVE_CONTRAST_SEGMENT_RE = re.compile(
-    r"\b(?:only|[1-9]\d*|one|two|three|four|five|six|seven|eight|nine|ten"
-    r"|all|active|running|bound|installed|present|enforcing)\b",
+    r"(?::|=|\b(?:only|[1-9]\d*|one|two|three|four|five|six|seven|eight|nine|ten"
+    r"|all|both|each|every|active|running|ready|bound|installed|present|enforcing"
+    r"|enabled|healthy|available|configured|deployed|registered|established"
+    r"|serving|listening|exposing|exposes?|allows?|permits?|restricts?|selects?"
+    r"|targets?|routes?|forwards?|maps?|mounts?|uses?|provides?|handles?|operates?"
+    r"|remains?|has|have|is|are|was|were|exist|exists)\b)",
     re.IGNORECASE,
 )
 _NON_INVENTORY_MODIFIER = (
@@ -263,17 +295,16 @@ def negated_inventory_clause_re(*nouns: str) -> re.Pattern[str]:
     return re.compile(
         rf"\b(?:no|none|nothing|neither|never"
         rf"|(?<!-)0(?!\s*(?:restarts?|errors?|warnings?|issues?|failures?|not\s*ready)\b)"
-        rf"|zero|without|missing|absent|empty|lacks?|unrestricted)\b"
+        rf"|zero|without|missing|absent|empty|lacks?)\b"
         rf"\s+(?:{_NON_INVENTORY_MODIFIER}\s+){{0,4}}?(?:{joined})\b"
         rf"|\b(?:{joined})\b[^,:\n;]{{0,50}}\b(?:"
         rf"not\s+(?:running|found|installed|present|exposed|bound|in\s+use|inspected"
         rf"|listed|enumerated|active|applied|enforced|restricted|available)"
         rf"|do\s+not\s+(?:exist|apply)|doesn't\s+(?:exist|apply)|did\s+not\s+exist"
-        rf"|is\s+(?:empty|missing|absent|unknown|unrestricted)"
-        rf"|are\s+(?:empty|missing|absent|unknown|unrestricted)"
+        rf"|is\s+(?:empty|missing|absent|unknown)"
+        rf"|are\s+(?:empty|missing|absent|unknown)"
         rf"|were\s+not\s+(?:found|installed|present|inspected|listed|enumerated)"
         rf"|was\s+not\s+(?:found|installed|present|inspected|listed)"
-        rf"|have\s+unrestricted|has\s+unrestricted"
         rf"|missing|absent)\b",
         re.IGNORECASE,
     )
@@ -313,7 +344,9 @@ def _candidate_has_positive_node_ready(
     *,
     require_count: bool,
 ) -> bool:
-    scrubbed = ZERO_NOTREADY_RE.sub("", text)
+    scrubbed = PROCEDURAL_NODE_READY_LABEL_RE.sub(
+        "", ZERO_NOTREADY_RE.sub("", text)
+    )
     if not NODE_RE.search(scrubbed):
         return False
     if NEGATED_NODE_READY_RE.search(scrubbed):
@@ -596,7 +629,9 @@ def record_delegated_milestones(
     )
 
 
-def _extract_worker_tool_calls(source: dict[str, Any]) -> list[dict[str, Any]] | None:
+def _extract_worker_tool_calls(
+    source: dict[str, Any],
+) -> list[dict[str, Any]] | None:
     """Extract normalized worker tool calls when ``source`` explicitly carries them."""
 
     raw = (
@@ -613,9 +648,12 @@ def _extract_worker_tool_calls(source: dict[str, Any]) -> list[dict[str, Any]] |
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or item.get("tool") or "").strip()
-        operation = str(item.get("operation") or name).strip()
+        operation = str(item.get("operation") or "").strip()
         status = str(item.get("status") or COMPLETED_STATUS).strip()
-        calls.append({"name": name, "operation": operation, "status": status})
+        call: dict[str, Any] = {"name": name, "status": status}
+        if operation:
+            call["operation"] = operation
+        calls.append(call)
     return calls
 
 
@@ -655,15 +693,21 @@ def _project_web_console_interaction(
             for step in msg.get("steps") or []:
                 if not isinstance(step, dict):
                     continue
-                tool_name = str(step.get("tool") or "").strip()
-                if tool_name:
-                    root_tool_calls.append(
-                        {
-                            "name": tool_name,
-                            "operation": tool_name,
-                            "status": COMPLETED_STATUS,
-                        }
-                    )
+                tool_name = str(step.get("tool") or step.get("name") or "").strip()
+                step_operation = str(step.get("operation") or "").strip()
+                if not step_operation and (
+                    tool_name in KNOWN_ROOT_OPERATIONS
+                    or tool_name in FORBIDDEN_OPERATIONS
+                ):
+                    step_operation = tool_name
+                if tool_name or step_operation:
+                    root_call: dict[str, Any] = {
+                        "name": tool_name or step_operation,
+                        "status": COMPLETED_STATUS,
+                    }
+                    if step_operation:
+                        root_call["operation"] = step_operation
+                    root_tool_calls.append(root_call)
                 if step.get("delegation") and step.get("task_id"):
                     task_id = str(step["task_id"])
                     step_status = (
@@ -744,8 +788,23 @@ def _project_web_console_interaction(
         transcript_payload.get("toolEvidenceComplete") is True
         or transcript_payload.get("tool_evidence_complete") is True
     )
-    all_tasks_have_tool_calls = bool(tasks_list) and all(
-        "toolCalls" in task for task in tasks_list
+    all_root_calls_normalized = all(
+        bool(str(call.get("operation") or "").strip())
+        for call in root_tool_calls
+    )
+    all_tasks_have_tool_calls = (
+        bool(tasks_list)
+        and all_root_calls_normalized
+        and all(
+            isinstance(task.get("toolCalls"), list)
+            and bool(task["toolCalls"])
+            and all(
+                bool(str(call.get("operation") or "").strip())
+                for call in task["toolCalls"]
+                if isinstance(call, dict)
+            )
+            for task in tasks_list
+        )
     )
     projected: dict[str, Any] = {
         "interactionId": session_id,
@@ -838,6 +897,23 @@ def _env_truthy(name: str, *, default: bool = False) -> bool:
     return raw in TRUTHY_ENV_VALUES
 
 
+def _positive_env_float(name: str, default: float) -> float:
+    """Return a positive float from environment variable ``name`` or ``default``."""
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise PortalError(
+            f"{name} must be a positive number, got {raw!r}"
+        ) from exc
+    if value <= 0 or not math.isfinite(value):
+        raise PortalError(f"{name} must be greater than 0, got {raw!r}")
+    return value
+
+
 def validate_private_web_console_url(url: str) -> str:
     """Validate that ``url`` points to loopback, a private IP, or an internal DNS host."""
 
@@ -928,6 +1004,58 @@ def _run_checked_command(
     return completed.stdout.strip()
 
 
+def _installer_supports_web_console() -> bool:
+    """Return whether ``install.sh`` in ``REPO_ROOT`` supports ``--enable-web-console``."""
+
+    install_script = REPO_ROOT / "install.sh"
+    try:
+        return "--enable-web-console" in install_script.read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return False
+
+
+def _chart_supports_web_console() -> bool:
+    """Return whether ``charts/kube-agents`` schema declares ``webConsole``."""
+
+    schema_path = REPO_ROOT / "charts" / "kube-agents" / "values.schema.json"
+    try:
+        return '"webConsole"' in schema_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+
+def _cluster_already_exists(
+    *,
+    project_id: str,
+    cluster_name: str,
+    location: str,
+) -> bool:
+    """Return whether GKE cluster ``cluster_name`` already exists in ``project_id``."""
+
+    try:
+        probe = subprocess.run(
+            [
+                "gcloud",
+                "container",
+                "clusters",
+                "describe",
+                cluster_name,
+                f"--location={location}",
+                f"--project={project_id}",
+                "--format=value(name)",
+            ],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=KUBECTL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
 def _provision_cluster_with_web_console(
     *,
     project_id: str,
@@ -935,7 +1063,18 @@ def _provision_cluster_with_web_console(
     location: str,
     model_provider: str,
 ) -> None:
-    """Stand up a GKE cluster with ``install.sh`` and the Web Console enabled."""
+    """Stand up a GKE cluster with ``install.sh`` and the Web Console enabled.
+
+    Requires the ``--enable-web-console`` flag introduced by sibling PR #2321.
+    """
+
+    if not _installer_supports_web_console():
+        raise PortalError(
+            "install.sh in this checkout does not support --enable-web-console "
+            "(provided by sibling PR #2321); use a branch/cluster with the Web "
+            "Console deployed and connect via CUJ_WEB_CONSOLE_URL or "
+            "CUJ_WEB_CONSOLE_CLUSTER_MODE='port-forward'"
+        )
 
     _run_checked_command(
         [
@@ -983,7 +1122,10 @@ def _deploy_web_console_on_existing_cluster(
     namespace: str,
     kube_context: str,
 ) -> None:
-    """Deploy the Web Console onto an existing cluster as a private Service."""
+    """Deploy the Web Console onto an existing cluster as a private Service.
+
+    Requires the ``webConsole.enabled`` chart setting introduced by sibling PR #2321.
+    """
 
     if cluster_name and project_id and not kube_context:
         _run_checked_command(
@@ -1005,7 +1147,7 @@ def _deploy_web_console_on_existing_cluster(
         _kubectl_cmd(
             "get",
             "deployment",
-            "platform-agent-gateway",
+            GATEWAY_DEPLOYMENT_NAME,
             namespace=namespace,
             kube_context=kube_context,
         ),
@@ -1015,10 +1157,18 @@ def _deploy_web_console_on_existing_cluster(
         timeout=KUBECTL_TIMEOUT_SECONDS,
     )
     if probe.returncode == 0:
+        if not _chart_supports_web_console():
+            raise PortalError(
+                "charts/kube-agents in this checkout does not declare "
+                "webConsole.enabled (provided by sibling PR #2321); deploy the "
+                "Web Console from the #2321 chart first and connect via "
+                "CUJ_WEB_CONSOLE_URL or "
+                "CUJ_WEB_CONSOLE_CLUSTER_MODE='port-forward'"
+            )
         helm_cmd = [
             "helm",
             "upgrade",
-            "kube-agents",
+            HELM_RELEASE_NAME,
             str(REPO_ROOT / "charts" / "kube-agents"),
             "-n",
             namespace,
@@ -1057,27 +1207,28 @@ def _teardown_web_console_on_existing_cluster(
 ) -> None:
     """Disable and delete the unauthenticated Web Console on an existing cluster."""
 
-    helm_cmd = [
-        "helm",
-        "upgrade",
-        "kube-agents",
-        str(REPO_ROOT / "charts" / "kube-agents"),
-        "-n",
-        namespace,
-        "--reuse-values",
-        "--set",
-        "webConsole.enabled=false",
-        "--wait",
-    ]
-    if kube_context:
-        helm_cmd.extend(["--kube-context", kube_context])
-    subprocess.run(
-        helm_cmd,
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=KUBECTL_TIMEOUT_SECONDS,
-    )
+    if _chart_supports_web_console():
+        helm_cmd = [
+            "helm",
+            "upgrade",
+            HELM_RELEASE_NAME,
+            str(REPO_ROOT / "charts" / "kube-agents"),
+            "-n",
+            namespace,
+            "--reuse-values",
+            "--set",
+            "webConsole.enabled=false",
+            "--wait",
+        ]
+        if kube_context:
+            helm_cmd.extend(["--kube-context", kube_context])
+        subprocess.run(
+            helm_cmd,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=KUBECTL_TIMEOUT_SECONDS,
+        )
     _run_checked_command(
         _kubectl_cmd(
             "delete",
@@ -1259,24 +1410,49 @@ def managed_web_console_endpoint() -> Iterator[str]:
         return
 
     cluster_name = os.environ.get(CLUSTER_NAME_ENV, "").strip()
+    explicit_cluster_name = bool(cluster_name)
     if mode == "create":
         if not project_id:
             raise PortalError(
                 f"{PROJECT_ID_ENV} is required when "
                 f"{WEB_CONSOLE_CLUSTER_MODE_ENV}='create'"
             )
+        if explicit_cluster_name and _cluster_already_exists(
+            project_id=project_id,
+            cluster_name=cluster_name,
+            location=location,
+        ):
+            raise PortalError(
+                f"Refusing to run {WEB_CONSOLE_CLUSTER_MODE_ENV}='create' "
+                f"against pre-existing cluster {cluster_name!r} in project "
+                f"{project_id!r}; use {WEB_CONSOLE_CLUSTER_MODE_ENV}='existing' "
+                "or 'port-forward' so teardown does not delete an existing cluster."
+            )
         if not cluster_name:
-            cluster_name = f"cuj-web-console-{os.urandom(4).hex()}"
+            cluster_name = f"{EPHEMERAL_CLUSTER_PREFIX}{os.urandom(4).hex()}"
 
     previous_url = os.environ.get(WEB_CONSOLE_URL_ENV)
+    provisioned_cluster = False
+    deployed_existing = False
     try:
         if mode == "create":
-            _provision_cluster_with_web_console(
-                project_id=project_id,
-                cluster_name=cluster_name,
-                location=location,
-                model_provider=model_provider,
-            )
+            try:
+                _provision_cluster_with_web_console(
+                    project_id=project_id,
+                    cluster_name=cluster_name,
+                    location=location,
+                    model_provider=model_provider,
+                )
+            except BaseException:
+                if _cluster_already_exists(
+                    project_id=project_id,
+                    cluster_name=cluster_name,
+                    location=location,
+                ):
+                    provisioned_cluster = True
+                raise
+            else:
+                provisioned_cluster = True
         elif mode == "existing":
             _deploy_web_console_on_existing_cluster(
                 project_id=project_id,
@@ -1286,6 +1462,7 @@ def managed_web_console_endpoint() -> Iterator[str]:
                 namespace=namespace,
                 kube_context=kube_context,
             )
+            deployed_existing = True
 
         with ExitStack() as stack:
             if configured_url:
@@ -1310,14 +1487,14 @@ def managed_web_console_endpoint() -> Iterator[str]:
         else:
             os.environ[WEB_CONSOLE_URL_ENV] = previous_url
 
-        if mode == "create":
+        if mode == "create" and provisioned_cluster:
             if not (use_private_ip and keep_private and not explicit_teardown):
                 _teardown_cluster(
                     project_id=project_id,
                     cluster_name=cluster_name,
                     location=location,
                 )
-        elif mode == "existing":
+        elif mode == "existing" and (deployed_existing or explicit_teardown):
             should_teardown = explicit_teardown or not use_private_ip
             if should_teardown and not (
                 use_private_ip and keep_private and not explicit_teardown
@@ -1356,13 +1533,11 @@ def _run_web_console_turn(
         f"{os.urandom(WEB_CONSOLE_RAND_BYTES).hex()}"
     )
     budget_s = max_latency_seconds()
-    timeout_s = float(
-        os.environ.get(
-            "CUJ_TIMEOUT", max(DEFAULT_TURN_TIMEOUT_SECONDS, budget_s * 2)
-        )
+    timeout_s = _positive_env_float(
+        TURN_TIMEOUT_ENV, max(DEFAULT_TURN_TIMEOUT_SECONDS, budget_s * 2)
     )
-    poll_s = float(
-        os.environ.get("CUJ_POLL_INTERVAL", TRANSCRIPT_POLL_INTERVAL_SECONDS)
+    poll_s = _positive_env_float(
+        POLL_INTERVAL_ENV, TRANSCRIPT_POLL_INTERVAL_SECONDS
     )
     request_payload = {"message": prompt, "session_id": session_id}
     log.record("request", {"endpoint": root, **request_payload})

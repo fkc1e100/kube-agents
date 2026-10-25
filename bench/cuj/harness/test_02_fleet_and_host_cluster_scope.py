@@ -7,9 +7,11 @@ import re
 from typing import Any
 
 from cuj.harness.common import (
+    CLUSTER_NAME_ENV,
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
+    PROJECT_ID_ENV,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -30,7 +32,6 @@ from cuj.utils.milestones import Milestone, MilestoneSuite
 from cuj.utils.scenario import Scenario, required_env
 
 SCENARIO_ID = "cuj_harness_02"
-PROJECT_ID_ENV = "CUJ_PROJECT_ID"
 READ_ONLY_MILESTONE = "m4-scope-check-remains-read-only"
 MIN_SCOPE_ANSWER_CHARS = 20
 REQUIRED_INPUT_PHRASES = (
@@ -68,11 +69,23 @@ KNOWN_CLUSTER_NAME_RE = re.compile(
     r"|cluster-[a-z0-9-]+)\b",
     re.IGNORECASE,
 )
+NON_CLUSTER_TOKEN_RE = re.compile(
+    r"^(?:(?:single|multi|in|per|cross|host|target|same|inter|intra|sub|all"
+    r"|any|non|whole|full|every|each|other|local|remote|fleet|cloud"
+    r"|control-plane|node-pool|out-of-scope|in-scope)-cluster"
+    r"|cluster-(?:wide|level|scoped?|admin|role|rolebinding|ip|ips"
+    r"|autoscaler|info|cidr|dns|domain|network|mode|status|state"
+    r"|scope|config|configuration|name|names|id|ids|type|types)"
+    r"|gke-gcloud-auth-plugin"
+    r"|gke-[a-z0-9-]+-pool-[a-z0-9-]+)$",
+    re.IGNORECASE,
+)
 ADJACENT_CLUSTER_NAME_RE = re.compile(
-    r"\b(?:host\s+)?clusters?(?:\s+(?:is|are|include|includes|named|called))?\s*[:=]?\s*"
-    r"[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?\b"
-    r"|\b[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?\s*"
-    r"(?:\(\s*host\s+cluster\s*\)|\s+is\s+the\s+host\s+cluster\b|\s+host\s+cluster\b)",
+    r"\b(?:host\s+)?clusters?(?:\s+names?)?"
+    r"(?:(?:\s+(?:named|called)\s+|\s*[:=]\s*)[`'\"]?([a-z][a-z0-9_-]{2,62})[`'\"]?"
+    r"|\s+(?:is|are|include|includes)\s+(?:[`'\"]([a-z][a-z0-9_-]{2,62})[`'\"]|([a-z0-9]+-[a-z0-9_-]+)))\b"
+    r"|(?:[`'\"]([a-z][a-z0-9_-]{2,62})[`'\"]|\b([a-z0-9]+-[a-z0-9_-]+))\s*"
+    r"(?:\(\s*host\s+cluster\s*\)|\s+is\s+the\s+host\s+cluster\b)",
     re.IGNORECASE,
 )
 CLUSTER_STOPWORDS = frozenset(
@@ -233,7 +246,16 @@ MILESTONES = (
 def _reported_clusters(
     clauses: list[str],
     project_re: re.Pattern[str] | None,
+    configured_cluster: str = "",
 ) -> list[str]:
+    configured_re = (
+        re.compile(
+            rf"(?<![a-z0-9-]){re.escape(configured_cluster)}(?![a-z0-9-])",
+            re.IGNORECASE,
+        )
+        if configured_cluster
+        else None
+    )
     found: set[str] = set()
     for clause in clauses:
         if not CLUSTER_SCOPE_RE.search(clause):
@@ -242,14 +264,23 @@ def _reported_clusters(
         if project_re is not None:
             cleaned = project_re.sub(" ", cleaned)
         cleaned = GCP_LOCATION_RE.sub(" ", cleaned)
+        if configured_re is not None and configured_re.search(cleaned):
+            found.add(configured_cluster.casefold())
         for match in KNOWN_CLUSTER_NAME_RE.finditer(cleaned):
             token = match.group(0).casefold()
-            if token not in CLUSTER_STOPWORDS:
+            if (
+                token not in CLUSTER_STOPWORDS
+                and not NON_CLUSTER_TOKEN_RE.search(token)
+            ):
                 found.add(token)
         for match in ADJACENT_CLUSTER_NAME_RE.finditer(cleaned):
-            raw_token = match.group(1) or match.group(2) or ""
+            raw_token = next((g for g in match.groups() if g), "")
             token = raw_token.casefold()
-            if token and token not in CLUSTER_STOPWORDS:
+            if (
+                token
+                and token not in CLUSTER_STOPWORDS
+                and not NON_CLUSTER_TOKEN_RE.search(token)
+            ):
                 found.add(token)
     return sorted(found)
 
@@ -262,6 +293,7 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     raw_input = input_text(interaction)
     folded_input = raw_input.casefold()
     project_id = os.environ.get(PROJECT_ID_ENV, "").strip()
+    configured_cluster = os.environ.get(CLUSTER_NAME_ENV, "").strip()
 
     answer = answer_text(interaction)
     leaks = proxy_leaks(all_visible_text(interaction))
@@ -289,9 +321,16 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
         project_re and project_re.search(scrubbed_positive)
     )
     clarification_loop = has_clarification_or_refusal(answer)
-    clusters = _reported_clusters(positive_clauses, project_re)
+    clusters = _reported_clusters(
+        positive_clauses, project_re, configured_cluster
+    )
+    expected_cluster_ok = (
+        not configured_cluster
+        or configured_cluster.casefold() in clusters
+    )
     clusters_reported = (
         bool(clusters)
+        and expected_cluster_ok
         and not clarification_loop
         and len(positive_text.strip()) >= MIN_SCOPE_ANSWER_CHARS
     )

@@ -9,6 +9,7 @@ from cuj.harness.common import (
     FORBIDDEN_OPERATIONS,
     INTERACTION_COMPLETED_MILESTONE,
     KAGE_DELEGATES_MILESTONE,
+    NEGATED_OR_ERROR_CLAUSE_RE,
     SPECIALIST_COMPLETES_MILESTONE,
     SPECIALIST_CREATED_MILESTONE,
     all_visible_text,
@@ -80,13 +81,27 @@ DELEGATION_RE = re.compile(
 )
 NEGATED_POSTURE_CLAUSE_RE = re.compile(
     r"\b(?:do\s+not|don't|does\s+not|doesn't|did\s+not|didn't|is\s+not|isn't"
-    r"|are\s+not|aren't|am\s+not|not|never|neither|without)\s+"
-    r"(?:(?:operate|act|run|work|function|serve|use|delegate)\s+"
-    r"(?:in\s+|as\s+|via\s+|to\s+)?)?"
-    r"(?:(?:a|an|the)\s+)?"
+    r"|are\s+not|aren't|am\s+not|have\s+no|has\s+no|had\s+no"
+    r"|there\s+(?:is|are)\s+no|with\s+no|not|never|neither|without|no|none)\s+"
+    r"(?:(?:operat(?:e|es|ing)|act(?:s|ing)?|run(?:s|ning)?|work(?:s|ing)?"
+    r"|function(?:s|ing)?|serv(?:e|es|ing)|us(?:e|es|ing)|delegat(?:e|es|ing)"
+    r"|rout(?:e|es|ing))\s+(?:in\s+|as\s+|via\s+|to\s+)?)?"
+    r"(?:(?:a|an|the|any|strict|strictly)\s+){0,2}"
     r"\b(?:read[- ]only|plan[- ]and[- ]delegate|plan[- ]only|non[- ]mutating"
     r"|coordinator|planning\s+agent|orchestrat\w*"
     r"|delegat\w*|kanban(?:_create)?|list_agents|specialist\s+agents?)\b",
+    re.IGNORECASE,
+)
+POSTURE_CANNOT_RE = re.compile(
+    r"\b(?:cannot|can't|do\s+not|don't|does\s+not|doesn't)\s+"
+    r"(?:directly\s+)?(?:mutate|modify|change|alter|apply|delete|patch"
+    r"|run\s+(?:kubectl|gcloud)|execute\s+(?:kubectl|gcloud)"
+    r"|have\s+direct\s+(?:kubectl|gcloud|cli|access|cluster|cloud))\b",
+    re.IGNORECASE,
+)
+UNCONFIRMED_MODEL_CLAUSE_RE = re.compile(
+    r"\b(?:whether|if)\s+(?:the\s+)?(?:backing\s+|upstream\s+)?(?:llm\s+)?(?:model|provider)\b"
+    r"|\b(?:model|provider)\s+(?:is|was)\s+(?:unknown|unconfirmed|unavailable|not\s+confirmed)\b",
     re.IGNORECASE,
 )
 PERMISSION_POSTURE_RE = re.compile(
@@ -221,6 +236,15 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     unquoted_non_echo = re.sub(r'[`"]+', "", non_echo_text).replace(
         "\u2019", "'"
     )
+    positive_model_clauses = [
+        clause
+        for clause in clauses
+        if not NEGATED_OR_ERROR_CLAUSE_RE.search(
+            POSTURE_CANNOT_RE.sub("", clause)
+        )
+        and not UNCONFIRMED_MODEL_CLAUSE_RE.search(clause)
+    ]
+    positive_model_text = "\n".join(positive_model_clauses)
     positive_posture_clauses = [
         clause
         for clause in clauses
@@ -231,13 +255,13 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
 
-    has_model = bool(BACKING_MODEL_RE.search(non_echo_text))
-    has_provider = bool(BACKING_PROVIDER_RE.search(non_echo_text))
+    has_model = bool(BACKING_MODEL_RE.search(positive_model_text))
+    has_provider = bool(BACKING_PROVIDER_RE.search(positive_model_text))
     has_coordinator = bool(COORDINATOR_ROLE_RE.search(positive_posture_text))
     has_delegation = bool(DELEGATION_RE.search(positive_posture_text))
     has_posture = bool(PERMISSION_POSTURE_RE.search(positive_posture_text))
     has_tool_boundary = bool(
-        NO_DIRECT_CLI_RE.search( non_echo_text)
+        NO_DIRECT_CLI_RE.search(non_echo_text)
     ) and not bool(DIRECT_MUTATION_CLAIM_RE.search(unquoted_non_echo))
 
     suite = AcceptanceCriteria(ACCEPTANCE_CRITERIA)

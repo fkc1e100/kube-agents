@@ -45,17 +45,33 @@ Include the NetworkPolicy names, policy types, and pod selector summary in \
 both the task completion summary and the full result. Do not create, modify, \
 or delete any cluster resources."""
 
+_NON_NETPOL_FOLLOW_NOUN = (
+    r"(?!\s+(?:deployments?|statefulsets?|replicasets?|pods?|services?"
+    r"|svc|containers?|workloads?)\b)"
+)
 NETPOL_NAME_RE = re.compile(
-    r"\b(?:"
-    r"platform-agent-(?:shell|credential-proxy|gateway|sandbox)"
-    r"(?:-(?:netpol|network-policy|policy|isolation|egress|ingress))?(?!-[a-z0-9])"
-    r"|litellm-(?:netpol|network-policy|policy|isolation|egress|ingress)(?!-[a-z0-9])"
-    r"|kube-agents-[a-z0-9-]+-(?:netpol|network-policy|policy)"
-    r")\b",
+    rf"\b(?:"
+    rf"platform-agent-(?:shell|credential-proxy|sandbox)"
+    rf"(?:-(?:netpol|network-policy|policy|isolation|egress|ingress))?(?!-[a-z0-9])"
+    rf"|platform-agent-gateway-(?:netpol|network-policy|policy|isolation|egress|ingress)(?!-[a-z0-9])"
+    rf"|platform-agent-(?:gw|cred|a2a)-mon-netpol(?!-[a-z0-9])"
+    rf"|litellm-(?:netpol|network-policy|policy|isolation|egress|ingress)(?!-[a-z0-9])"
+    rf"|kube-agents-web-console(?:-(?:netpol|network-policy|policy))?(?!-[a-z0-9])"
+    rf"|kube-agents-[a-z0-9-]+-(?:netpol|network-policy|policy)"
+    rf")\b{_NON_NETPOL_FOLLOW_NOUN}",
     re.IGNORECASE,
 )
 UNRESTRICTED_NETPOL_CLAUSE_RE = re.compile(
-    r"\b(?:unrestricted|not\s+isolated|no\s+(?:network\s+)?isolation)\b",
+    r"\b(?:not\s+isolated|no\s+(?:network\s+)?isolation"
+    r"|unrestricted\s+ingress\s+and\s+egress"
+    r"|(?:accepts?|allows?|permits?)\s+all\s+(?:ingress\s+and\s+egress|traffic)"
+    r"|(?:pods?|workloads?|deployments?|statefulsets?|namespace|traffic)\s+"
+    r"(?:in\s+[a-z0-9-]+\s+)?(?:have|has|are|is)\s+unrestricted)\b",
+    re.IGNORECASE,
+)
+RESTRICTION_PREDICATE_RE = re.compile(
+    r"\b(?:only|restrict\w*|deny|denies|denied|blocks?|blocked"
+    r"|isolat\w*|selects?|podselector|matchlabels|enforc\w*)\b",
     re.IGNORECASE,
 )
 POLICY_DIRECTION_RE = re.compile(
@@ -163,12 +179,16 @@ def evaluate_acceptance(interaction: dict[str, Any]) -> AcceptanceCriteria:
             "polic(?:y|ies)",
         )
         if not UNRESTRICTED_NETPOL_CLAUSE_RE.search(clause)
+        and not (
+            re.search(r"\bunrestricted\b", clause, re.IGNORECASE)
+            and not RESTRICTION_PREDICATE_RE.search(clause)
+        )
     ]
     positive_text = "\n".join(positive_clauses)
     leaks = proxy_leaks(all_visible_text(interaction))
     operations = tool_operations(interaction)
     mutations = sorted(FORBIDDEN_OPERATIONS.intersection(operations))
-    refusal = has_clarification_or_refusal(answer)
+    refusal = has_clarification_or_refusal(positive_text or answer)
 
     policies = sorted(
         {m.group(0).casefold() for m in NETPOL_NAME_RE.finditer(positive_text)}

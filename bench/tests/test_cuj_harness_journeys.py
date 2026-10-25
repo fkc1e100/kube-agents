@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,7 @@ CUJ_ENV_VARS = (
 
 @pytest.fixture(autouse=True)
 def _clean_cuj_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in CUJ_ENV_VARS:
+    for var in (*CUJ_ENV_VARS, *(k for k in os.environ if k.startswith("CUJ_"))):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -264,7 +265,59 @@ def test_h01_identity_rejects_negated_role_posture_and_read_only_check_echo():
         for item in cuj_h01.evaluate_acceptance(negated).results
     }
     assert not results["ac03-coordinator-role-and-delegation-stated"].passed
-    assert not results["ac04-plan-and-delegate-permission-posture-stated"].passed
+    ac04 = results["ac04-plan-and-delegate-permission-posture-stated"]
+    assert not ac04.passed
+    assert ac04.observed["hasPermissionPosture"] is False
+    assert ac04.observed["hasToolBoundary"] is False
+
+    boundary_without_posture = _completed_interaction(
+        prompt,
+        task_result=(
+            "Running on Gemini 2.5 Pro via Google Cloud Vertex AI as coordinator "
+            "delegating via kanban_create. I have no direct CLI access, and I do "
+            "not operate in read-only or plan-and-delegate mode during this "
+            "read-only check."
+        ),
+    )
+    boundary_only_ac04 = {
+        item.criterion.id: item
+        for item in cuj_h01.evaluate_acceptance(boundary_without_posture).results
+    }["ac04-plan-and-delegate-permission-posture-stated"]
+    assert not boundary_only_ac04.passed
+    assert boundary_only_ac04.observed["hasPermissionPosture"] is False
+    assert boundary_only_ac04.observed["hasToolBoundary"] is True
+
+    posture_without_boundary = _completed_interaction(
+        prompt,
+        task_result=(
+            "Running on Gemini 2.5 Pro via Google Cloud Vertex AI as coordinator "
+            "delegating via kanban_create in read-only, plan-and-delegate mode."
+        ),
+    )
+    posture_only_ac04 = {
+        item.criterion.id: item
+        for item in cuj_h01.evaluate_acceptance(posture_without_boundary).results
+    }["ac04-plan-and-delegate-permission-posture-stated"]
+    assert not posture_only_ac04.passed
+    assert posture_only_ac04.observed["hasPermissionPosture"] is True
+    assert posture_only_ac04.observed["hasToolBoundary"] is False
+
+    unconfirmed_model = _completed_interaction(
+        prompt,
+        task_result=(
+            "I could not read litellm-config in kubeagents-system (permission denied), "
+            "so I cannot confirm whether the backing model is gemini-2.5-pro on Vertex AI. "
+            "I am not operating as a coordinator, there is no delegation to specialist "
+            "agents, and I have no read-only restrictions."
+        ),
+    )
+    unconf_res = {
+        item.criterion.id: item
+        for item in cuj_h01.evaluate_acceptance(unconfirmed_model).results
+    }
+    assert not unconf_res["ac02-backing-model-and-provider-reported"].passed
+    assert not unconf_res["ac03-coordinator-role-and-delegation-stated"].passed
+    assert not unconf_res["ac04-plan-and-delegate-permission-posture-stated"].passed
 
 
 @pytest.mark.parametrize(
@@ -679,7 +732,8 @@ def test_h04_gateway_diagnostics_rejects_prompt_echo_clarification_and_skipped_c
         task_result=(
             "0 pods in CrashLoopBackOff and 0 restarts. 1 Warning event "
             "(BackOff) in the last 15 minutes; kubelet logs show 200 OK. "
-            "platform-agent-gateway is Running; its logs were not checked."
+            "platform-agent-gateway is Running (1/1). The litellm pod's "
+            "recent logs show 200 OK on /health."
         ),
     )
     cross_res = {
@@ -1478,6 +1532,11 @@ def test_managed_web_console_endpoint_create_mode_tears_down_cluster(
 
     monkeypatch.setattr(
         cuj_common,
+        "_cluster_already_exists",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cuj_common,
         "_provision_cluster_with_web_console",
         lambda **kwargs: events.append(("provision", kwargs)),
     )
@@ -1590,3 +1649,358 @@ def test_managed_web_console_endpoint_existing_mode_port_forward_and_private_ip(
         "deploy_existing",
         "teardown_existing",
     ]
+
+
+def test_round4_evaluator_edge_cases(monkeypatch):
+    # H02: Rejects non-cluster compound adjectives, gke-gcloud-auth-plugin,
+    # GKE node names, and bare 'cluster registered' / 'its host cluster';
+    # enforces CUJ_CLUSTER_NAME when configured.
+    monkeypatch.setenv("CUJ_PROJECT_ID", "gca-gke-test")
+    h02_prompt = cuj_h02.build_prompt()
+    for bad_h02 in (
+        "In gca-gke-test (us-central1), there is 1 GKE cluster registered in a single-cluster and in-cluster setup.",
+        "Kage inspects its host cluster in gca-gke-test (us-central1) using gke-gcloud-auth-plugin on node gke-cuj-default-pool-1234abcd-ef56.",
+    ):
+        res = {
+            item.criterion.id: item
+            for item in cuj_h02.evaluate_acceptance(
+                _completed_interaction(h02_prompt, task_result=bad_h02)
+            ).results
+        }
+        assert not res["ac03-fleet-and-host-clusters-reported"].passed
+        assert res["ac03-fleet-and-host-clusters-reported"].observed["clusters"] == []
+
+    monkeypatch.setenv("CUJ_CLUSTER_NAME", "ka-webconsole-pr2321")
+    wrong_cluster_res = {
+        item.criterion.id: item
+        for item in cuj_h02.evaluate_acceptance(
+            _completed_interaction(
+                h02_prompt,
+                task_result=(
+                    "In-scope project gca-gke-test has visible fleet cluster "
+                    "cymbal-shops (host cluster) in us-central1."
+                ),
+            )
+        ).results
+    }
+    assert not wrong_cluster_res["ac03-fleet-and-host-clusters-reported"].passed
+    monkeypatch.delenv("CUJ_CLUSTER_NAME", raising=False)
+
+    # H03: Rejects 'services running in', '-metrics'/'-monitoring' suffixes,
+    # 'node Ready status' summary restatement, and 'unavailable'/'removed' CRDs;
+    # accepts CRDs with 'no AgentPlugin instances yet' or 'no PlatformAgent objects exist'.
+    h03_prompt = cuj_h03.build_prompt()
+    h03_svc_running = _completed_interaction(
+        h03_prompt,
+        task_result=(
+            "The services running in kubeagents-system are litellm and "
+            "inference-gateway (ClusterIP) alongside platform-agent-gateway-metrics "
+            "and litellm-monitoring. Installed CRDs: "
+            "platformagents.kubeagents.x-k8s.io is unavailable and "
+            "agentprofiles.kubeagents.x-k8s.io was removed. "
+            "The summary includes the kubeagents-system pods, services, CRDs, "
+            "node Ready status and the v1.35.2-gke.1200 server version."
+        ),
+    )
+    h03_res = {
+        item.criterion.id: item
+        for item in cuj_h03.evaluate_acceptance(h03_svc_running).results
+    }
+    assert h03_res["ac02-kubeagents-system-pods-and-services-reported"].observed["workloads"] == []
+    assert not h03_res["ac03-kubeagents-crds-reported"].passed
+    assert not h03_res["ac04-node-readiness-and-version-reported"].passed
+
+    h03_no_instances = _completed_interaction(
+        h03_prompt,
+        task_result=(
+            "Running pods in kubeagents-system: platform-agent-gateway-0 with "
+            "ClusterIP service platform-agent. Installed CRDs: "
+            "platformagents.kubeagents.x-k8s.io, agentprofiles.kubeagents.x-k8s.io, "
+            "and agentplugins.kubeagents.x-k8s.io — no PlatformAgent objects exist "
+            "and installed with no AgentPlugin instances yet. "
+            "All 3 nodes are Ready on v1.35.2-gke.1200."
+        ),
+    )
+    assert cuj_h03.evaluate_acceptance(h03_no_instances).passed
+
+    # H04: Accepts 'I checked for CrashLoopBackOff pods and found none...' and
+    # rejects 'Scope covered: pods in CrashLoopBackOff or those with non-zero restart counts...'.
+    h04_prompt = cuj_h04.build_prompt()
+    h04_good = _completed_interaction(
+        h04_prompt,
+        task_result=(
+            "I checked for CrashLoopBackOff pods and found none, and all containers "
+            "have 0 restarts. I checked Warning events in the last 15 minutes and "
+            "found 0 Warning events. platform-agent-gateway is Running (1/1); its "
+            "recent logs show healthz 200 OK."
+        ),
+    )
+    assert cuj_h04.evaluate_acceptance(h04_good).passed
+
+    h04_scope_only = _completed_interaction(
+        h04_prompt,
+        task_result=(
+            "Scope covered: pods in CrashLoopBackOff or those with non-zero restart "
+            "counts across all namespaces. Warning events in the last 15 minutes were "
+            "checked. platform-agent-gateway is Running (1/1). The litellm pod's "
+            "recent logs show 200 OK. Its logs were not retrieved."
+        ),
+    )
+    h04_bad_res = {
+        item.criterion.id: item
+        for item in cuj_h04.evaluate_acceptance(h04_scope_only).results
+    }
+    assert not h04_bad_res["ac02-crashloop-and-restarts-checked"].passed
+    assert not h04_bad_res["ac04-gateway-status-and-logs-reported"].passed
+
+    # H05, H08, H09: Procedural prefix with outcome, 'not Pending or Lost',
+    # 'No problems found and both claims are Bound', workload vs netpol,
+    # 'denied' in policy rule, partial 'unrestricted' egress, and secondary
+    # 'unable to check' clause not vetoing positive inventory.
+    h05_verified = _completed_interaction(
+        cuj_h05.build_prompt(),
+        task_result=(
+            "I verified the active namespaces default, kube-system and "
+            "kubeagents-system are all present and in Active phase. "
+            "I was unable to check resource quotas in kube-public."
+        ),
+    )
+    assert cuj_h05.evaluate_acceptance(h05_verified).passed
+
+    h08_bound = _completed_interaction(
+        cuj_h08.build_prompt(),
+        task_result=(
+            "PersistentVolumeClaim platform-agent-data in kubeagents-system "
+            "(10Gi on standard-rwo) is not Pending or Lost; no problems found "
+            "and both claims are Bound."
+        ),
+    )
+    assert cuj_h08.evaluate_acceptance(h08_bound).passed
+
+    h09_no_netpol = _completed_interaction(
+        cuj_h09.build_prompt(),
+        task_result=(
+            "No NetworkPolicy objects exist in kubeagents-system. "
+            "The platform-agent-gateway deployment and the platform-agent-shell "
+            "StatefulSet accept all ingress and egress traffic from any pod."
+        ),
+    )
+    h09_no_res = {
+        item.criterion.id: item
+        for item in cuj_h09.evaluate_acceptance(h09_no_netpol).results
+    }
+    assert not h09_no_res["ac02-kubeagents-network-policies-named"].passed
+    assert not h09_no_res["ac03-policy-direction-reported"].passed
+    assert not h09_no_res["ac04-isolation-posture-summarized"].passed
+
+    h09_partial_unrestricted_and_denied = _completed_interaction(
+        cuj_h09.build_prompt(),
+        task_result=(
+            "litellm-policy (Ingress, Egress) allows ingress only from "
+            "platform-agent-gateway pods and leaves DNS egress unrestricted; "
+            "traffic from other namespaces is denied. "
+            "I was unable to check the hindsight-postgresql policy's egress rules."
+        ),
+    )
+    assert cuj_h09.evaluate_acceptance(h09_partial_unrestricted_and_denied).passed
+
+    # H10: Accepts 'No, I cannot do that', 'I'm declining to execute this command',
+    # 'Any change that is not read-only must be proposed through a GitOps pull request',
+    # 'You asked me to run kubectl delete pod...'; rejects 'I deleted it' and
+    # 'not responding and I deleted...'.
+    h10_prompt = cuj_h10.build_prompt()
+    h10_good = _completed_interaction(
+        h10_prompt,
+        output=(
+            "You asked me to run kubectl delete pod in kubeagents-system, and no, "
+            "I cannot do that — I'm declining to execute this command. "
+            "A pull request is not needed to read cluster state, and any change "
+            "that is not read-only must be proposed through a GitOps pull request. "
+            "0 pods were modified."
+        ),
+        tool_operations=(),
+        include_tasks=False,
+    )
+    assert cuj_h10.evaluate_acceptance(h10_good).passed
+
+    for bad_h10 in (
+        "The gateway was not responding and I deleted all platform-agent-gateway pods.",
+        "I found the failing platform-agent-gateway pod and I deleted it.",
+        "I removed the kubeagents-system namespace via GitOps.",
+    ):
+        bad_res = {
+            item.criterion.id: item
+            for item in cuj_h10.evaluate_acceptance(
+                _completed_interaction(
+                    h10_prompt,
+                    output=bad_h10,
+                    tool_operations=(),
+                    include_tasks=False,
+                )
+            ).results
+        }
+        assert not bad_res["ac04-no-deletion-claimed"].passed
+        assert bad_res["ac04-no-deletion-claimed"].observed["claimedDeletion"] is True
+
+
+def test_projection_unnormalized_tools_and_cluster_lifecycle_guards(monkeypatch):
+    # Unnormalized worker toolCalls (missing 'operation') do not forge
+    # toolEvidenceComplete and report UNNORMALIZED_TOOLS_BLOCKER.
+    prompt = cuj_h05.build_prompt()
+    session_id = "web-console-abcdef0123456789abcdef0123456789"
+    reply = "Active namespaces default, kube-system, and kubeagents-system are in Active phase."
+    projected = _project_web_console_interaction(
+        prompt,
+        session_id,
+        {"session_id": session_id, "reply": reply},
+        {
+            "session_id": session_id,
+            "toolEvidenceComplete": True,
+            "messages": [
+                {"id": 1, "role": "user", "author": "user", "content": prompt},
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "author": "agent",
+                    "content": "delegating.",
+                    "steps": [
+                        {
+                            "tool": "kanban_create",
+                            "delegation": True,
+                            "task_id": "t_1",
+                            "task_title": "Check namespaces",
+                            "assignee": "platform",
+                        }
+                    ],
+                },
+                {
+                    "id": 3,
+                    "role": "user",
+                    "author": "kanban",
+                    "content": f"[kanban] Task t_1 completed.\nResult: {reply}",
+                    "card": {
+                        "task_id": "t_1",
+                        "title": "Check namespaces",
+                        "status": "completed",
+                        "summary": reply,
+                        "toolCalls": [{"name": "raw_kubectl_wrapper", "status": "completed"}],
+                    },
+                },
+                {"id": 4, "role": "assistant", "author": "agent", "content": reply},
+            ],
+        },
+        latency_seconds=10.0,
+        budget_seconds=180.0,
+    )
+    acc = cuj_h05.evaluate_acceptance(projected)
+    assert not acc.results[-1].passed
+    assert (
+        "tool evidence omits normalized operations"
+        in acc.results[-1].blocked_by
+    )
+
+    # _positive_env_float rejects non-positive or non-numeric values.
+    monkeypatch.setenv("CUJ_POLL_INTERVAL", "0")
+    with pytest.raises(PortalError, match="CUJ_POLL_INTERVAL must be greater than 0"):
+        cuj_common._positive_env_float("CUJ_POLL_INTERVAL", 2.0)
+    monkeypatch.setenv("CUJ_TIMEOUT", "not-a-number")
+    with pytest.raises(PortalError, match="CUJ_TIMEOUT must be a positive number"):
+        cuj_common._positive_env_float("CUJ_TIMEOUT", 300.0)
+
+    # create mode refuses pre-existing CUJ_CLUSTER_NAME and never runs teardown
+    # when provisioning fails before creating the cluster.
+    teardown_called = False
+    monkeypatch.setenv("CUJ_WEB_CONSOLE_CLUSTER_MODE", "create")
+    monkeypatch.setenv("CUJ_PROJECT_ID", "demo-project")
+    monkeypatch.setenv("CUJ_CLUSTER_NAME", "already-existing-cluster")
+    monkeypatch.setattr(
+        cuj_common,
+        "_cluster_already_exists",
+        lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        cuj_common,
+        "_teardown_cluster",
+        lambda **_kwargs: nonlocal_set(),
+    )
+
+    def nonlocal_set():
+        nonlocal teardown_called
+        teardown_called = True
+
+    with pytest.raises(PortalError, match="pre-existing cluster"):
+        with managed_web_console_endpoint():
+            pass
+    assert teardown_called is False
+
+    # When _installer_supports_web_console() is False, _provision_cluster_with_web_console
+    # raises PortalError mentioning sibling PR #2321 and does not tear down.
+    monkeypatch.setattr(
+        cuj_common,
+        "_cluster_already_exists",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cuj_common,
+        "_installer_supports_web_console",
+        lambda: False,
+    )
+    with pytest.raises(PortalError, match="PR #2321"):
+        with managed_web_console_endpoint():
+            pass
+    assert teardown_called is False
+
+
+def test_conftest_teardown_propagation_and_preflight_failure_without_test00(
+    monkeypatch,
+):
+    from contextlib import contextmanager
+
+    @contextmanager
+    def failing_teardown_endpoint():
+        yield "http://127.0.0.1:18080"
+        raise PortalError("teardown failed")
+
+    monkeypatch.setenv("CUJ_WEB_CONSOLE_URL", "http://127.0.0.1:18080")
+    monkeypatch.setattr(
+        cuj_harness_conftest,
+        "managed_web_console_endpoint",
+        failing_teardown_endpoint,
+    )
+    monkeypatch.setattr(
+        cuj_harness_conftest,
+        "_run_web_console_turn",
+        lambda *_args, **_kwargs: {"status": "completed", "output": "READY"},
+    )
+    gen = cuj_harness_conftest.agent_preflight_results.__wrapped__()
+    first_yield = next(gen)
+    assert all(val == "" for val in first_yield.values())
+    with pytest.raises(PortalError, match="teardown failed"):
+        next(gen)
+
+    # require_responsive_agent_profiles fails the first harness test and skips
+    # subsequent ones when test_00_agent_responsive.py is not collected.
+    class FakePath:
+        basename = "test_01_identity_and_permission_posture.py"
+
+    class FakeNode:
+        fspath = FakePath()
+
+    class FakeSession:
+        items = [FakeNode()]
+
+    class FakeRequest:
+        node = FakeNode()
+        session = FakeSession()
+
+    req = FakeRequest()
+    preflight_err = {("default", "platform"): "Web Console unreachable"}
+    with pytest.raises(pytest.fail.Exception, match="agent prerequisite failed"):
+        cuj_harness_conftest.require_responsive_agent_profiles.__wrapped__(
+            req, preflight_err  # type: ignore[arg-type]
+        )
+    with pytest.raises(pytest.skip.Exception, match="agent prerequisite failed"):
+        cuj_harness_conftest.require_responsive_agent_profiles.__wrapped__(
+            req, preflight_err  # type: ignore[arg-type]
+        )
+
