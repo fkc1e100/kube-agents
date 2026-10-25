@@ -194,6 +194,11 @@ func (f *fakeHermes) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		time.Sleep(delay)
+		f.mu.Lock()
+		if f.onChat != nil {
+			f.onChat(sid)
+		}
+		f.mu.Unlock()
 		_, _ = w.Write([]byte(stream))
 		f.mu.Lock()
 		gate, tail := f.streamGate, f.streamTail
@@ -1270,6 +1275,95 @@ func TestRunTurnAwaitsDelegatedKanbanCardResult(t *testing.T) {
 	})
 }
 
+func TestResolveDelegatedTurnHandlesMultipleCardsAndSynthesisGrace(t *testing.T) {
+	t.Run("waits until all delegated cards reach a terminal status", func(t *testing.T) {
+		fake, s := setupServer(t)
+		s.delegationPollInterval = 5 * time.Millisecond
+		h := s.routes()
+
+		fake.mu.Lock()
+		fake.reply = "delegating two checks."
+		fake.toolName = toolKanbanCreate
+		fake.toolContent = `{"ok": true, "task_id": "t_card_1", "status": "ready"}`
+		fake.onChat = func(sid string) {
+			// Record a second kanban_create during the same turn.
+			fake.postTool(sid, roleTool, toolKanbanCreate, `{"ok": true, "task_id": "t_card_2", "status": "ready"}`)
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				fake.mu.Lock()
+				// First card completes while second is still pending; an interim
+				// assistant message after card 1 must not settle the turn early.
+				fake.post(sid, roleUser, "[kanban] Task t_card_1 completed.\n"+
+					"Title: Check nodes\n"+
+					"Result: 3 nodes Ready.\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleAssistant, "Interim note after card 1.")
+				fake.mu.Unlock()
+
+				time.Sleep(25 * time.Millisecond)
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				fake.post(sid, roleUser, "[kanban] Task t_card_2 completed.\n"+
+					"Title: Check pods\n"+
+					"Result: 12 pods Running.\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleAssistant, "Combined synthesis: 3 nodes Ready and 12 pods Running.")
+			}()
+		}
+		fake.mu.Unlock()
+
+		rec := serve(h, chatReq(`{"message":"check nodes and pods"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		got := decode[chatResponse](t, rec)
+		want := "Combined synthesis: 3 nodes Ready and 12 pods Running."
+		if got.Reply != want {
+			t.Errorf("reply = %q, want %q", got.Reply, want)
+		}
+	})
+
+	t.Run("falls back to joined card summaries after synthesis grace window expires", func(t *testing.T) {
+		fake, s := setupServer(t)
+		s.delegationPollInterval = 5 * time.Millisecond
+		h := s.routes()
+
+		fake.mu.Lock()
+		fake.reply = "delegating two checks."
+		fake.toolName = toolKanbanCreate
+		fake.toolContent = `{"ok": true, "task_id": "t_grace_1", "status": "ready"}`
+		fake.onChat = func(sid string) {
+			fake.postTool(sid, roleTool, toolKanbanCreate, `{"ok": true, "task_id": "t_grace_2", "status": "ready"}`)
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				// Both cards reach terminal status, and no assistant synthesis or
+				// [SILENT] message is ever posted afterwards.
+				fake.post(sid, roleUser, "[kanban] Task t_grace_1 completed.\n"+
+					"Title: Check nodes\n"+
+					"Result: Node summary 1\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+				fake.post(sid, roleUser, "[kanban] Task t_grace_2 completed.\n"+
+					"Title: Check pods\n"+
+					"Result: Pod summary 2\n\n"+
+					"This is an automatic task-status notification, not a request to decompose the task again.")
+			}()
+		}
+		fake.mu.Unlock()
+
+		rec := serve(h, chatReq(`{"message":"check nodes and pods without synthesis"}`))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		got := decode[chatResponse](t, rec)
+		want := "Node summary 1\n\nPod summary 2"
+		if got.Reply != want {
+			t.Errorf("reply = %q, want %q", got.Reply, want)
+		}
+	})
+}
+
 // ---- Page behaviour, run under Node ----
 //
 // The page's script is one inline <script>. pageJS pulls named top-level
@@ -1544,9 +1638,35 @@ func TestPageBrowserFamilyReportsEdge(t *testing.T) {
 	script := `const family = ua => (function () { const navigator = { userAgent: ua }; ` + fn + ` return browserFamily(); })();
 console.log([
   family("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.2210.91"),
-  family("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")].join("|"));`
-	if got, want := runPageJS(t, script), "Edge 120 on Windows|Chrome 120 on Linux"; got != want {
+  family("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+  family("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")].join("|"));`
+	if got, want := runPageJS(t, script), "Edge 120 on Windows|Chrome 120 on Linux|Safari 17 on macOS"; got != want {
 		t.Errorf("browserFamily = %s, want %s", got, want)
+	}
+}
+
+func TestPageReleaseStatusLabelShowsBehindWhenPatched(t *testing.T) {
+	script := pageJS(t, "releaseStatusLabel", "safeHttpUrl") + `
+const behindPatched = releaseStatusLabel({ status: "behind", latest: "0.13.0", is_patched: true, applied_prs: [{ pr: 1 }] });
+const latestPatched = releaseStatusLabel({ status: "latest", latest: "0.12.0", is_patched: true, applied_prs: [{ pr: 1 }] });
+const safe1 = safeHttpUrl("javascript:alert(1)", "https://github.com/gke-labs/kube-agents/pull/42");
+const safe2 = safeHttpUrl("https://github.com/gke-labs/kube-agents/pull/42", "#");
+console.log(JSON.stringify([behindPatched.text, latestPatched.text, safe1, safe2]));`
+	if got, want := runPageJS(t, script), `["0.13.0 available","1 PR applied","https://github.com/gke-labs/kube-agents/pull/42","https://github.com/gke-labs/kube-agents/pull/42"]`; got != want {
+		t.Errorf("releaseStatusLabel / safeHttpUrl = %s, want %s", got, want)
+	}
+}
+
+func TestPageResolveForgeNamePreservesNamedForge(t *testing.T) {
+	script := `let lastRepos = { forges: [{ name: "in-cluster-gitea", provider: "gitea" }, { name: "ghe", provider: "github" }] };
+` + pageJS(t, "resolveForgeName") + `
+console.log(JSON.stringify([
+  resolveForgeName("gitea", "in-cluster-gitea", "gitea"),
+  resolveForgeName("github", "in-cluster-gitea", "gitea"),
+  resolveForgeName("gitea", "", "")
+]));`
+	if got, want := runPageJS(t, script), `["in-cluster-gitea","ghe","in-cluster-gitea"]`; got != want {
+		t.Errorf("resolveForgeName = %s, want %s", got, want)
 	}
 }
 

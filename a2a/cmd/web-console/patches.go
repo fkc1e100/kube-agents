@@ -136,11 +136,11 @@ func (s *server) saveAppliedPRs(ctx context.Context, prs []AppliedPR) error {
 	return nil
 }
 
-func (s *server) handlePatchesGet(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), patchesTimeout)
-	defer cancel()
+func isSafeHTTPURL(u string) bool {
+	return strings.HasPrefix(u, "https://") || strings.HasPrefix(u, "http://")
+}
 
-	prs := s.getAppliedPRs(ctx)
+func (s *server) resolveRunningPatchDisplay(ctx context.Context, prs []AppliedPR) (string, string) {
 	running, chart := s.liveInstallVersion(ctx)
 	runningTag, _, _ := runningVersion(running, chart)
 	if runningTag == "" || runningTag == "unknown" {
@@ -153,6 +153,15 @@ func (s *server) handlePatchesGet(w http.ResponseWriter, r *http.Request) {
 	if len(prs) > 0 && runningTag != "unknown" {
 		runningDisplay = runningTag + "+"
 	}
+	return runningTag, runningDisplay
+}
+
+func (s *server) handlePatchesGet(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), patchesTimeout)
+	defer cancel()
+
+	prs := s.getAppliedPRs(ctx)
+	runningTag, runningDisplay := s.resolveRunningPatchDisplay(ctx, prs)
 
 	writeJSON(w, http.StatusOK, patchesResponse{
 		IsPatched:      len(prs) > 0,
@@ -173,23 +182,30 @@ func (s *server) handlePatchesPost(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), patchesTimeout)
 	defer cancel()
 
-	current := s.getAppliedPRs(ctx)
-	if s.kube != nil && s.cfg.PodNamespace != "" {
-		if live, ok := s.readAppliedPRsFromCluster(ctx); ok {
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action == "" {
+		action = "add"
+	}
+
+	var current []AppliedPR
+	if action != "set" {
+		if s.kube != nil && s.cfg.PodNamespace != "" {
+			live, ok := s.readAppliedPRsFromCluster(ctx)
+			if !ok {
+				writeError(w, http.StatusInternalServerError, "read_failed", "Could not read current applied PRs from cluster before updating.")
+				return
+			}
 			if live == nil {
 				live = []AppliedPR{}
 			}
 			current = live
+		} else {
+			current = s.getAppliedPRs(ctx)
 		}
 	}
 	repo := s.cfg.ReleaseRepo
 	if repo == "" {
 		repo = defaultReleaseRepo
-	}
-
-	action := strings.ToLower(strings.TrimSpace(req.Action))
-	if action == "" {
-		action = "add"
 	}
 
 	var updated []AppliedPR
@@ -201,11 +217,17 @@ func (s *server) handlePatchesPost(w http.ResponseWriter, r *http.Request) {
 			updated = []AppliedPR{}
 		}
 		for i := range updated {
-			if updated[i].URL == "" && updated[i].PR > 0 {
+			updated[i].URL = strings.TrimSpace(updated[i].URL)
+			if !isSafeHTTPURL(updated[i].URL) && updated[i].PR > 0 {
 				updated[i].URL = fmt.Sprintf("https://github.com/%s/pull/%d", repo, updated[i].PR)
 			}
-			if updated[i].IssueURL == "" && updated[i].Issue > 0 {
-				updated[i].IssueURL = fmt.Sprintf("https://github.com/%s/issues/%d", repo, updated[i].Issue)
+			updated[i].IssueURL = strings.TrimSpace(updated[i].IssueURL)
+			if !isSafeHTTPURL(updated[i].IssueURL) {
+				if updated[i].Issue > 0 {
+					updated[i].IssueURL = fmt.Sprintf("https://github.com/%s/issues/%d", repo, updated[i].Issue)
+				} else {
+					updated[i].IssueURL = ""
+				}
 			}
 			if updated[i].AppliedAt == "" {
 				updated[i].AppliedAt = time.Now().UTC().Format(time.RFC3339)
@@ -234,12 +256,16 @@ func (s *server) handlePatchesPost(w http.ResponseWriter, r *http.Request) {
 			title = fmt.Sprintf("PR #%d", req.PR)
 		}
 		urlStr := strings.TrimSpace(req.URL)
-		if urlStr == "" {
+		if !isSafeHTTPURL(urlStr) {
 			urlStr = fmt.Sprintf("https://github.com/%s/pull/%d", repo, req.PR)
 		}
 		issueURL := strings.TrimSpace(req.IssueURL)
-		if issueURL == "" && req.Issue > 0 {
-			issueURL = fmt.Sprintf("https://github.com/%s/issues/%d", repo, req.Issue)
+		if !isSafeHTTPURL(issueURL) {
+			if req.Issue > 0 {
+				issueURL = fmt.Sprintf("https://github.com/%s/issues/%d", repo, req.Issue)
+			} else {
+				issueURL = ""
+			}
 		}
 		component := strings.TrimSpace(req.Component)
 		if component == "" {
@@ -281,18 +307,7 @@ func (s *server) handlePatchesPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	running, chart := s.liveInstallVersion(ctx)
-	runningTag, _, _ := runningVersion(running, chart)
-	if runningTag == "" || runningTag == "unknown" {
-		runningTag = strings.TrimPrefix(s.cfg.ImageTag, "v")
-	}
-	if runningTag == "" {
-		runningTag = "unknown"
-	}
-	runningDisplay := runningTag
-	if len(updated) > 0 && runningTag != "unknown" {
-		runningDisplay = runningTag + "+"
-	}
+	runningTag, runningDisplay := s.resolveRunningPatchDisplay(ctx, updated)
 
 	writeJSON(w, http.StatusOK, patchesResponse{
 		IsPatched:      len(updated) > 0,

@@ -12,8 +12,12 @@
         --text-primary: #202124;
         --text-secondary: #5f6368;
         --text-muted: #80868b;
+        --text: #202124;
+        --text-color: #202124;
+        --text-sub: #5f6368;
         --bg-page: #f8f9fa;
         --bg-surface: #ffffff;
+        --bg-card: #ffffff;
         --border-color: #dadce0;
         --border-subtle: #f1f3f4;
         --green-bg: #e6f4ea;
@@ -2904,7 +2908,7 @@
       </div>
     </div>
 
-    <!-- Feedback Modal: opens a pre-filled GitHub issue on gke-labs/kube-agents -->
+    <!-- Upgrade Modal: release check, applied patches, and upgrade commands -->
     <div
       class="modal-backdrop"
       id="upgrade-modal"
@@ -3930,8 +3934,6 @@
       const CHANNEL_NAMES = ["alerts", "scheduled"];
       const STATUS_SENDING = "Sending your message to the agent";
       const APP_TITLE = "kube-agents";
-      // Named in feedback reports so a report can be matched to the page build.
-      const WEB_CONSOLE_BUILD = "scion-chat prototype 2026-10-09";
 
       let threads = [];
       let activeId = "";
@@ -6609,9 +6611,12 @@
       function skillPillHtml(name, opts) {
         const info = skillInfo(name);
         const count = opts && opts.count;
+        const unit = opts && opts.unit;
         const title =
           count > 1
-            ? `${info.desc} (seen in ${count} ${opts.unit || "sessions"})`
+            ? unit === "times"
+              ? `${info.desc} (used ${count} times)`
+              : `${info.desc} (seen in ${count} ${unit || "sessions"})`
             : info.desc;
         return `<button type="button" class="skill-pill cat-${escapeHtml(info.cat)}" data-skill="${escapeHtml(name)}" title="${escapeHtml(title)}">&#9889; ${escapeHtml(name)}${count > 1 ? `<span class="skill-pill-count">&times;${count}</span>` : ""}</button>`;
       }
@@ -6835,7 +6840,7 @@
           ? `used ${usage.count}&times; in ${usage.sessions.size} ${usage.sessions.size === 1 ? "session" : "sessions"} &middot; ${escapeHtml(relativeTime(usage.lastSeen))}`
           : `not used in this tab yet`;
         return `<div class="skill-card${used ? " active-used" : ""}">
-        <div class="skill-card-head">${skillPillHtml(info.name, { count: usage ? usage.count : 0 })}<span class="ac-badge">${escapeHtml(SKILL_CATEGORIES[info.cat] || info.cat)}</span></div>
+        <div class="skill-card-head">${skillPillHtml(info.name, { count: usage ? usage.count : 0, unit: "times" })}<span class="ac-badge">${escapeHtml(SKILL_CATEGORIES[info.cat] || info.cat)}</span></div>
         <div class="skill-card-desc">${escapeHtml(info.desc)}</div>
         <div class="skill-card-meta"><span>${meta}</span></div>
         <div class="skill-card-actions">
@@ -7069,7 +7074,7 @@
         let repos = (lastInsights && lastInsights.repositories) || [];
         let topo = (lastInsights && lastInsights.topology) || "none";
 
-        if (repos.length === 0) {
+        if (repos.length === 0 && !lastRepos) {
           try {
             const res = await fetch("/api/repositories");
             if (res.ok) {
@@ -7174,13 +7179,28 @@
         repo = (repo || "").trim();
         if (!repo) return;
         role = role || "managed";
+        if (!lastRepos) {
+          try {
+            const r = await fetch("/api/repositories");
+            if (r.ok) lastRepos = await r.json();
+          } catch (e) {
+            console.warn("Could not fetch /api/repositories:", e);
+          }
+        }
         const defaultForge =
           (lastRepos &&
             Array.isArray(lastRepos.forges) &&
             lastRepos.forges[0]) ||
           null;
-        const provider = (defaultForge && defaultForge.provider) || "github";
-        const forge = (defaultForge && defaultForge.name) || provider;
+        const reqBody = {
+          repository: repo,
+          role: role,
+          category: category,
+        };
+        if (defaultForge) {
+          reqBody.provider = defaultForge.provider || "";
+          reqBody.forge = defaultForge.name || defaultForge.provider || "";
+        }
         try {
           const res = await fetch("/api/repositories/connect", {
             method: "POST",
@@ -7188,13 +7208,7 @@
               "Content-Type": "application/json",
               [CONSOLE_HEADER]: "1",
             },
-            body: JSON.stringify({
-              repository: repo,
-              role: role,
-              category: category,
-              provider: provider,
-              forge: forge,
-            }),
+            body: JSON.stringify(reqBody),
           });
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
@@ -7423,15 +7437,45 @@
         updateLiveHelmYAML();
       }
 
+      function resolveForgeName(provider, preferredForge, preferredProvider) {
+        const prov = (provider || "github").toLowerCase();
+        const forges =
+          (lastRepos && Array.isArray(lastRepos.forges) && lastRepos.forges) ||
+          [];
+        if (
+          preferredForge &&
+          (!preferredProvider || preferredProvider.toLowerCase() === prov)
+        ) {
+          const exact = forges.find(
+            (f) =>
+              f.name === preferredForge &&
+              (!f.provider || f.provider.toLowerCase() === prov),
+          );
+          if (exact) return exact.name;
+          if (forges.length === 0) return preferredForge;
+        }
+        const byProv = forges.find(
+          (f) => (f.provider || "").toLowerCase() === prov,
+        );
+        if (byProv && byProv.name) return byProv.name;
+        return prov;
+      }
+
       function buildCurrentReposList() {
         const list = [];
         if (activeReposTopology === "split") {
           if ($("repo-split-infra-enable").checked) {
             const path = ($("repo-split-infra-path").value || "").trim();
             if (path) {
+              const sel = $("repo-split-infra-provider");
+              const prov = sel.value;
               list.push({
-                forge: $("repo-split-infra-provider").value,
-                provider: $("repo-split-infra-provider").value,
+                forge: resolveForgeName(
+                  prov,
+                  sel.dataset.forge,
+                  sel.dataset.forgeProvider,
+                ),
+                provider: prov,
                 repository: path,
                 role: "gitops",
                 base_branch: ($("repo-split-infra-branch").value || "").trim(),
@@ -7442,9 +7486,15 @@
           if ($("repo-split-iam-enable").checked) {
             const path = ($("repo-split-iam-path").value || "").trim();
             if (path) {
+              const sel = $("repo-split-iam-provider");
+              const prov = sel.value;
               list.push({
-                forge: $("repo-split-iam-provider").value,
-                provider: $("repo-split-iam-provider").value,
+                forge: resolveForgeName(
+                  prov,
+                  sel.dataset.forge,
+                  sel.dataset.forgeProvider,
+                ),
+                provider: prov,
                 repository: path,
                 role: "managed",
                 base_branch: ($("repo-split-iam-branch").value || "").trim(),
@@ -7455,9 +7505,15 @@
           if ($("repo-split-workloads-enable").checked) {
             const path = ($("repo-split-workloads-path").value || "").trim();
             if (path) {
+              const sel = $("repo-split-workloads-provider");
+              const prov = sel.value;
               list.push({
-                forge: $("repo-split-workloads-provider").value,
-                provider: $("repo-split-workloads-provider").value,
+                forge: resolveForgeName(
+                  prov,
+                  sel.dataset.forge,
+                  sel.dataset.forgeProvider,
+                ),
+                provider: prov,
                 repository: path,
                 role: "managed",
                 base_branch: (
@@ -7470,9 +7526,15 @@
         } else if (activeReposTopology === "monorepo") {
           const path = ($("repo-mono-path").value || "").trim();
           if (path) {
+            const sel = $("repo-mono-provider");
+            const prov = sel.value;
             list.push({
-              forge: $("repo-mono-provider").value,
-              provider: $("repo-mono-provider").value,
+              forge: resolveForgeName(
+                prov,
+                sel.dataset.forge,
+                sel.dataset.forgeProvider,
+              ),
+              provider: prov,
               repository: path,
               role: "gitops",
               base_branch: ($("repo-mono-branch").value || "").trim(),
@@ -7488,11 +7550,15 @@
             if (path) {
               const role =
                 r.querySelector(".custom-repo-role")?.value || "managed";
+              const prov =
+                r.querySelector(".custom-repo-provider")?.value || "github";
               list.push({
-                forge:
-                  r.querySelector(".custom-repo-provider")?.value || "github",
-                provider:
-                  r.querySelector(".custom-repo-provider")?.value || "github",
+                forge: resolveForgeName(
+                  prov,
+                  r.dataset.forge,
+                  r.dataset.forgeProvider,
+                ),
+                provider: prov,
                 repository: path,
                 role: role,
                 base_branch:
@@ -7554,6 +7620,8 @@
         row.style.padding = "8px 10px";
         row.style.marginBottom = "4px";
         row.id = `custom-repo-row-${id}`;
+        row.dataset.forge = data.forge || "";
+        row.dataset.forgeProvider = data.provider || "";
         const isContext = data.role === "context";
         row.innerHTML = `
         <div style="display:grid;grid-template-columns:110px 100px 90px 1fr 100px 28px;gap:6px;align-items:center;">
@@ -7636,10 +7704,14 @@
           console.warn("Could not fetch /api/repositories:", e);
         }
 
-        // Populate Split panel: each repository is assigned to at most one slot
+        // Populate Split panel: each repository is assigned to at most one slot.
+        // Context (read-only) repositories never fill a split slot, because
+        // split slots save as gitops or managed (read-write).
         const usedSplit = new Set();
         const pickSplitRepo = (pred) => {
-          const found = repos.find((r) => !usedSplit.has(r) && pred(r));
+          const found = repos.find(
+            (r) => r.role !== "context" && !usedSplit.has(r) && pred(r),
+          );
           if (found) usedSplit.add(found);
           return found || null;
         };
@@ -7658,8 +7730,11 @@
           (r) =>
             r.category === "workloads" ||
             /(app|workload|service)/i.test(r.repository) ||
-            true,
+            r.role === "managed",
         );
+        if (topo === "split" && usedSplit.size < repos.length) {
+          topo = "custom";
+        }
 
         $("repo-split-iam-enable").checked = !!iamRepo;
         $("repo-split-iam-path").value = iamRepo ? iamRepo.repository : "";
@@ -7668,6 +7743,10 @@
           : "main";
         $("repo-split-iam-provider").value =
           (iamRepo && iamRepo.provider) || "github";
+        $("repo-split-iam-provider").dataset.forge =
+          (iamRepo && iamRepo.forge) || "";
+        $("repo-split-iam-provider").dataset.forgeProvider =
+          (iamRepo && iamRepo.provider) || "";
 
         $("repo-split-infra-enable").checked =
           !!infraRepo || repos.length === 0;
@@ -7679,6 +7758,10 @@
           : "main";
         $("repo-split-infra-provider").value =
           (infraRepo && infraRepo.provider) || "github";
+        $("repo-split-infra-provider").dataset.forge =
+          (infraRepo && infraRepo.forge) || "";
+        $("repo-split-infra-provider").dataset.forgeProvider =
+          (infraRepo && infraRepo.provider) || "";
 
         $("repo-split-workloads-enable").checked = !!workloadsRepo;
         $("repo-split-workloads-path").value = workloadsRepo
@@ -7689,6 +7772,10 @@
           : "main";
         $("repo-split-workloads-provider").value =
           (workloadsRepo && workloadsRepo.provider) || "github";
+        $("repo-split-workloads-provider").dataset.forge =
+          (workloadsRepo && workloadsRepo.forge) || "";
+        $("repo-split-workloads-provider").dataset.forgeProvider =
+          (workloadsRepo && workloadsRepo.provider) || "";
 
         // Populate Monorepo panel
         const monoRepo =
@@ -7699,6 +7786,10 @@
           : "main";
         $("repo-mono-provider").value =
           (monoRepo && monoRepo.provider) || "github";
+        $("repo-mono-provider").dataset.forge =
+          (monoRepo && monoRepo.forge) || "";
+        $("repo-mono-provider").dataset.forgeProvider =
+          (monoRepo && monoRepo.provider) || "";
 
         // Populate Custom panel
         const customContainer = $("repo-custom-rows");
@@ -7764,6 +7855,11 @@
           const payload = {
             topology: activeReposTopology,
             repositories: list,
+            forges:
+              (lastRepos &&
+                Array.isArray(lastRepos.forges) &&
+                lastRepos.forges) ||
+              undefined,
           };
           const res = await fetch("/api/repositories", {
             method: "POST",
@@ -8094,6 +8190,13 @@
       }
 
       function releaseStatusLabel(r) {
+        if (r && r.status === "behind") {
+          return {
+            text: `${r.latest} available`,
+            color: "#b06000",
+            bg: "#fef7e0",
+          };
+        }
         const isPatched = !!(
           r &&
           (r.is_patched || (r.applied_prs && r.applied_prs.length > 0))
@@ -8146,11 +8249,16 @@
           r.is_patched ||
           (r.applied_prs && r.applied_prs.length > 0)
         );
+        const prCount = (r.applied_prs && r.applied_prs.length) || 0;
         const runningDisp = isPatched
           ? `${escapeHtml(r.running)}+`
           : escapeHtml(r.running);
         const lab = releaseStatusLabel(r);
-        const pill = `<span class="handoff-pill" style="background:${lab.bg};color:${lab.color};border:1px solid ${isPatched ? "#d8b4fe" : lab.color + "33"};" title="${escapeHtml(r.detail || "")}">${escapeHtml(lab.text)}</span>`;
+        const pill = `<span class="handoff-pill" style="background:${lab.bg};color:${lab.color};border:1px solid ${isPatched && r.status !== "behind" ? "#d8b4fe" : lab.color + "33"};" title="${escapeHtml(r.detail || "")}">${escapeHtml(lab.text)}</span>`;
+        const patchExtraPill =
+          isPatched && r.status === "behind"
+            ? ` <span class="handoff-pill" style="background:#f3e8fd;color:#7627bb;border:1px solid #d8b4fe;" title="${prCount} PR${prCount === 1 ? "" : "s"} applied">${prCount} PR${prCount === 1 ? "" : "s"} applied</span>`
+            : "";
         const latest = r.latest_url
           ? ` · <a href="${escapeHtml(r.latest_url)}" target="_blank" rel="noopener" title="Release notes on GitHub">release notes ${escapeHtml(r.latest)} &nearr;</a>`
           : "";
@@ -8161,11 +8269,11 @@
               ? "pre-release build"
               : "build from source"
             : "";
-        return `<b>${runningDisp}</b>${kind ? ` <span class="step-detail">(${kind})</span>` : ""} ${pill}${latest}${upgrade} · ${helm}`;
+        return `<b>${runningDisp}</b>${kind ? ` <span class="step-detail">(${kind})</span>` : ""} ${pill}${patchExtraPill}${latest}${upgrade} · ${helm}`;
       }
 
-      // The topbar badge: the running version, violet when patched with PRs,
-      // amber when a newer release exists, green when up to date.
+      // The topbar badge: the running version, amber when a newer release
+      // exists, violet when patched with PRs and up to date, green when up to date.
       // Clicking opens the upgrade & patches dialog.
       function renderReleaseBadge() {
         const el = $("release-badge");
@@ -8184,7 +8292,8 @@
         el.hidden = false;
         el.style.background = lab.bg;
         el.style.color = lab.color;
-        el.style.borderColor = isPatched ? "#d8b4fe" : lab.color + "55";
+        el.style.borderColor =
+          isPatched && r.status !== "behind" ? "#d8b4fe" : lab.color + "55";
         const runningDisp = isPatched
           ? `${escapeHtml(r.running)}+`
           : escapeHtml(r.running);
@@ -8197,7 +8306,7 @@
           ? ` &middot; <span style="font-weight:600;">+${prCount} PR${prCount === 1 ? "" : "s"}</span>`
           : "";
         const statusNote =
-          !isPatched && r.status === "behind"
+          r.status === "behind"
             ? ` &middot; ${escapeHtml(r.latest)} available &#11014;`
             : !isPatched && r.status === "ahead"
               ? " &middot; pre-release"
@@ -8313,6 +8422,11 @@
         }
       }
 
+      function safeHttpUrl(u, fallback) {
+        const s = String(u || "").trim();
+        return /^https?:\/\//i.test(s) ? s : fallback || "#";
+      }
+
       function renderUpgradeModal() {
         const r = lastRelease;
         if (!r) return;
@@ -8359,8 +8473,8 @@
           <div style="background:var(--bg-card,#fff);border:1px solid #d8b4fe;border-radius:6px;padding:8px 10px;margin-bottom:6px;">
             <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;">
               <div style="display:flex;align-items:center;gap:6px;">
-                <a href="${escapeHtml(p.url)}" target="_blank" rel="noopener" style="font-weight:600;color:#7627bb;text-decoration:none;">PR #${escapeHtml(String(p.pr))} &nearr;</a>
-                ${p.issue ? `&middot; <a href="${escapeHtml(p.issue_url || "https://github.com/gke-labs/kube-agents/issues/" + p.issue)}" target="_blank" rel="noopener" style="color:#5f6368;font-size:12px;text-decoration:none;">Issue #${escapeHtml(String(p.issue))} &nearr;</a>` : ""}
+                <a href="${escapeHtml(safeHttpUrl(p.url, "https://github.com/gke-labs/kube-agents/pull/" + p.pr))}" target="_blank" rel="noopener" style="font-weight:600;color:#7627bb;text-decoration:none;">PR #${escapeHtml(String(p.pr))} &nearr;</a>
+                ${p.issue ? `&middot; <a href="${escapeHtml(safeHttpUrl(p.issue_url, "https://github.com/gke-labs/kube-agents/issues/" + p.issue))}" target="_blank" rel="noopener" style="color:#5f6368;font-size:12px;text-decoration:none;">Issue #${escapeHtml(String(p.issue))} &nearr;</a>` : ""}
                 ${p.component ? `<span class="step-detail" style="background:#f1f3f4;padding:1px 6px;border-radius:10px;font-size:11px;">${escapeHtml(p.component)}</span>` : ""}
               </div>
               <div style="display:flex;align-items:center;gap:8px;">
@@ -8551,12 +8665,18 @@
 
       function browserFamily() {
         const ua = navigator.userAgent;
-        // Edge's user agent also carries Chrome/ and Safari/ before Edg/, so
-        // Edg/ is looked for on its own first.
+        // Edge's user agent also carries Chrome/ and Safari/ before Edg/, and
+        // Safari's version is in Version/<major> before Safari/<webkit-build>.
         const edge = ua.match(/Edg\/(\d+)/);
+        const safari =
+          !edge &&
+          !/Chrome|Chromium|CriOS/i.test(ua) &&
+          ua.match(/Version\/(\d+).*Safari/);
         const m = edge
           ? ["", "Edg", edge[1]]
-          : ua.match(/(Chrome|Firefox|Safari)\/(\d+)/);
+          : safari
+            ? ["", "Safari", safari[1]]
+            : ua.match(/(Chrome|Firefox|Safari)\/(\d+)/);
         const os = /CrOS/.test(ua)
           ? "ChromeOS"
           : /Macintosh/.test(ua)
@@ -8622,7 +8742,15 @@
           lines.push(
             `- Model: ${model.name}${model.provider ? ` via ${model.provider}` : ""}`,
           );
-        lines.push(`- Web console: ${WEB_CONSOLE_BUILD}`);
+        const consoleBuild =
+          [
+            v.image_tag && `image ${v.image_tag}`,
+            v.chart_version && `chart ${v.chart_version}`,
+            v.app_version && !v.image_tag && `app ${v.app_version}`,
+          ]
+            .filter(Boolean)
+            .join(" · ") || releaseText();
+        lines.push(`- Web console: ${consoleBuild}`);
         lines.push("");
         lines.push("**Install cluster**");
         lines.push(

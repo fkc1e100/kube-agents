@@ -66,24 +66,6 @@ _GCLOUD_CLUSTER_FORBIDDEN = (
     "ERROR: (gcloud.container.clusters.describe) ResponseError: code=403, message=Required container.clusters.get permission."
 )
 
-_SEEDED_INSTALLER_ENV_KEYS = (
-    "ACCEPT_NO_NETWORK_POLICY",
-    "ENABLE_NETWORK_POLICY",
-    "MIGRATE_NODE_POOLS",
-    "GOOGLE_CHAT_ENABLED",
-    "SLACK_ENABLED",
-    "ENABLE_GKE_BACKUP_PLAN",
-    "ENABLE_PUBSUB_PLATFORM",
-    "ENABLE_STOCKOUT_INVESTIGATOR",
-    "ENABLE_DRIFT_DETECTOR",
-    "WEB_CONSOLE_ENABLED",
-    "LITELLM_REDACTION_ENABLED",
-    "LITELLM_REDACTION_IP_ACTION",
-    "LITELLM_REDACTION_IP_ALLOW_CIDRS",
-    "LITELLM_REDACTION_RULES",
-    "SCOPED_SA_POOL_ENABLED",
-)
-
 
 def _run_installer_bash(body, env, cwd=_REPO_ROOT):
     """Run a bash body that sources install.sh, detached from any terminal.
@@ -141,7 +123,6 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
         full_env = get_isolated_test_env(
             overrides=overrides,
             bin_dir=bin_dir,
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         return _run_installer_bash(setup, full_env, cwd=cwd or _REPO_ROOT)
 
@@ -172,7 +153,6 @@ KUBE_AGENTS_SOURCE_ONLY=true source "{_INSTALL_SH}"
         install_script_content = _INSTALL_SH.read_text()
         test_env = get_isolated_test_env(
             overrides={"KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock")},
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         proc = subprocess.run(
             ["bash", "-s", "--", "--help"],
@@ -682,7 +662,6 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
             env=get_isolated_test_env(
                 overrides={"KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env)},
                 bin_dir=str(bin_dir),
-                absent=_SEEDED_INSTALLER_ENV_KEYS,
             ),
             cwd=str(outside),
         )
@@ -1126,7 +1105,6 @@ out_dir=""; acquire_source_repo out_dir "{requested_ref}"; echo "RESOLVED=$out_d
                     "KUBE_AGENTS_LOCK_FILE": str(self._empty_install_env.parent / "test.lock"),
                     "PATH": str(bin_dir),
                 },
-                absent=_SEEDED_INSTALLER_ENV_KEYS,
             )
             proc = subprocess.run(
                 [
@@ -2864,7 +2842,6 @@ class NonInteractiveRerunInheritanceTest(unittest.TestCase):
                     "MEMORY": "",
                     "MEMORY_PROVIDER": "",
                 },
-                absent=_SEEDED_INSTALLER_ENV_KEYS,
             )
             return subprocess.run(
                 ["bash", "-c",
@@ -6164,7 +6141,6 @@ class LitellmRedactionPersistsThroughInstallEnvTest(unittest.TestCase):
     def _env(overrides):
         return get_isolated_test_env(
             overrides=overrides,
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
 
     def test_the_first_run_records_the_export_and_the_next_run_reads_it_back(self):
@@ -10540,7 +10516,7 @@ def _env_without_ambient_drift_keys(overrides=None, asked_for=None):
     """
     return get_isolated_test_env(
         overrides=overrides,
-        absent=_SEEDED_INSTALLER_ENV_KEYS + ("TF_VAR_enable_drift_pubsub",),
+        absent=("TF_VAR_enable_drift_pubsub",),
     )
 
 
@@ -12446,7 +12422,6 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
         overrides.update(env_overrides)
         env = get_isolated_test_env(
             overrides=overrides,
-            absent=_SEEDED_INSTALLER_ENV_KEYS,
         )
         return subprocess.run(
             ["bash", "-c", script],
@@ -12510,7 +12485,6 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                             "KUBE_AGENTS_INSTALL_ENV": str(self._empty_install_env),
                             key: value,
                         },
-                        absent=_SEEDED_INSTALLER_ENV_KEYS,
                     )
                     proc = subprocess.run(
                         ["bash", "-c", script],
@@ -12598,7 +12572,6 @@ class ToggleValuesAreValidatedTest(unittest.TestCase):
                 text=True,
                 env=get_isolated_test_env(
                     overrides={"KUBE_AGENTS_INSTALL_ENV": str(seeded_env)},
-                    absent=_SEEDED_INSTALLER_ENV_KEYS,
                 ),
                 cwd=str(_REPO_ROOT),
             )

@@ -314,6 +314,17 @@ func TestPatchesTransientReadErrorDoesNotOverwriteAnnotation(t *testing.T) {
 		t.Fatalf("unexpected PATCH during GET")
 	}
 
+	// POST add while GET is failing must return 500 without sending PATCH
+	postReq := httptest.NewRequest(http.MethodPost, "/api/patches", strings.NewReader(`{"action":"add","pr":2002,"title":"new"}`))
+	postRec := httptest.NewRecorder()
+	s.handlePatchesPost(postRec, postReq)
+	if postRec.Code != http.StatusInternalServerError {
+		t.Fatalf("handlePatchesPost during transient read failure status = %d, want 500", postRec.Code)
+	}
+	if patchCalled {
+		t.Fatalf("unexpected PATCH sent when pre-write cluster read failed")
+	}
+
 	// Subsequent GET succeeds and loads PR #1001
 	mu.Lock()
 	failGet = false

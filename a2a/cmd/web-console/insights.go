@@ -25,9 +25,10 @@ limitations under the License.
 // headless Service the chart renders for the console. That needs no
 // Kubernetes API access and no RBAC.
 //
-// The model and the identity are passed in by the chart at install time. The
-// console gets no credentials to read IAM, so a role granted later does not
-// show here until the next install.
+// Default model and identity values are passed in by the chart at install
+// time; preferred model and reasoning overrides are read from the
+// PlatformAgent annotations when available. The console gets no credentials to
+// read IAM, so a role granted later does not show here until the next install.
 
 package main
 

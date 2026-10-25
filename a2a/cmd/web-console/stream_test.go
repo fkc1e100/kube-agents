@@ -551,3 +551,47 @@ func TestStreamFailureDistinguishesCreateTimeoutFromStreamCeiling(t *testing.T) 
 		t.Errorf("streamCtx deadline exceeded: error = %q, want turn_interrupted", gotCeiling.Error)
 	}
 }
+
+func TestChatStreamEmitsStatusAndKeepaliveDuringDelegationWait(t *testing.T) {
+	fake, s := setupServer(t)
+	s.delegationPollInterval = 5 * time.Millisecond
+	sid := sessionIDPrefix + strings.Repeat("a", 32)
+	fake.seed(sid, "api_server", "Web console")
+
+	fake.mu.Lock()
+	fake.stream = "event: run.started\ndata: {}\n\n" +
+		"event: assistant.delta\ndata: {\"delta\": \"delegating.\"}\n\n" +
+		"event: assistant.completed\ndata: {\"content\": \"delegating.\", \"completed\": true}\n\n" +
+		"event: done\ndata: {}\n\n"
+	fake.onChat = func(sid string) {
+		fake.post(sid, roleUser, "check nodes")
+		fake.postTool(sid, roleTool, toolKanbanCreate, `{"ok": true, "task_id": "t_stream_1", "status": "ready"}`)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			fake.post(sid, roleUser, "[kanban] Task t_stream_1 completed.\n"+
+				"Title: Check nodes\n"+
+				"Result: All 3 nodes Ready.\n\n"+
+				"This is an automatic task-status notification, not a request to decompose the task again.")
+			fake.post(sid, roleAssistant, "[SILENT]")
+		}()
+	}
+	fake.mu.Unlock()
+
+	rec := serve(s.routes(), streamReq(`{"message":"check nodes","session_id":"`+sid+`"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Waiting for task t_stream_1 to finish") {
+		t.Errorf("stream did not emit delegation waiting status: %s", body)
+	}
+	if !strings.Contains(body, ": keepalive") {
+		t.Errorf("stream did not emit keepalive during delegation poll: %s", body)
+	}
+	events := readRelay(t, body)
+	if last := events[len(events)-1]; last.name != eventReply || last.data["reply"] != "All 3 nodes Ready." {
+		t.Errorf("final event = %+v, want reply 'All 3 nodes Ready.'", last)
+	}
+}

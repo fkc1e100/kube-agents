@@ -1491,7 +1491,7 @@ webConsole:
   # GET /api/release: the version this install runs (from the image tag:
   # a release tag, or a commit for a build from source) and the newest
   # release on GitHub. One anonymous read of
-  # api.github.com/repos/<repo>/releases/latest per hour from the console
+  # api.github.com/repos/<repo>/releases per hour from the console
   # pod; set enabled to false on a cluster without egress to GitHub.
   releaseCheck:
     enabled: true

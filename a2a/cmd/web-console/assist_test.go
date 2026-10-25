@@ -126,10 +126,10 @@ func TestAssistRejectsBadInputAndUpstreamFailure(t *testing.T) {
 			t.Errorf("%s: want %d, got %d (%s)", body, want, rec.Code, rec.Body.String())
 		}
 	}
-	noHeader := assistReq(`{"title":"x"}`)
+	noHeader := assistReq(`{"title":"x","body":"ok","scope":"all"}`)
 	noHeader.Header.Del(consoleHeader)
-	if rec := serve(s.routes(), noHeader); rec.Code == http.StatusOK {
-		t.Fatalf("request without the console header was served")
+	if rec := serve(s.routes(), noHeader); rec.Code != http.StatusForbidden {
+		t.Fatalf("request without the console header: want 403, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -509,8 +509,13 @@ func fakePlatformAgentAPI(t *testing.T, tag *atomic.Value) *httptest.Server {
 			http.NotFound(w, r)
 			return
 		}
+		v := tag.Load().(string)
+		if v == "ERROR" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", contentTypeJSON)
-		fmt.Fprintf(w, `{"spec":{"deployment":{"tag":%q}}}`, tag.Load().(string))
+		fmt.Fprintf(w, `{"spec":{"deployment":{"tag":%q}}}`, v)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -545,6 +550,12 @@ func TestReleaseFollowsTheLivePlatformAgentTag(t *testing.T) {
 
 	if out := releaseFor(t, s); out.Running != "0.9.0" || out.Status != "latest" {
 		t.Fatalf("want the PlatformAgent's 0.9.0 over cfg's 0.8.0, got %+v", out)
+	}
+	// A transient PlatformAgent API failure must preserve the last live tag
+	// rather than re-keying the cache back to cfg.ImageTag (0.8.0).
+	tag.Store("ERROR")
+	if out := releaseFor(t, s); out.Running != "0.9.0" || out.Status != "latest" {
+		t.Fatalf("transient API failure flipped release back to startup tag: %+v", out)
 	}
 	tag.Store(sourceSHA)
 	out := releaseFor(t, s)

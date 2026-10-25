@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	validBaseBranchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
-	validForgeNamePattern  = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-	allowedForgeProviders  = map[string]bool{
+	validBaseBranchPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	validRefsHeadsPrefixPattern = regexp.MustCompile(`^refs/heads/[A-Za-z0-9]`)
+	validForgeNamePattern       = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+	allowedForgeProviders       = map[string]bool{
 		"github": true,
 		"gitlab": true,
 		"gitea":  true,
@@ -33,6 +34,7 @@ const (
 	categoryCustom    = "custom"
 
 	maxRepositoriesCount = 50
+	maxBaseBranchLength  = 200
 	repositoriesTimeout  = 10 * time.Second
 )
 
@@ -111,11 +113,14 @@ func validateBaseBranch(b string) error {
 	if b == "" {
 		return nil
 	}
-	if len(b) > 200 {
-		return fmt.Errorf("baseBranch exceeds 200 characters")
+	if len(b) > maxBaseBranchLength {
+		return fmt.Errorf("baseBranch exceeds %d characters", maxBaseBranchLength)
 	}
 	if b == "HEAD" || b == "refs/heads/HEAD" {
 		return fmt.Errorf("baseBranch may not be HEAD")
+	}
+	if strings.HasPrefix(b, "refs/heads/") && !validRefsHeadsPrefixPattern.MatchString(b) {
+		return fmt.Errorf("baseBranch after refs/heads/ must start with a letter or digit and may not be HEAD")
 	}
 	if strings.HasPrefix(b, "heads/") {
 		return fmt.Errorf("baseBranch may not start with heads/: write the branch name, or refs/heads/ and the name")
@@ -147,8 +152,17 @@ func deriveTopology(repos []repositoryInfo, explicit string) string {
 	if len(repos) == 1 && repos[0].Role == "gitops" {
 		return "monorepo"
 	}
-	if len(repos) > 1 {
-		return "split"
+	if len(repos) > 1 && len(repos) <= 3 {
+		hasContext := false
+		for _, r := range repos {
+			if r.Role == "context" {
+				hasContext = true
+				break
+			}
+		}
+		if !hasContext {
+			return "split"
+		}
 	}
 	return "custom"
 }
@@ -281,6 +295,30 @@ func (s *server) refreshRepositoriesFromCluster(ctx context.Context) {
 					info.URL = repositoryURL(info)
 					crRepos = append(crRepos, info)
 				}
+				if len(crRepos) == 0 && pa.Spec.Integration.GitHub != nil {
+					if gitRepo := strings.TrimSpace(pa.Spec.Integration.GitHub.GitRepo); gitRepo != "" {
+						org := strings.TrimSpace(pa.Spec.Integration.GitHub.Org)
+						if org != "" && !strings.Contains(gitRepo, "/") && !strings.Contains(gitRepo, "://") {
+							gitRepo = org + "/" + gitRepo
+						}
+						cat := ""
+						if catMap != nil {
+							cat = catMap[gitRepo]
+						}
+						if cat == "" {
+							cat = inferCategory(gitRepo, "gitops")
+						}
+						info := repositoryInfo{
+							Forge:      "github",
+							Provider:   "github",
+							Repository: gitRepo,
+							Role:       "gitops",
+							Category:   cat,
+						}
+						info.URL = repositoryURL(info)
+						crRepos = append(crRepos, info)
+					}
+				}
 				repos = crRepos
 			}
 		} else if s.cachedRepos != nil {
@@ -345,6 +383,17 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 	validatedRepos := make([]repositoryInfo, 0, len(req.Repositories))
 	forgesNeeded := make(map[string]forgeInfo)
 
+	s.reposMu.RLock()
+	cachedForges := make([]forgeInfo, len(s.cachedForges))
+	copy(cachedForges, s.cachedForges)
+	s.reposMu.RUnlock()
+
+	for _, cf := range cachedForges {
+		if cf.Name != "" {
+			forgesNeeded[cf.Name] = cf
+		}
+	}
+
 	for _, f := range req.Forges {
 		f.Name = strings.TrimSpace(f.Name)
 		if f.Name == "" {
@@ -364,6 +413,8 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 		}
 		forgesNeeded[f.Name] = f
 	}
+
+	usedForgeNames := make(map[string]bool)
 
 	for i, r := range req.Repositories {
 		r.Repository = strings.TrimSpace(r.Repository)
@@ -415,6 +466,16 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		r.Forge = strings.TrimSpace(r.Forge)
+		if r.Forge == "" || r.Forge == r.Provider {
+			if _, literalExists := forgesNeeded[r.Provider]; !literalExists {
+				for _, cf := range cachedForges {
+					if strings.EqualFold(cf.Provider, r.Provider) && cf.Name != "" {
+						r.Forge = cf.Name
+						break
+					}
+				}
+			}
+		}
 		if r.Forge == "" {
 			r.Forge = r.Provider
 		}
@@ -423,12 +484,17 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if _, exists := forgesNeeded[r.Forge]; !exists {
+		if existingForge, exists := forgesNeeded[r.Forge]; exists {
+			if r.Host == "" {
+				r.Host = existingForge.Host
+			}
+		} else {
 			forgesNeeded[r.Forge] = forgeInfo{
 				Name:     r.Forge,
 				Provider: r.Provider,
 			}
 		}
+		usedForgeNames[r.Forge] = true
 
 		r.Category = strings.ToLower(strings.TrimSpace(r.Category))
 		if r.Category == "" {
@@ -444,8 +510,16 @@ func (s *server) handleRepositoriesSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	forgesList := make([]forgeInfo, 0, len(forgesNeeded))
-	for _, f := range forgesNeeded {
-		forgesList = append(forgesList, f)
+	for _, f := range req.Forges {
+		fName := strings.TrimSpace(f.Name)
+		if fName != "" {
+			usedForgeNames[fName] = true
+		}
+	}
+	for name, f := range forgesNeeded {
+		if usedForgeNames[name] {
+			forgesList = append(forgesList, f)
+		}
 	}
 	if len(forgesList) == 0 {
 		forgesList = append(forgesList, forgeInfo{Name: "github", Provider: "github"})
@@ -475,30 +549,35 @@ func (s *server) saveRepositoriesToCluster(ctx context.Context, topology string,
 		path := fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName)
 		existingForges := map[string]map[string]any{}
 		existingRepos := map[string]map[string]any{}
+		hasGitHubAlias := false
 		var rawCR map[string]any
-		if err := s.kube.get(ctx, path, &rawCR); err == nil {
-			if spec, ok := rawCR["spec"].(map[string]any); ok {
-				if integ, ok := spec["integration"].(map[string]any); ok {
-					if rawForges, ok := integ["forges"].([]any); ok {
-						for _, item := range rawForges {
-							if fm, ok := item.(map[string]any); ok {
-								if name, _ := fm["name"].(string); name != "" {
-									existingForges[name] = fm
-								}
+		if err := s.kube.get(ctx, path, &rawCR); err != nil {
+			return fmt.Errorf("read PlatformAgent before patch: %w", err)
+		}
+		if spec, ok := rawCR["spec"].(map[string]any); ok {
+			if integ, ok := spec["integration"].(map[string]any); ok {
+				if gVal, exists := integ["github"]; exists && gVal != nil {
+					hasGitHubAlias = true
+				}
+				if rawForges, ok := integ["forges"].([]any); ok {
+					for _, item := range rawForges {
+						if fm, ok := item.(map[string]any); ok {
+							if name, _ := fm["name"].(string); name != "" {
+								existingForges[name] = fm
 							}
 						}
 					}
-					if rawRepos, ok := integ["repositories"].([]any); ok {
-						for _, item := range rawRepos {
-							if rm, ok := item.(map[string]any); ok {
-								fName, _ := rm["forge"].(string)
-								if fName == "" {
-									fName = "github"
-								}
-								rName, _ := rm["repository"].(string)
-								if rName != "" {
-									existingRepos[strings.ToLower(fName+":"+rName)] = rm
-								}
+				}
+				if rawRepos, ok := integ["repositories"].([]any); ok {
+					for _, item := range rawRepos {
+						if rm, ok := item.(map[string]any); ok {
+							fName, _ := rm["forge"].(string)
+							if fName == "" {
+								fName = "github"
+							}
+							rName, _ := rm["repository"].(string)
+							if rName != "" {
+								existingRepos[strings.ToLower(fName+":"+rName)] = rm
 							}
 						}
 					}
@@ -547,6 +626,14 @@ func (s *server) saveRepositoriesToCluster(ctx context.Context, topology string,
 
 		metadataJSON, _ := json.Marshal(repoMetadataPayload{Categories: categories})
 
+		integrationPatch := map[string]any{
+			"forges":       mergedForges,
+			"repositories": mergedRepos,
+		}
+		if hasGitHubAlias {
+			integrationPatch["github"] = nil
+		}
+
 		patch := map[string]any{
 			"metadata": map[string]any{
 				"annotations": map[string]string{
@@ -555,10 +642,7 @@ func (s *server) saveRepositoriesToCluster(ctx context.Context, topology string,
 				},
 			},
 			"spec": map[string]any{
-				"integration": map[string]any{
-					"forges":       mergedForges,
-					"repositories": mergedRepos,
-				},
+				"integration": integrationPatch,
 			},
 		}
 
@@ -635,7 +719,30 @@ func (s *server) handleRepositoriesConnect(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	s.reposMu.RLock()
+	forges := make([]forgeInfo, len(s.cachedForges))
+	copy(forges, s.cachedForges)
+	s.reposMu.RUnlock()
+
 	provider := strings.ToLower(strings.TrimSpace(req.Provider))
+	forge := strings.TrimSpace(req.Forge)
+	if provider == "" && forge == "" {
+		if len(forges) > 0 && forges[0].Name != "" {
+			forge = forges[0].Name
+			provider = strings.ToLower(strings.TrimSpace(forges[0].Provider))
+		} else if len(existingList) > 0 && existingList[0].Forge != "" {
+			forge = existingList[0].Forge
+			provider = strings.ToLower(strings.TrimSpace(existingList[0].Provider))
+		}
+	}
+	if provider == "" && forge != "" {
+		for _, f := range forges {
+			if f.Name == forge && f.Provider != "" {
+				provider = strings.ToLower(strings.TrimSpace(f.Provider))
+				break
+			}
+		}
+	}
 	if provider == "" {
 		provider = "github"
 	}
@@ -643,7 +750,23 @@ func (s *server) handleRepositoriesConnect(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_provider", fmt.Sprintf("Provider %q is invalid; must be github, gitlab, or gitea.", provider))
 		return
 	}
-	forge := strings.TrimSpace(req.Forge)
+	if forge == "" || forge == provider {
+		hasLiteral := false
+		for _, f := range forges {
+			if f.Name == provider {
+				hasLiteral = true
+				break
+			}
+		}
+		if !hasLiteral {
+			for _, f := range forges {
+				if strings.EqualFold(f.Provider, provider) && f.Name != "" {
+					forge = f.Name
+					break
+				}
+			}
+		}
+	}
 	if forge == "" {
 		forge = provider
 	}
@@ -694,11 +817,6 @@ func (s *server) handleRepositoriesConnect(w http.ResponseWriter, r *http.Reques
 		newInfo.URL = repositoryURL(newInfo)
 		existingList = append(existingList, newInfo)
 	}
-
-	s.reposMu.RLock()
-	forges := make([]forgeInfo, len(s.cachedForges))
-	copy(forges, s.cachedForges)
-	s.reposMu.RUnlock()
 
 	hasForge := false
 	for _, f := range forges {

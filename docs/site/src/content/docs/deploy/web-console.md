@@ -28,11 +28,11 @@ The reply shown on an `# alerts` post is often a short routing line. The session
 
 ## Threads
 
-Each thread is one agent session. A message you type reaches the Planning Agent, the same front door a Slack or Google Chat message reaches. It answers directly, or it files a kanban card and hands the work to the Platform Agent. A turn that calls tools can take several minutes. The console follows a streamed turn for up to 15 minutes. On the plain fallback route, it waits up to five minutes for a reply. When the agent proposes a change, it opens a pull request, as it does from any other chat surface.
+Each thread is one agent session. A message you type reaches the Planning Agent, the same front door a Slack or Google Chat message reaches. It answers directly, or it files a kanban card and hands the work to a specialist while the console waits for that card to finish. A turn that calls tools or delegates to a card can take several minutes. The console follows a streamed turn for up to 15 minutes. On the plain fallback route, it waits up to five minutes for a reply. When the agent proposes a change, it opens a pull request, as it does from any other chat surface.
 
 Several threads can run turns at once. You can send in one thread and switch to another while it works. A thread's title is its first message.
 
-Work handed to a card finishes after the turn's reply is already on the page. The card's result lands on the same session as a new message. One loop checks every thread for new messages every ten seconds. A result for the thread on screen appears tagged `update`. A result for another thread gives that thread an unread dot in the rail.
+When the Planning Agent delegates work to one or more kanban cards during a turn, the console keeps the turn open until every card reaches a terminal status, then returns the Planning Agent's synthesis (or the joined card result summaries) as the turn's reply. If a card finishes after the turn timed out or was started outside the turn, its result lands on the session as a new message; one loop checks every idle thread for new messages every ten seconds, showing a result for the thread on screen tagged `update` and giving any other thread an unread dot in the rail.
 
 The thread list is kept in the browser's local storage. It survives a reload and is shared by the tabs of that browser. It holds at most 12 threads and drops the least recently used. Removing a thread with its × button removes it from this list only; the agent keeps the session. Threads opened in another browser are not listed.
 
@@ -52,7 +52,7 @@ The page sends browser notifications for new `# alerts` posts only after you cli
 
 ## The banner
 
-The default model and provider come from the chart's LiteLLM settings at install; selecting a preferred model in the header records the choice on the `PlatformAgent` resource annotations (`kubeagents.x-k8s.io/active-model`, `active-provider`, `active-model-target`) and returns the declarative Helm values snippet to apply so the change survives reconciles without mutating the running LiteLLM `ConfigMap` or restarting pods in place. The token and cost counters are read from LiteLLM's own metrics, so read them with these limits in mind:
+The default model and provider come from the chart's LiteLLM settings at install; selecting a preferred model in the header records the choice on the `PlatformAgent` resource annotations (`kubeagents.x-k8s.io/active-model`, `active-model-target`, `reasoning-level`) and returns the declarative Helm values snippet to apply so the change survives reconciles without mutating the running LiteLLM `ConfigMap` or restarting pods in place. The token and cost counters are read from LiteLLM's own metrics, so read them with these limits in mind:
 
 - The counters reset when a LiteLLM pod restarts. The banner says "since LiteLLM last restarted".
 - They are summed across LiteLLM replicas. The console finds the replicas through a headless Service and reads each one, up to 32. When a replica does not answer, the banner says how many it read, for example "1 of 2 replicas", and the total is low.

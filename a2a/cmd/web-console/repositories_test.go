@@ -45,6 +45,9 @@ func TestValidateBaseBranch(t *testing.T) {
 	invalid := []string{
 		"HEAD",
 		"refs/heads/HEAD",
+		"refs/heads/_release",
+		"refs/heads/-main",
+		"refs/heads/.hidden",
 		"heads/main",
 		"refs/heads/heads/main",
 		"refs/heads/refs/heads/main",
@@ -365,5 +368,83 @@ func TestSaveRepositoriesPreservesUnknownClusterFields(t *testing.T) {
 	repo0, _ := repos[0].(map[string]any)
 	if repo0["webhook"] == nil {
 		t.Errorf("repository webhook field was stripped: %+v", repo0)
+	}
+}
+
+func TestDeprecatedGitHubAliasReadAndClearedOnWrite(t *testing.T) {
+	var patchedBody map[string]any
+	getErr := false
+	patchCount := 0
+	fakeAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			if getErr {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"spec": map[string]any{
+					"integration": map[string]any{
+						"github": map[string]any{
+							"org":     "acme",
+							"gitRepo": "fleet-infra",
+						},
+					},
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodPatch {
+			patchCount++
+			_ = json.NewDecoder(r.Body).Decode(&patchedBody)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer fakeAPI.Close()
+
+	s := newServer(config{
+		PodNamespace:      "kubeagents-system",
+		PlatformAgentName: "platform-agent",
+	})
+	s.kube = &kubeClient{base: fakeAPI.URL, token: "sa-token", client: fakeAPI.Client()}
+
+	repos := s.currentRepositories(httptest.NewRequest(http.MethodGet, "/api/repositories", nil).Context())
+	if len(repos) != 1 || repos[0].Repository != "acme/fleet-infra" || repos[0].Role != "gitops" {
+		t.Fatalf("expected alias acme/fleet-infra (gitops), got %+v", repos)
+	}
+
+	// Failed GET before PATCH must abort without issuing a PATCH.
+	getErr = true
+	if err := s.saveRepositoriesToCluster(
+		httptest.NewRequest(http.MethodPost, "/api/repositories", nil).Context(),
+		"monorepo",
+		repos,
+		[]forgeInfo{{Name: "github", Provider: "github"}},
+		nil,
+	); err == nil {
+		t.Fatal("saveRepositoriesToCluster succeeded when pre-patch GET failed")
+	}
+	if patchCount != 0 {
+		t.Fatalf("PATCH was sent (%d times) after failed pre-patch GET", patchCount)
+	}
+
+	// Successful GET over deprecated alias clears spec.integration.github in the merge patch.
+	getErr = false
+	if err := s.saveRepositoriesToCluster(
+		httptest.NewRequest(http.MethodPost, "/api/repositories", nil).Context(),
+		"monorepo",
+		repos,
+		[]forgeInfo{{Name: "github", Provider: "github"}},
+		nil,
+	); err != nil {
+		t.Fatalf("saveRepositoriesToCluster: %v", err)
+	}
+	spec, _ := patchedBody["spec"].(map[string]any)
+	integ, _ := spec["integration"].(map[string]any)
+	if v, hasGitHubField := integ["github"]; !hasGitHubField || v != nil {
+		t.Errorf("expected spec.integration.github: nil to clear deprecated alias, got %+v", integ)
 	}
 }

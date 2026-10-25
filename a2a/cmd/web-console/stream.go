@@ -208,8 +208,7 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	out := &sseWriter{w: w, rc: http.NewResponseController(w), page: r.Context()}
-	// The server's WriteTimeout fits /api/chat's turnTimeout. A stream may
-	// run to the ceiling, so this response gets a later write deadline.
+	// Set a per-response write deadline covering streamCeiling + streamWriteGrace.
 	_ = out.rc.SetWriteDeadline(time.Now().Add(s.streamCeiling + streamWriteGrace))
 	out.send(eventStatus, statusEvent{Text: statusSending})
 
@@ -238,7 +237,7 @@ func (s *server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		out.send(eventError, s.streamFailure(ctx, err, sid))
 		return
 	}
-	if delegatedReply, dErr := s.awaitDelegatedKanbanReply(ctx, sid, beforeID, reply); dErr == nil && strings.TrimSpace(delegatedReply) != "" {
+	if delegatedReply, dErr := s.awaitDelegatedKanbanReply(ctx, sid, beforeID, reply, out); dErr == nil && strings.TrimSpace(delegatedReply) != "" {
 		reply = delegatedReply
 	}
 	replyID := s.replyMessageID(ctx, sid, beforeID, reply)

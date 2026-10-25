@@ -446,6 +446,11 @@ type server struct {
 	githubClient *http.Client
 	releaseInfo  releaseCache
 
+	// liveTagMu guards lastLiveImageTag, the most recent non-empty
+	// spec.deployment.tag observed on the PlatformAgent CR.
+	liveTagMu        sync.Mutex
+	lastLiveImageTag string
+
 	// streamCeiling bounds one streamed turn; streamTurnCeiling, or less
 	// in tests.
 	streamCeiling time.Duration
@@ -1164,7 +1169,7 @@ func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
 	if err := json.Unmarshal(out.Message, &m); err != nil {
 		return "", fmt.Errorf("agent gateway reply has no message object: %w", err)
 	}
-	return s.awaitDelegatedKanbanReply(ctx, sid, beforeID, m.Content)
+	return s.awaitDelegatedKanbanReply(ctx, sid, beforeID, m.Content, nil)
 }
 
 // awaitDelegatedKanbanReply inspects the messages written during a turn
@@ -1172,9 +1177,11 @@ func (s *server) runTurn(ctx context.Context, sid, msg string) (string, error) {
 // initialReply immediately with no polling delay. When one or more cards were
 // filed, it polls session messages until every delegated card reaches a
 // terminal status and returns either the subsequent assistant synthesis reply
-// or the joined card result summaries. If ctx expires before all cards settle,
-// it returns initialReply when non-empty.
-func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, beforeID int64, initialReply string) (string, error) {
+// or the joined card result summaries. When out is non-nil (streamed turns),
+// it sends a status and step event when delegation is detected and a keepalive
+// on each poll tick. If ctx expires before all cards settle, it returns
+// initialReply when non-empty.
+func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, beforeID int64, initialReply string, out *sseWriter) (string, error) {
 	rows, _, failure := s.pageMessages(ctx, sid, beforeID, nil)
 	if failure != nil {
 		log.Printf(logPrefix+"session %s: initial delegation message read failed (%s): %s", sid, failure.code, failure.message)
@@ -1186,6 +1193,29 @@ func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, befo
 	}
 	if settled {
 		return reply, nil
+	}
+
+	lastStatus := s.delegatedWaitStatus(rows, beforeID)
+	if out != nil && lastStatus != "" {
+		out.send(eventStatus, statusEvent{Text: lastStatus})
+		out.send(eventStep, stepEvent{
+			ID:    "kanban_wait",
+			Kind:  stepKindTool,
+			Title: lastStatus,
+			State: stepStateRunning,
+			Tool:  toolKanbanCreate,
+		})
+	}
+	finishStep := func(state string) {
+		if out != nil && lastStatus != "" {
+			out.send(eventStep, stepEvent{
+				ID:    "kanban_wait",
+				Kind:  stepKindTool,
+				Title: lastStatus,
+				State: state,
+				Tool:  toolKanbanCreate,
+			})
+		}
 	}
 
 	interval := s.delegationPollInterval
@@ -1204,29 +1234,87 @@ func (s *server) awaitDelegatedKanbanReply(ctx context.Context, sid string, befo
 		select {
 		case <-ctx.Done():
 			if allTerminal && strings.TrimSpace(reply) != "" {
+				finishStep(stepStateDone)
 				return reply, nil
 			}
+			finishStep(stepStateFailed)
 			if strings.TrimSpace(initialReply) != "" {
 				return initialReply, nil
 			}
 			return "", ctx.Err()
 		case <-ticker.C:
+			if out != nil {
+				out.keepalive()
+			}
 			rows, _, failure = s.pageMessages(ctx, sid, beforeID, nil)
 			if failure != nil {
 				continue
 			}
 			reply, settled, allTerminal, _ = s.resolveDelegatedTurn(rows, beforeID)
 			if settled {
+				finishStep(stepStateDone)
 				return reply, nil
 			}
 			if allTerminal {
 				gracePolls++
 				if gracePolls >= defaultDelegationSynthesisGracePolls {
+					finishStep(stepStateDone)
 					return reply, nil
+				}
+			}
+			if out != nil {
+				if nextStatus := s.delegatedWaitStatus(rows, beforeID); nextStatus != "" && nextStatus != lastStatus {
+					lastStatus = nextStatus
+					out.send(eventStatus, statusEvent{Text: lastStatus})
+					out.send(eventStep, stepEvent{
+						ID:    "kanban_wait",
+						Kind:  stepKindTool,
+						Title: lastStatus,
+						State: stepStateRunning,
+						Tool:  toolKanbanCreate,
+					})
 				}
 			}
 		}
 	}
+}
+
+// delegatedWaitStatus returns a short human-readable status line naming the
+// delegated Kanban task IDs that are still in flight (or noting synthesis once
+// all tasks have reached a terminal status).
+func (s *server) delegatedWaitStatus(rows []hermesMessage, beforeID int64) string {
+	var orderedIDs []string
+	pending := map[string]bool{}
+	completed := map[string]bool{}
+	for _, m := range rows {
+		if m.ID <= beforeID {
+			continue
+		}
+		if m.Role == roleTool && m.Content != nil && (m.ToolName == nil || *m.ToolName == toolKanbanCreate) {
+			if id := kanbanCreateTaskID(*m.Content); id != "" && !pending[id] {
+				pending[id] = true
+				orderedIDs = append(orderedIDs, id)
+			}
+		}
+		if m.Role == roleUser && m.Content != nil {
+			if card, ok := s.parseKanbanCard(*m.Content); ok && pending[card.TaskID] && isTerminalKanbanStatus(card.Status) {
+				completed[card.TaskID] = true
+			}
+		}
+	}
+	var waiting []string
+	for _, id := range orderedIDs {
+		if !completed[id] {
+			waiting = append(waiting, id)
+		}
+	}
+	if len(waiting) > 0 {
+		return fmt.Sprintf("Waiting for task %s to finish", strings.Join(waiting, ", "))
+	}
+	if len(orderedIDs) > 0 {
+		return fmt.Sprintf("Waiting for task %s to finish", strings.Join(orderedIDs, ", "))
+	}
+	return ""
 }
 
 // resolveDelegatedTurn scans messages with ID > beforeID for kanban_create

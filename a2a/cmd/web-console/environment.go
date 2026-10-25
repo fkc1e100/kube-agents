@@ -294,7 +294,10 @@ func (k *kubeClient) doJSON(ctx context.Context, method, path string, body any, 
 
 func (s *server) liveInstallVersion(ctx context.Context) (string, string) {
 	// The live image tag comes from the PlatformAgent when present; the
-	// chart version remains what the chart stamped at install time.
+	// chart version remains what the chart stamped at install time. When a
+	// PlatformAgent read fails, fall back to the last live tag observed so
+	// a transient API error does not re-key the release cache to the
+	// startup env tag.
 	imageTag, chartVersion := s.cfg.ImageTag, s.cfg.ChartVersion
 	if s.kube != nil && s.cfg.PodNamespace != "" {
 		var pa struct {
@@ -307,7 +310,16 @@ func (s *server) liveInstallVersion(ctx context.Context) (string, string) {
 		if err := s.kube.get(ctx, fmt.Sprintf(platformAgentsAPIPath, s.cfg.PodNamespace, s.cfg.PlatformAgentName), &pa); err == nil {
 			if tag := strings.TrimSpace(pa.Spec.Deployment.Tag); tag != "" {
 				imageTag = tag
+				s.liveTagMu.Lock()
+				s.lastLiveImageTag = tag
+				s.liveTagMu.Unlock()
 			}
+		} else {
+			s.liveTagMu.Lock()
+			if s.lastLiveImageTag != "" {
+				imageTag = s.lastLiveImageTag
+			}
+			s.liveTagMu.Unlock()
 		}
 	}
 	return imageTag, chartVersion
