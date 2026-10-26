@@ -14,16 +14,22 @@
 
 """The report and worker-command checks of ``platform-host-identity-from-env``.
 
-Pins two properties of ``bench/tasks/platform-host-identity-from-env/task.yaml``:
+Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml``:
 
 1. ``the-answer-names-the-host-context`` is install-independent: it passes on
    both CI's ``platform-agent-host`` and differently named dev host clusters
    when the reply states a real ``gke_<project>_<location>_<cluster>`` context
    alongside the cluster's location, relies on ``fold_decoration: true`` so
    ``_normalize`` does not delete inner underscores before matching, and rejects
-   answers that omit the context, omit the standalone location, echo unresolved
-   placeholders, or mention unrelated ``gke-*`` nouns.
-2. ``the-worker-did-not-hunt-for-the-host`` rejects both standalone forbidden
+   answers that omit the context, omit the standalone location (even when a
+   folded Kanban card ID like ``t_f7459698`` or ``t_fa123456`` starts with hex
+   letters followed by digits), echo unresolved placeholders, or mention
+   unrelated ``gke-*`` nouns.
+2. ``the-worker-read-the-forwarded-identity`` accepts explicit reads of the
+   forwarded variables and bare or piped ``printenv``/``env`` dumps, while
+   rejecting ``env`` used as a command-execution prefix (``env KUBECONFIG=...``,
+   ``env -i ...``, ``env GOOGLE_CLOUD_PROJECT=...``).
+3. ``the-worker-did-not-hunt-for-the-host`` rejects both standalone forbidden
    commands (``kubectl config current-context``, ``gcloud container clusters
    list``, ``gcp-console-links``, ``find /``) and Hermes's collapsed-chain
    card-log rendering (``<first command> + 1 command``, ``+ 2 commands``), which
@@ -36,11 +42,10 @@ from typing import Any
 
 import pytest
 import yaml
+from conftest import TASKS
 from devops_bench.verification.rollup import rollup
 from devops_bench.verification.runner import VerifierAgent
 from devops_bench.verification.spec import VerificationEntry
-
-from conftest import TASKS
 from kube_agents_bench import transcript
 from kube_agents_bench.verifiers import ReportContainsVerifier, WorkerCommandsVerifier
 
@@ -93,6 +98,23 @@ VALID_REPORTS = [
         "(`asia-northeast1`).** Its kubectl context is "
         "`gke_123456789012_asia-northeast1_platform-agent-host`."
     ),
+    # Hex-leading Kanban card IDs (`t_f7459698`, `t_fa123456`) with a real standalone location.
+    (
+        "Task `t_f7459698` is done.\n\n"
+        "The `kube-agents` harness runs on `ka-webconsole-pr2321` in `gca-gke-test` "
+        "(`me-west1`), context `gke_gca-gke-test_me-west1_ka-webconsole-pr2321`."
+    ),
+    (
+        "Task `t_fa123456` is done.\n\n"
+        "The harness runs on `dev-host-cluster` in `example-project` "
+        "(`europe-southwest1`), context `gke_example-project_europe-southwest1_dev-host-cluster`."
+    ),
+    # Two-digit region number and zone suffix (`europe-west12-c`).
+    (
+        "Task `t_deadbeef` is done.\n\n"
+        "Cluster `dev-zonal-host` in `example-project` (`europe-west12-c`), "
+        "context `gke_example-project_europe-west12-c_dev-zonal-host`."
+    ),
 ]
 
 INVALID_REPORTS = [
@@ -115,13 +137,38 @@ INVALID_REPORTS = [
     ),
     # Dumps KUBE_CONTEXT_NAME alone without stating the location outside the context string.
     "The kubectl context name is `gke_example-project_us-central1_dev-host-cluster`.",
+    # Hex-leading Kanban card IDs folded by _INNER_UNDERSCORE (`t_f7459698` -> `t-f7459698`,
+    # `t_fa123456` -> `t-fa123456`, `t_deadbeef`, `t_ab12cd34`) must never stand in for a
+    # missing standalone GCP location token.
+    (
+        "Task `t_f7459698` is done.\n\n"
+        "The kubectl context name is `gke_example-project_us-central1_dev-host-cluster`."
+    ),
+    (
+        "Task `t_fa123456` is done.\n\n"
+        "The kubectl context name is `gke_example-project_us-central1_dev-host-cluster`."
+    ),
+    (
+        "Tasks `t_deadbeef` and `t_ab12cd34` are done on `dev-host1`: "
+        "`gke_example-project_us-central1_dev-host1`."
+    ),
 ]
 
 CLEAN_ENV_COMMANDS = [
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME",
+    "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID",
     "printenv",
     "env",
+    "env | grep -E 'GKE_|KUBE_'",
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $KUBE_CONTEXT_NAME"',
+    'echo "$GKE_CLUSTER_NAME $KUBE_CONTEXT_NAME"',
+]
+
+NON_ENV_READ_COMMANDS = [
+    "env KUBECONFIG=/tmp/k kubectl config get-contexts",
+    "env -i bash -c 'gcloud config get-value project'",
+    "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
+    "printenv PATH",
 ]
 
 FORBIDDEN_WORKER_COMMANDS = [
@@ -217,6 +264,40 @@ def test_host_context_check_requires_fold_decoration_to_preserve_context_separat
     )
 
 
+def test_host_context_check_accepts_every_gcp_region_family() -> None:
+    locations = [
+        "africa-south1",
+        "asia-east2",
+        "asia-northeast3",
+        "asia-south2",
+        "asia-southeast1-a",
+        "australia-southeast2",
+        "europe-central2",
+        "europe-north2",
+        "europe-southwest1",
+        "europe-west10-b",
+        "me-central2",
+        "me-west1",
+        "northamerica-northeast2",
+        "northamerica-south1",
+        "southamerica-east1",
+        "southamerica-west1",
+        "us-central1",
+        "us-east4-c",
+        "us-south1",
+        "us-west8",
+    ]
+    verifier = _report_verifier()
+    for loc in locations:
+        report = f"Host `host-a` in `proj-1` (`{loc}`), context `gke_proj-1_{loc}_host-a`."
+        transcript.set(report, [])
+        try:
+            res = verifier.verify(5.0)
+        finally:
+            transcript.clear()
+        assert res.status == "pass", f"rejected GCP location {loc!r}: {res.reason}"
+
+
 @pytest.mark.parametrize("command", CLEAN_ENV_COMMANDS)
 def test_single_unchained_env_read_passes_both_worker_checks(command: str) -> None:
     transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
@@ -227,6 +308,16 @@ def test_single_unchained_env_read_passes_both_worker_checks(command: str) -> No
         transcript.clear()
     assert read_res.status == "pass", f"{command!r} failed {ENV_READ}: {read_res.reason}"
     assert hunt_res.status == "pass", f"{command!r} failed {NO_HUNT}: {hunt_res.reason}"
+
+
+@pytest.mark.parametrize("command", NON_ENV_READ_COMMANDS)
+def test_env_exec_wrappers_fail_env_read_check(command: str) -> None:
+    transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
+    try:
+        res = _worker_verifier(ENV_READ).verify(5.0)
+    finally:
+        transcript.clear()
+    assert res.status == "fail", f"{command!r} slipped past {ENV_READ}: {res.reason}"
 
 
 @pytest.mark.parametrize("command", FORBIDDEN_WORKER_COMMANDS)

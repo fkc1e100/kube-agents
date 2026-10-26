@@ -77,23 +77,26 @@ verification_spec:
     check:
       # Under fold_decoration: true, inner underscores become hyphens before
       # _normalize strips Markdown emphasis, so gke_<project>_<location>_<cluster>
-      # arrives as gke-<project>-<location>-<cluster>. The second pattern
-      # requires a standalone GCP location token outside that hyphen-joined
-      # context so pasting KUBE_CONTEXT_NAME alone does not pass.
+      # arrives as gke-<project>-<location>-<cluster> — and a kanban card ID
+      # like t_f7459698 arrives as t-f7459698. The second pattern requires a
+      # standalone GCP location token (<geo>-<direction><1-2 digits>[-<zone>])
+      # outside that hyphen-joined context so pasting KUBE_CONTEXT_NAME alone
+      # never passes even when a folded card ID starts with hex letters.
       type: report_contains
       fold_decoration: true
       required_patterns:
-        - '(?<![a-z0-9-])gke-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z]+-[a-z]+\d+(?:-[a-z])?-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?![a-z0-9-])'
-        - '(?<![a-z0-9-])[a-z]+-[a-z]+\d+(?:-[a-z])?(?![a-z0-9-])'
+        - '(?<![a-z0-9-])gke-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z]{2,}-(?:central|north|south|east|west|northeast|northwest|southeast|southwest)\d{1,2}(?:-[a-z])?-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?![a-z0-9-])'
+        - '(?<![a-z0-9-])[a-z]{2,}-(?:central|north|south|east|west|northeast|northwest|southeast|southwest)\d{1,2}(?:-[a-z])?(?![a-z0-9-])'
   - name: the-worker-read-the-forwarded-identity
     role: objective
     mode: assert
     check:
-      # Matches an explicit read of the forwarded host variables or a bare
-      # printenv/env call in the worker's terminal log.
+      # Matches an explicit read of the forwarded host variables or a bare/piped
+      # printenv/env dump in the worker's terminal log (excluding `env VAR=...`
+      # or `env -i ...` command-execution wrappers).
       type: worker_commands
       required_patterns:
-        - 'GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME|^\s*(?:printenv|env)\b'
+        - 'GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME|^\s*(?:printenv|env)\s*(?:\|(?!\|)|;|$)'
   - name: the-worker-did-not-hunt-for-the-host
     role: objective
     mode: assert

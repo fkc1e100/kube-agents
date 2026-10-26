@@ -55,6 +55,16 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         for var in ("$GKE_CLUSTER_NAME", "$GKE_PROJECT_ID", "$GKE_LOCATION", "$KUBE_CONTEXT_NAME"):
             self.assertIn(var, bullet, f"identity bullet must cite {var} for immediate resolution")
         self.assertIn(
+            "`in-cluster`",
+            bullet,
+            "identity bullet must note that kind installs use the in-cluster kubectl context",
+        )
+        self.assertIn(
+            "`gke_kind_kind_kind`",
+            bullet,
+            "identity bullet must warn that KUBE_CONTEXT_NAME holds gke_kind_kind_kind in the sandbox on kind",
+        )
+        self.assertIn(
             "Do not enumerate the fleet",
             bullet,
             "identity bullet must forbid enumerating the fleet for basic host queries",
