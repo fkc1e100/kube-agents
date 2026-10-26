@@ -25,10 +25,14 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    folded Kanban card ID like ``t_f7459698`` or ``t_fa123456`` starts with hex
    letters followed by digits), echo unresolved placeholders, or mention
    unrelated ``gke-*`` nouns.
-2. ``the-worker-read-the-forwarded-identity`` accepts explicit reads of the
-   forwarded variables and bare or piped ``printenv``/``env`` dumps, while
-   rejecting ``env`` used as a command-execution prefix (``env KUBECONFIG=...``,
-   ``env -i ...``, ``env GOOGLE_CLOUD_PROJECT=...``).
+2. ``the-worker-read-the-forwarded-identity`` accepts explicit environment reads
+   of the forwarded variables (``printenv <VAR>``, bare or piped ``printenv``/
+   ``env`` dumps, unescaped non-single-quoted shell ``$VAR``/``${VAR}``
+   expansions, and ``python3 -c`` reading ``os.environ``/``os.getenv``), while
+   rejecting commands that merely mention a variable name (``kubectl ... | grep
+   GKE_``, ``grep -r KUBE_CONTEXT_NAME ...``, ``echo "GKE_CLUSTER_NAME"``,
+   ``echo '$GKE_CLUSTER_NAME'``) or use ``env`` as a command-execution prefix
+   (``env KUBECONFIG=...``, ``env -i ...``, ``env GOOGLE_CLOUD_PROJECT=...``).
 3. ``the-worker-did-not-hunt-for-the-host`` rejects both standalone forbidden
    commands (``kubectl config current-context``, ``gcloud container clusters
    list``, ``gcp-console-links``, ``find /``) and Hermes's collapsed-chain
@@ -161,7 +165,10 @@ CLEAN_ENV_COMMANDS = [
     "env",
     "env | grep -E 'GKE_|KUBE_'",
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $KUBE_CONTEXT_NAME"',
+    'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION"',
     'echo "$GKE_CLUSTER_NAME $KUBE_CONTEXT_NAME"',
+    'printf \'%s\\n\' "${GKE_CLUSTER_NAME}"',
+    'python3 -c "import os; print(os.environ[\'GKE_CLUSTER_NAME\'])"',
 ]
 
 NON_ENV_READ_COMMANDS = [
@@ -169,6 +176,17 @@ NON_ENV_READ_COMMANDS = [
     "env -i bash -c 'gcloud config get-value project'",
     "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
     "printenv PATH",
+    "printenv PATH | grep GKE_CLUSTER_NAME",
+    "kubectl get deploy platform-agent -n kubeagents-system -o yaml | grep -E 'GKE_|KUBE_CONTEXT_NAME'",
+    "grep -r KUBE_CONTEXT_NAME /opt/defaults/skills",
+    "kubectl get pods -A -o yaml | grep GKE_CLUSTER_NAME",
+    "grep -r '$GKE_CLUSTER_NAME' /opt/defaults/skills",
+    'echo "GKE_CLUSTER_NAME"',
+    "echo '$GKE_CLUSTER_NAME'",
+    r'echo "\$GKE_CLUSTER_NAME"',
+    "kubectl get pods # $GKE_CLUSTER_NAME",
+    'python3 -c "print(\'GKE_CLUSTER_NAME\')"',
+    'python3 -c "import os; print(os.environ[\'PATH\'])" | grep GKE_CLUSTER_NAME',
 ]
 
 FORBIDDEN_WORKER_COMMANDS = [
