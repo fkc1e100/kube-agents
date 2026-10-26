@@ -253,34 +253,14 @@ _PATTERN_EXPANSION_REASON = "a pattern does not compile once its cluster placeho
 # so a pattern spells each contraction ("don't") exactly once.
 _MARKDOWN_NOISE = str.maketrans({"*": None, "_": None, "`": None, "’": "'"})
 
-# Option tokens skipped ahead of positional subcommands in ``WorkerRun.subcommands``:
-# ``--flag=value`` carries its value inline, ``--no-*`` and these boolean global flags take no
-# following value word, and other options before ``--`` take the next non-flag word as their value.
+# Option syntax skipped ahead of positional subcommands in ``WorkerRun.subcommands``:
+# ``--flag=value`` carries its value inline; under the strict single reading for ``required_runs``,
+# ``--no-*`` and attached short options longer than ``-x`` (``-nkube-system``, ``-v6``) take no
+# following value word while other options before ``--`` take one; under ``forbidden_runs``,
+# options without ``=`` try both arities (0 and 1) so no untabled CLI flag hides a subcommand.
 _FLAG_VALUE_SEPARATOR = "="
 _CLI_NEGATED_FLAG_PREFIX = "--no-"
-_CLI_BOOLEAN_FLAGS = frozenset(
-    (
-        "-A",
-        "--all-namespaces",
-        "-q",
-        "--quiet",
-        "--verbose",
-        "--debug",
-        "--dry-run",
-        "--global",
-        "--insecure-skip-tls-verify",
-        "--disable-compression",
-        "--match-server-version",
-        "--warnings-as-errors",
-        "--user-output-enabled",
-        "--log-http",
-        "--dns-endpoint",
-        "--internal-ip",
-        "--show-package-vulnerability",
-        "--version",
-        "-V",
-    )
-)
+_SHORT_FLAG_LEN = 2
 _UNJOINED_MAX_COMMANDS_REASON = (
     "worker command count cannot be bounded against max_commands={max_commands} because a "
     "card-log row carries no task id to deduplicate against tagged trajectory calls"
@@ -2426,9 +2406,12 @@ _USAGE_FLAGS = ("-h", "--help")
 class WorkerRun(BaseModel):
     """One program run a case requires of a worker, or forbids: a script by its basename (or its
     module stem under ``-m``), any leading positional ``subcommands`` in order (options and their
-    values skipped, so ``subcommands: ["config"]`` on ``kubectl`` matches ``kubectl --kubeconfig
-    /tmp/k config get-contexts`` and not ``kubectl get configmap config`` or ``kubectl -n config
-    get pods``), the flags that have to follow it on the same shell segment as exact words, and
+    values skipped, with ``forbidden_runs`` trying both arities on options without ``=`` so
+    ``subcommands: ["config"]`` on ``kubectl`` forbids ``kubectl --kubeconfig /tmp/k config
+    get-contexts``, ``kubectl --warnings-as-errors config view``, and ``kubectl -nkube-system
+    config view`` while allowing ``kubectl get configmap config`` and ``kubectl -n
+    kubeagents-system get secret config``), the flags that have to follow it on the same shell
+    segment as exact words, and
     ``word_patterns``, regular expressions each of which some later word of the segment must match
     on its own (``^(?:get|describe)$`` for a verb; a resource list such as
     ``pdb,validatingwebhookconfigurations`` is one word, so a pattern over the word reads it
@@ -2744,7 +2727,7 @@ def _command_word_index(argv: list[str], script: str | None = None) -> int | Non
     return None
 
 
-def _argv_runs(argv: list[str], run: WorkerRun) -> bool:
+def _argv_runs(argv: list[str], run: WorkerRun, *, forbid: bool = False) -> bool:
     """Whether one argv runs ``run.script``: the script is the argv's command word by its
     basename, or follows an interpreter that is (``python3 -m <stem>`` counts, ``python3 -c``
     does not, since the code string runs and the file is its argument); every one of
@@ -2759,7 +2742,7 @@ def _argv_runs(argv: list[str], run: WorkerRun) -> bool:
         return False
     stem = run.script.rsplit(".", 1)[0]
     if os.path.basename(argv[command]) == run.script:
-        return _words_after_carry(argv[command + 1:], run)
+        return _words_after_carry(argv[command + 1:], run, forbid=forbid)
     if not _INTERPRETER_RE.match(os.path.basename(argv[command])):
         return False
     for index in range(command + 1, len(argv)):
@@ -2767,17 +2750,24 @@ def _argv_runs(argv: list[str], run: WorkerRun) -> bool:
         if _INTERPRETER_CODE_FLAG in argv[command + 1:index]:
             return False
         is_script = os.path.basename(word) == run.script or (argv[index - 1] == "-m" and word == stem)
-        if is_script and _words_after_carry(argv[index + 1:], run):
+        if is_script and _words_after_carry(argv[index + 1:], run, forbid=forbid):
             return True
     return False
 
 
-def _positional_words(words: list[str]) -> list[str]:
-    """The positional words after a command in order, options, redirects and their values skipped."""
-    positionals: list[str] = []
-    takes_value = False
+def _subcommands_match(words: list[str], subcommands: list[str], *, forbid: bool = False) -> bool:
+    """Whether ``words`` opens with ``subcommands`` as leading positional words once options,
+    redirects and their values are skipped. An option carrying ``=`` holds its value inline; under
+    the single reading used for ``required_runs`` (``forbid=False``), ``--no-*`` and short options
+    longer than ``-x`` (``-nkube-system``, ``-v6``) also take no value word and any other option
+    before ``--`` takes one. Under ``forbidden_runs`` (``forbid=True``), any option without ``=``
+    has unknown arity without the CLI's flag table, so both arities (``0`` and ``1``) are tried and
+    the run matches if either reading places ``subcommands`` at the front."""
+    if not subcommands:
+        return True
+    target = len(subcommands)
+    states: set[tuple[int, bool, bool]] = {(0, False, False)}
     redirect_target = False
-    options_ended = False
     for index, word in enumerate(words):
         if _is_redirect(word) or (word.isdigit() and index + 1 < len(words) and _is_redirect(words[index + 1])):
             redirect_target = not word.isdigit()
@@ -2785,31 +2775,48 @@ def _positional_words(words: list[str]) -> list[str]:
         if redirect_target:
             redirect_target = False
             continue
-        if options_ended:
-            positionals.append(word)
-            continue
-        if word == _SHELL_OPTIONS_END:
-            options_ended = True
-            takes_value = False
-            continue
-        if word != _SHELL_FLAG_PREFIX and word.startswith(_SHELL_FLAG_PREFIX):
-            takes_value = (
-                _FLAG_VALUE_SEPARATOR not in word
-                and not word.startswith(_CLI_NEGATED_FLAG_PREFIX)
-                and word not in _CLI_BOOLEAN_FLAGS
-            )
-            continue
-        if takes_value:
-            takes_value = False
-            continue
-        positionals.append(word)
-    return positionals
+        next_states: set[tuple[int, bool, bool]] = set()
+        for matched, takes_value, options_ended in states:
+            if options_ended:
+                if word == subcommands[matched]:
+                    if matched + 1 == target:
+                        return True
+                    next_states.add((matched + 1, False, True))
+                continue
+            if word == _SHELL_OPTIONS_END:
+                next_states.add((matched, False, True))
+                if takes_value and forbid:
+                    next_states.add((matched, False, False))
+                continue
+            if word != _SHELL_FLAG_PREFIX and word.startswith(_SHELL_FLAG_PREFIX):
+                if _FLAG_VALUE_SEPARATOR in word:
+                    next_states.add((matched, False, False))
+                elif forbid:
+                    next_states.add((matched, False, False))
+                    next_states.add((matched, True, False))
+                else:
+                    inline = word.startswith(_CLI_NEGATED_FLAG_PREFIX) or (
+                        not word.startswith(_SHELL_OPTIONS_END) and len(word) > _SHORT_FLAG_LEN
+                    )
+                    next_states.add((matched, not inline, False))
+                continue
+            if takes_value:
+                next_states.add((matched, False, False))
+                continue
+            if word == subcommands[matched]:
+                if matched + 1 == target:
+                    return True
+                next_states.add((matched + 1, False, False))
+        states = next_states
+        if not states:
+            return False
+    return False
 
 
-def _words_after_carry(words: list[str], run: WorkerRun) -> bool:
+def _words_after_carry(words: list[str], run: WorkerRun, *, forbid: bool = False) -> bool:
     """Whether the words after the script open with ``run.subcommands`` as positional words, carry
     every flag as an exact word and, for every word pattern, some word that matches it on its own."""
-    if run.subcommands and _positional_words(words)[: len(run.subcommands)] != run.subcommands:
+    if run.subcommands and not _subcommands_match(words, run.subcommands, forbid=forbid):
         return False
     return all(flag in words for flag in run.flags) and all(any(re.search(pattern, word) for word in words) for pattern in run.word_patterns)
 
@@ -3024,7 +3031,10 @@ class WorkerCommandsVerifier(BaseVerifier):
     its target -- and a program behind one that is not the script, a shell or an
     interpreter (``sudo ls``, ``nohup echo``) is a command of its own, not a run;
     which flags take a value is not tabled, so the word after a bare flag is
-    read as its value (``sudo -n ls <script> --readiness`` is still credited);
+    read as its value in ``required_runs`` (``sudo -n ls <script> --readiness``
+    is still credited), while ``forbidden_runs`` tries both arities on an
+    option without ``=`` ahead of ``subcommands`` so an untabled boolean flag
+    cannot hide a forbidden subcommand;
     and a run made through a script file or a shell's standard input
     (``bash run.sh``, ``nohup bash /tmp/run.sh &``, ``echo "<command>" | bash``,
     ``bash -s < run.sh``) is not read as one, since the argv names the file or
@@ -3228,7 +3238,7 @@ class WorkerCommandsVerifier(BaseVerifier):
         argvs = [argv for c in commands for argv in _shell_argvs(c)]
         typed_argvs = [argv for c in typed for argv in _shell_argvs(c)]
         unrun = [run for run in self.required_runs if not any(_argv_runs(argv, run) for argv in argvs)]
-        ran = [(run, argv) for run in self.forbidden_runs for argv in typed_argvs if _argv_runs(argv, run)]
+        ran = [(run, argv) for run in self.forbidden_runs for argv in typed_argvs if _argv_runs(argv, run, forbid=True)]
         observed_count = observed_floor if unjoined_count else len(windowed)
         too_many = self.max_commands is not None and observed_count > self.max_commands
         unjoined_ambiguous = (

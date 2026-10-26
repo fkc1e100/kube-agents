@@ -8969,32 +8969,61 @@ def test_worker_run_subcommands_match_leading_positionals_only():
         "kubectl config get-contexts",
         "kubectl --kubeconfig /tmp/k config get-contexts",
         "kubectl --kubeconfig=/tmp/k -n default config view",
+        "kubectl -nkube-system config view",
+        "kubectl -v6 config current-context",
+        "kubectl -An kube-system config view",
         "kubectl --warnings-as-errors config get-contexts",
         "kubectl --insecure-skip-tls-verify config current-context",
+        'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
         "kubectl 2>/dev/null config current-context",
         "kubectl -- config current-context",
     ):
-        assert any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(hit)), hit
+        assert any(_argv_runs(argv, kubectl_config, forbid=True) for argv in _shell_argvs(hit)), hit
     for miss in (
         "kubectl get configmap config -n kubeagents-system",
         "kubectl -n kubeagents-system get secret config -o yaml",
+        "kubectl -nkube-system get secret config -o yaml",
         "kubectl exec deploy/platform-agent -- cat config",
-        "kubectl -n config get pods",
         "kubectl -A get configmap config",
         "printenv KUBE_CONTEXT_NAME # not kubectl config current-context",
     ):
-        assert not any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(miss)), miss
+        assert not any(_argv_runs(argv, kubectl_config, forbid=True) for argv in _shell_argvs(miss)), miss
+
+    for strict_hit in (
+        "kubectl config current-context",
+        "kubectl --kubeconfig /tmp/k config get-contexts",
+        "kubectl --kubeconfig=/tmp/k -n default config view",
+        "kubectl -nkube-system config view",
+        "kubectl -v6 config current-context",
+        "kubectl --no-headers config get-contexts",
+        "kubectl 2>/dev/null config current-context",
+        "kubectl -- config current-context",
+    ):
+        assert any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(strict_hit)), strict_hit
+    for strict_miss in (
+        "kubectl --trace-log config view",
+        "kubectl -n config get pods",
+        "kubectl get configmap config -n kubeagents-system",
+        "kubectl -n kubeagents-system get secret config -o yaml",
+    ):
+        assert not any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(strict_miss)), strict_miss
 
     gcloud_clusters_list = WorkerRun(script="gcloud", subcommands=["container", "clusters", "list"])
     for hit in (
         "gcloud container clusters list --project example-project",
         "gcloud --project example-project container --region us-central1 clusters list",
         "gcloud -q --no-user-output-enabled container clusters list",
+        "gcloud --trace-log container clusters list",
+        'echo "$GKE_CLUSTER_NAME $(gcloud --trace-log container clusters list)"',
     ):
-        assert any(_argv_runs(argv, gcloud_clusters_list) for argv in _shell_argvs(hit)), hit
+        assert any(_argv_runs(argv, gcloud_clusters_list, forbid=True) for argv in _shell_argvs(hit)), hit
+    assert not any(
+        _argv_runs(argv, gcloud_clusters_list, forbid=True)
+        for argv in _shell_argvs("gcloud container clusters describe list --zone us-central1-a")
+    )
     assert not any(
         _argv_runs(argv, gcloud_clusters_list)
-        for argv in _shell_argvs("gcloud container clusters describe list --zone us-central1-a")
+        for argv in _shell_argvs("gcloud --trace-log container clusters list")
     )
 
     for bad in (["--config"], ["container clusters"], [""]):
@@ -9004,6 +9033,16 @@ def test_worker_run_subcommands_match_leading_positionals_only():
     _stash_commands(["kubectl get configmap config -n kubeagents-system"])
     missing = WorkerCommandsVerifier(type="worker_commands", required_runs=[kubectl_config]).verify(5.0)
     assert missing.status == "fail" and "no worker command ran kubectl config across 1 command(s)" in missing.reason
+
+    deny = WorkerCommandsVerifier(type="worker_commands", forbidden_runs=[kubectl_config, gcloud_clusters_list])
+    for forbidden_cmd in (
+        'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
+        "gcloud --trace-log container clusters list",
+    ):
+        _stash_commands([forbidden_cmd])
+        assert deny.verify(5.0).status == "fail", forbidden_cmd
+    _stash_commands(["kubectl -n kubeagents-system get secret config -o yaml"])
+    assert deny.verify(5.0).status == "pass"
 
 
 def test_worker_commands_max_commands_bounds_run_and_window():

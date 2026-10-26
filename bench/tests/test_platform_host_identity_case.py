@@ -44,9 +44,11 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
 3. ``the-worker-did-not-hunt-for-the-host`` enforces the single-call contract
    (``max_commands: 1`` plus Hermes's collapsed-chain card-log suffix ``+ N
    command(s)``) and rejects ``kubectl config`` subcommands and ``gcloud
-   container clusters list`` on argv (without false-positiving on ``kubectl get
-   configmap config``, ``kubectl -n config get pods``, or shell comments) as
-   well as ``find /...`` and console-link helper searches.
+   container clusters list`` on argv (including behind attached short options
+   such as ``-nkube-system`` or untabled boolean flags such as ``--trace-log``,
+   without false-positiving on ``kubectl get configmap config``, ``kubectl -n
+   kubeagents-system get secret config``, or shell comments) as well as
+   ``find /...`` and console-link helper searches.
 """
 
 from __future__ import annotations
@@ -286,8 +288,9 @@ NON_ENV_READ_COMMANDS = [
 ALLOWED_NO_HUNT_COMMANDS = [
     "kubectl get configmap config -n kubeagents-system",
     "kubectl -n kubeagents-system get secret config -o yaml",
+    "kubectl -nkube-system get secret config -o yaml",
+    "kubectl -ojson get configmap config",
     "kubectl exec deploy/platform-agent -- cat config",
-    "kubectl -n config get pods",
     "gcloud container clusters describe list --zone us-central1-a",
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
     'grep -r "kubectl config" /opt/defaults/skills',
@@ -300,9 +303,13 @@ FORBIDDEN_WORKER_COMMANDS = [
     "kubectl config view --minify",
     "kubectl --kubeconfig /tmp/k config get-contexts",
     "kubectl --warnings-as-errors config get-contexts",
+    "kubectl -nkube-system config view",
+    "kubectl -v6 config current-context",
+    'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
     "gcloud container clusters list --project example-project",
     "gcloud --project example-project container clusters list",
     "gcloud --quiet beta container clusters list",
+    "gcloud --trace-log container clusters list",
     "find / -name gcp-console-links.md 2>/dev/null",
     "find /opt/defaults -name '*console*'",
     "find /",
@@ -566,3 +573,13 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
     assert chain_statuses[ENV_READ] == "pass"
     assert chain_statuses[NO_HUNT] == "fail"
     assert chain_correctness == 0.75
+
+    # Single-command substitution hunt behind attached short flags or untabled boolean flags -> 0.75.
+    for embedded_hunt in (
+        'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(kubectl -nkube-system config current-context)"',
+        'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(gcloud --trace-log container clusters list)"',
+    ):
+        sub_statuses, sub_correctness = score_run(VALID_REPORTS[1], [embedded_hunt])
+        assert sub_statuses[ENV_READ] == "pass", embedded_hunt
+        assert sub_statuses[NO_HUNT] == "fail", embedded_hunt
+        assert sub_correctness == 0.75, embedded_hunt
