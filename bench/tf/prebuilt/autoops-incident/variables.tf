@@ -175,15 +175,18 @@ variable "wait_for" {
   }
 }
 
-# Seconds to sleep after `fire` so the asynchronous `k8s-evt-*` front-door turn
-# has time to emit its `kanban_create` call(s) before the eval prompt's
-# non-blocking `kanban_list` search begins (same settle pattern as
-# bench/tf/prebuilt/triage-start-burst). Defaults to 0 so single-card cases keep
-# their existing timing; multi-card cases (`INCIDENT_TRIAGE_OPEN_PULL_REQUEST`)
-# set 40s because filing two cards takes ~20s after `fire`.
+# Seconds to sleep after the watcher poll before handing control to the agent
+# turn (same settle pattern as bench/tf/prebuilt/triage-start-burst). The
+# front-door reader (`default` profile) has no `sleep` tool and is not held in
+# `_await_delegated_work` when it files no cards of its own, so a fast burst of
+# `kanban_list`/`kanban_show` reads can exhaust its turn while sequential cards
+# (such as `INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true`'s triage card followed by
+# its parented Pull Request card) are still running. Defaults to 0 so
+# single-card cases keep their existing timing; multi-card cases size this as a
+# wall-clock head start for card execution before the board read starts.
 variable "start_settle_seconds" {
   type        = number
-  description = "Seconds to wait after k8s-event-watcher logs fire so the incident turn can file its kanban cards."
+  description = "Seconds to wait after the watcher poll before the agent turn so filed incident cards have a head start toward completion before the board read starts."
   default     = 0
 }
 

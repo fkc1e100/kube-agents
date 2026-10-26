@@ -503,16 +503,18 @@ resource "null_resource" "incident" {
         fi
       fi
       if [ "${var.start_settle_seconds}" -gt 0 ]; then
-        echo "Waiting ${var.start_settle_seconds}s for the incident turn to file its cards."
+        echo "Waiting ${var.start_settle_seconds}s for the incident cards to settle before the board read."
         sleep "${var.start_settle_seconds}"
       fi
 
-      # After a `fire` line the card is filed within seconds and then takes
-      # minutes to run; after a `folded` one no card is filed for this run.
-      # Waiting for the card HERE would mean reading the Platform Agent pod's
-      # SQLite board over `kubectl exec`, coupling a bench fixture to an
-      # internal file path; a task's prompt reads the board through the kanban
-      # tools instead, which is the read path the product actually offers.
+      # After a `fire` line the incident turn files its card(s) within seconds
+      # and each card then takes minutes to run (sequentially when a follow-up
+      # card is parented on the triage card); after a `folded` line no card is
+      # filed for this run. `start_settle_seconds` is an optional wall-clock
+      # head start before the reader turn begins; polling for completion HERE
+      # would mean reading the Platform Agent pod's SQLite board over
+      # `kubectl exec`, coupling a bench fixture to an internal file path, so a
+      # task's prompt reads and re-checks the board through the kanban tools.
     EOT
   }
 

@@ -32,6 +32,11 @@ infrastructure:
     workload_name: "eval-open-pr-workload"
     memory_limit_mib: 64
     allocate_mib: 96
+    # Wall-clock head start after `fire` so the sequential Cluster Agent triage
+    # card and parented `Open GitOps PR` card normally finish (or nearly finish)
+    # before the non-sleeping front-door reader turn begins polling the board;
+    # if a slower install exceeds this plus the reader's in-turn polling budget,
+    # raise this value.
     start_settle_seconds: 180
 
 validated: false
@@ -52,9 +57,8 @@ prompt: |
   1. Call `kanban_list` separately for status 'todo', 'ready', 'running', 'done'
      and 'blocked' (never without a status filter) to find the most recent
      triage card and its follow-up 'Open GitOps PR' card concerning the
-     'eval-autoops-open-pr' namespace. The incident turn takes up to a minute
-     after the event fires to file both cards, so keep re-checking `kanban_list`
-     until both cards appear rather than stopping early.
+     'eval-autoops-open-pr' namespace; if either card has not appeared yet, keep
+     re-checking `kanban_list` until both cards appear rather than stopping early.
   2. Call `kanban_show` on both card IDs and keep re-checking until both the
      triage card and its follow-up Pull Request card reach 'done', 'blocked' or
      'archived'. This normally takes several minutes; keep waiting rather than

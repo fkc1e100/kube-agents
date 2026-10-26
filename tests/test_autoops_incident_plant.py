@@ -144,8 +144,9 @@ exit 0
 
 #: The plant polls on 10-second sleeps and its timeouts are minutes long.
 #: `STUB_SLEEP` buys back a little real time for the signal test, which needs
-#: the script still running when it sends SIGTERM.
-_SLEEP_STUB = '#!/bin/bash\nexec /bin/sleep "${STUB_SLEEP:-0}"\n'
+#: the script still running when it sends SIGTERM. Every invocation is recorded
+#: to $CALLS so tests can assert settle sleeps and ordering after the poll.
+_SLEEP_STUB = '#!/bin/bash\necho "sleep $*" >> "$CALLS"\nexec /bin/sleep "${STUB_SLEEP:-0}"\n'
 
 #: Bounds for the signal test's two waits -- for the plant to reach the watcher
 #: poll, and for it to finish once signalled. Generous, because blowing either
@@ -154,7 +155,7 @@ _SIGNAL_TIMEOUT_SECONDS = 60
 _SIGNAL_POLL_SECONDS = 0.05
 
 
-def _render_plant() -> str:
+def _render_plant(overrides: "dict[str, str] | None" = None) -> str:
     """Render the create-time provisioner the way Terraform would.
 
     `<<-EOT` strips the indentation common to every line -- which matters, since
@@ -170,14 +171,17 @@ def _render_plant() -> str:
     sentinel = "\x00"
     body = body.replace("$${", sentinel)
 
+    interpolations = dict(_INTERPOLATIONS)
+    if overrides:
+        interpolations.update(overrides)
     unresolved = []
 
     def substitute(match: "re.Match[str]") -> str:
         expression = match.group(1).strip()
-        if expression not in _INTERPOLATIONS:
+        if expression not in interpolations:
             unresolved.append(expression)
             return match.group(0)
-        return _INTERPOLATIONS[expression]
+        return interpolations[expression]
 
     body = re.sub(r"\$\{([^}]*)\}", substitute, body)
     body = body.replace(sentinel, "${")
@@ -459,6 +463,47 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
         completed, _ = self._run(NS_EXISTS_RC=0, NS_DELETE_RC=1)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("could not clear the leftover", completed.stderr)
+
+    def test_start_settle_seconds_waits_after_watcher_poll_only_when_positive(self):
+        # At the default 0, single-card cases pay no extra sleep after `fire`.
+        completed, calls = self._run()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("Waiting ", completed.stdout)
+        logs_calls = self._indices(calls, "logs ")
+        self.assertTrue(logs_calls, f"no watcher poll ran:\n{chr(10).join(calls)}")
+        self.assertEqual(
+            [i for i in self._indices(calls, "sleep ") if i > max(logs_calls)],
+            [],
+            f"the default 0s plant slept after the watcher poll:\n{chr(10).join(calls)}",
+        )
+
+        # With a positive settle duration, the plant prints its settle line and
+        # sleeps strictly after `k8s-event-watcher` handles the pod.
+        self._calls.unlink(missing_ok=True)
+        settled = _render_plant({"var.start_settle_seconds": "7"})
+        self.assertNotEqual(settled, self._plant)
+        self._script.write_text(settled)
+        completed, calls = self._run()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        handled_msg = "k8s-event-watcher handled a pod"
+        waiting_msg = "Waiting 7s for the incident cards to settle before the board read."
+        self.assertIn(handled_msg, completed.stdout)
+        self.assertIn(waiting_msg, completed.stdout)
+        self.assertLess(
+            completed.stdout.index(handled_msg),
+            completed.stdout.index(waiting_msg),
+        )
+        logs_calls = self._indices(calls, "logs ")
+        settle_sleeps = self._indices(calls, "sleep 7")
+        self.assertTrue(logs_calls, f"no watcher poll ran:\n{chr(10).join(calls)}")
+        self.assertTrue(
+            settle_sleeps, f"no `sleep 7` settle ran:\n{chr(10).join(calls)}"
+        )
+        self.assertLess(
+            max(logs_calls),
+            settle_sleeps[0],
+            f"`sleep 7` ran before the watcher poll finished:\n{chr(10).join(calls)}",
+        )
 
 
 if __name__ == "__main__":
