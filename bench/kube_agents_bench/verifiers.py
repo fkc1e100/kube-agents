@@ -5051,6 +5051,13 @@ class PullRequestOpenedVerifier(BaseVerifier):
     # meant to protect. Listed from `/pulls/{n}/files`, so the credential needs
     # `pull_requests: read`.
     unchanged_paths: list[str] = Field(default_factory=list)
+    # Repository paths, as `fnmatch` globs, that exhaust what the pull request
+    # may change: every `filename` and `previous_filename` in `/pulls/{n}/files`
+    # must match at least one glob here. Use when a case knows the exact synced
+    # manifest(s) a targeted remediation touches and must reject bundling any
+    # other path in the repository without enumerating every possible sibling
+    # directory in `unchanged_paths`.
+    changed_paths_only: list[str] | None = Field(default=None, min_length=1)
     # Repository paths, as `fnmatch` globs, the pull request must delete: each
     # glob is matched by at least one file the pull request lists as
     # `removed`. A delete reaches review as the removal of the manifest that
@@ -5999,7 +6006,7 @@ class PullRequestOpenedVerifier(BaseVerifier):
                         "delete that leaves the declaration keeps the object"
                     )
                     continue
-            if self.unchanged_paths:
+            if self.unchanged_paths or self.changed_paths_only is not None:
                 try:
                     paths, unevaluable = self._changed_paths(owner, repo, number, token, budget)
                 except OSError as exc:
@@ -6008,17 +6015,50 @@ class PullRequestOpenedVerifier(BaseVerifier):
                 if unevaluable:
                     unresolved.append(unevaluable)
                     continue
-                touched_kept = sorted(
-                    path for path in paths
-                    if any(fnmatch.fnmatchcase(path, pattern) for pattern in self.unchanged_paths)
-                )
-                if touched_kept:
-                    rejected.append(
-                        f"{slug}: changes {', '.join(touched_kept)}, which this case "
-                        "requires the fix to leave unchanged (`unchanged_paths`) -- a "
-                        "remediation written over the workload's own declaration"
+                if changed is not None and changed > _PR_FILES_MAX_PAGES * _PR_FILES_PAGE_SIZE:
+                    unresolved.append(
+                        f"{slug} changes {changed} files, past GitHub's "
+                        f"{_PR_FILES_MAX_PAGES * _PR_FILES_PAGE_SIZE}-file listing cap, "
+                        "so path checks could not inspect the full diff"
                     )
                     continue
+                if self.unchanged_paths:
+                    touched_kept = sorted(
+                        {
+                            path for path in paths
+                            if any(fnmatch.fnmatchcase(path, pattern) for pattern in self.unchanged_paths)
+                        }
+                    )
+                    if touched_kept:
+                        rejected.append(
+                            f"{slug}: changes {', '.join(touched_kept)}, which this case "
+                            "requires the fix to leave unchanged (`unchanged_paths`) -- a "
+                            "remediation written over the workload's own declaration"
+                        )
+                        continue
+                if self.changed_paths_only is not None:
+                    if not paths:
+                        unresolved.append(
+                            f"GitHub returned an empty files listing for {slug} despite "
+                            f"changed_files={changed}, so `changed_paths_only` could not be evaluated"
+                        )
+                        continue
+                    outside_allowed = sorted(
+                        {
+                            path for path in paths
+                            if not any(
+                                fnmatch.fnmatchcase(path, pattern)
+                                for pattern in self.changed_paths_only
+                            )
+                        }
+                    )
+                    if outside_allowed:
+                        rejected.append(
+                            f"{slug}: changes {', '.join(outside_allowed)}, outside the "
+                            f"allowed path(s) {', '.join(self.changed_paths_only)} "
+                            "(`changed_paths_only`)"
+                        )
+                        continue
             if self.content:
                 try:
                     texts, unevaluable = self._head_files(owner, repo, number, token, budget)

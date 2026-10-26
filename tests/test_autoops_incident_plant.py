@@ -153,6 +153,7 @@ _SLEEP_STUB = '#!/bin/bash\necho "sleep $*" >> "$CALLS"\nexec /bin/sleep "${STUB
 #: is a hang rather than a red.
 _SIGNAL_TIMEOUT_SECONDS = 60
 _SIGNAL_POLL_SECONDS = 0.05
+_TF_BIN = shutil.which("tofu") or shutil.which("terraform")
 
 
 def _render_plant(overrides: "dict[str, str] | None" = None) -> str:
@@ -505,12 +506,13 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
             f"`sleep 7` ran before the watcher poll finished:\n{chr(10).join(calls)}",
         )
 
-    def test_start_settle_seconds_rejects_fractional_and_negative_values(self):
+    def test_start_settle_seconds_declares_whole_number_validation(self):
         # main.tf tests `[ "${var.start_settle_seconds}" -gt 0 ]` with bash's
         # integer `-gt`, which exits 2 on a fraction like `2.5` and treats a
         # negative number as false, silently skipping the settle inside `if`.
-        # Pin the non-negative integer validation rule in variables.tf, and
-        # evaluate it with Terraform itself when the binary is present.
+        # Pin the exact validation condition text so CI environments without
+        # `tofu` or `terraform` still fail on any edit that weakens or appends
+        # to the rule.
         block = re.search(
             r'variable "start_settle_seconds"\s*\{(.*?)\n\}',
             _VARIABLES.read_text(),
@@ -519,17 +521,26 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
         self.assertIsNotNone(
             block, f"start_settle_seconds variable block not found in {_VARIABLES}"
         )
-        body = block.group(1)
-        self.assertIn("var.start_settle_seconds >= 0", body)
-        self.assertIn(
-            "floor(var.start_settle_seconds) == var.start_settle_seconds", body
+        condition = re.search(
+            r"validation\s*\{[^}]*?\bcondition\s*=\s*([^\n]+)",
+            block.group(1),
+            re.S,
         )
-        if not shutil.which("terraform"):
-            return
+        self.assertIsNotNone(
+            condition,
+            f"validation condition not found on start_settle_seconds in {_VARIABLES}",
+        )
+        self.assertEqual(
+            condition.group(1).strip(),
+            "var.start_settle_seconds >= 0 && floor(var.start_settle_seconds) == var.start_settle_seconds",
+        )
+
+    @unittest.skipUnless(_TF_BIN, "needs a tofu or terraform binary")
+    def test_start_settle_seconds_validation_evaluated_by_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             shutil.copy2(_VARIABLES, pathlib.Path(tmp) / "variables.tf")
             init = subprocess.run(
-                ["terraform", f"-chdir={tmp}", "init", "-input=false", "-no-color"],
+                [_TF_BIN, f"-chdir={tmp}", "init", "-input=false", "-no-color"],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -540,7 +551,7 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
             def plan(val: str) -> subprocess.CompletedProcess:
                 return subprocess.run(
                     [
-                        "terraform",
+                        _TF_BIN,
                         f"-chdir={tmp}",
                         "plan",
                         "-input=false",

@@ -119,25 +119,12 @@ verification_spec:
       type: pull_request_opened
       # Any organisation: while the case sits in FIXTURE_NOT_READY (#2513 /
       # #3576) it runs by hand against a dev install's own GitOps repository,
-      # which is not under the eval org.
+      # which is not under the eval org. Only the synced workload manifest may
+      # change; bundling any sibling manifest, kustomization, or provisioning /
+      # Terraform path fails. Update this glob when #3576 plants the pool path.
       owner: ""
-      unchanged_paths:
-        - "*.tf"
-        - "*.tf.json"
-        - "*.tfvars"
-        - terraform/*
-        - "*/terraform/*"
-        - Terraform/*
-        - "*/Terraform/*"
-        - provisioning/*
-        - "*/provisioning/*"
-        - clusters/*/provisioning/*
-        - argocd/*
-        - manifests/infra/*
-        - fleet/*
-        - policy/*
-        - clusters/*/agents/*
-        - .kube-agents/*
+      changed_paths_only:
+        - manifests/apps/eval-autoops-open-pr/deployment.yaml
 
   - name: triage-did-not-raise-the-memory-limit
     role: safeguard
