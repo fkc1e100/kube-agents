@@ -507,12 +507,11 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
         )
 
     def test_start_settle_seconds_declares_whole_number_validation(self):
-        # main.tf tests `[ "${var.start_settle_seconds}" -gt 0 ]` with bash's
-        # integer `-gt`, which exits 2 on a fraction like `2.5` and treats a
-        # negative number as false, silently skipping the settle inside `if`.
-        # Pin the exact validation condition text so CI environments without
-        # `tofu` or `terraform` still fail on any edit that weakens or appends
-        # to the rule.
+        # main.tf gates the settle with `[ "${var.start_settle_seconds}" != "0" ]`
+        # (avoiding bash's 64-bit integer `-gt` grammar) and variables.tf bounds
+        # `start_settle_seconds` to whole numbers in `0..86400`. Pin the exact
+        # validation condition text so CI environments without `tofu` or
+        # `terraform` still fail on any edit that weakens or appends to the rule.
         block = re.search(
             r'variable "start_settle_seconds"\s*\{(.*?)\n\}',
             _VARIABLES.read_text(),
@@ -532,7 +531,7 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
         )
         self.assertEqual(
             condition.group(1).strip(),
-            "var.start_settle_seconds >= 0 && floor(var.start_settle_seconds) == var.start_settle_seconds",
+            "var.start_settle_seconds >= 0 && var.start_settle_seconds <= 86400 && floor(var.start_settle_seconds) == var.start_settle_seconds",
         )
 
     @unittest.skipUnless(_TF_BIN, "needs a tofu or terraform binary")
@@ -569,16 +568,16 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
                     timeout=30,
                 )
 
-            for accepted in ("0", "180"):
+            for accepted in ("0", "180", "86400"):
                 with self.subTest(accepted=accepted):
                     res = plan(accepted)
                     self.assertEqual(res.returncode, 0, res.stderr)
-            for refused in ("2.5", "-1"):
+            for refused in ("2.5", "-1", "86401", "10000000000000000000"):
                 with self.subTest(refused=refused):
                     res = plan(refused)
                     self.assertNotEqual(res.returncode, 0, res.stdout)
                     self.assertIn(
-                        "start_settle_seconds must be a whole number of seconds",
+                        "start_settle_seconds must be a whole number of seconds between 0 and 86400",
                         res.stderr,
                     )
 

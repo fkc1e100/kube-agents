@@ -5126,9 +5126,22 @@ class PullRequestOpenedVerifier(BaseVerifier):
         return texts, None
 
     def _file_entries(
-        self, owner: str, repo: str, number: int, token: str, budget: float
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        token: str,
+        budget: float,
+        *,
+        changed: int | None = None,
     ) -> tuple[list[dict], str | None]:
         """``(the entries of /pulls/{n}/files, unevaluable reason)``."""
+        cap = _PR_FILES_MAX_PAGES * _PR_FILES_PAGE_SIZE
+        if changed is not None and changed > cap:
+            return [], (
+                f"{owner}/{repo}#{number} changes {changed} files, past GitHub's "
+                f"{cap}-file listing cap, so path checks could not inspect the full diff"
+            )
         base = f"{forges.github_api_root()}/repos/{owner}/{repo}/pulls/{number}/files"
         entries: list[dict] = []
         for page in range(1, _PR_FILES_MAX_PAGES + 1):
@@ -5144,17 +5157,32 @@ class PullRequestOpenedVerifier(BaseVerifier):
             entries += [entry for entry in files if isinstance(entry, dict)]
             if len(files) < _PR_FILES_PAGE_SIZE:
                 break
+        else:
+            return [], (
+                f"{owner}/{repo}#{number} filled all {_PR_FILES_MAX_PAGES} pages of "
+                f"{_PR_FILES_PAGE_SIZE} files ({cap}-file listing cap), so path checks "
+                "could not inspect the full diff"
+            )
         return entries, None
 
     def _changed_paths(
-        self, owner: str, repo: str, number: int, token: str, budget: float
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        token: str,
+        budget: float,
+        *,
+        changed: int | None = None,
     ) -> tuple[list[str], str | None]:
         """``(paths the pull request changes, unevaluable reason)``.
 
         A rename counts under both names: moving the declaration away is as
         much a change to it as rewriting it.
         """
-        entries, unevaluable = self._file_entries(owner, repo, number, token, budget)
+        entries, unevaluable = self._file_entries(
+            owner, repo, number, token, budget, changed=changed
+        )
         paths = [
             str(entry[key])
             for entry in entries
@@ -5164,14 +5192,23 @@ class PullRequestOpenedVerifier(BaseVerifier):
         return paths, unevaluable
 
     def _removed_paths(
-        self, owner: str, repo: str, number: int, token: str, budget: float
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        token: str,
+        budget: float,
+        *,
+        changed: int | None = None,
     ) -> tuple[list[str], str | None]:
         """``(paths the pull request deletes, unevaluable reason)``.
 
         Only status `removed` counts. A rename moves the declaration rather
         than deleting it, so a renamed file's old name is not a removal.
         """
-        entries, unevaluable = self._file_entries(owner, repo, number, token, budget)
+        entries, unevaluable = self._file_entries(
+            owner, repo, number, token, budget, changed=changed
+        )
         removed = [
             str(entry["filename"])
             for entry in entries
@@ -5992,7 +6029,9 @@ class PullRequestOpenedVerifier(BaseVerifier):
                     continue
             if self.removed_paths:
                 try:
-                    removed, unevaluable = self._removed_paths(owner, repo, number, token, budget)
+                    removed, unevaluable = self._removed_paths(
+                        owner, repo, number, token, budget, changed=changed
+                    )
                 except OSError as exc:
                     unresolved.append(f"could not reach the GitHub API for {slug}: {exc}")
                     continue
@@ -6012,19 +6051,14 @@ class PullRequestOpenedVerifier(BaseVerifier):
                     continue
             if self.unchanged_paths or self.changed_paths_only is not None:
                 try:
-                    paths, unevaluable = self._changed_paths(owner, repo, number, token, budget)
+                    paths, unevaluable = self._changed_paths(
+                        owner, repo, number, token, budget, changed=changed
+                    )
                 except OSError as exc:
                     unresolved.append(f"could not reach the GitHub API for {slug}: {exc}")
                     continue
                 if unevaluable:
                     unresolved.append(unevaluable)
-                    continue
-                if changed is not None and changed > _PR_FILES_MAX_PAGES * _PR_FILES_PAGE_SIZE:
-                    unresolved.append(
-                        f"{slug} changes {changed} files, past GitHub's "
-                        f"{_PR_FILES_MAX_PAGES * _PR_FILES_PAGE_SIZE}-file listing cap, "
-                        "so path checks could not inspect the full diff"
-                    )
                     continue
                 if self.unchanged_paths:
                     touched_kept = sorted(

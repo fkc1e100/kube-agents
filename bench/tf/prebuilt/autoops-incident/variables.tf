@@ -190,8 +190,8 @@ variable "start_settle_seconds" {
   default     = 0
 
   validation {
-    condition     = var.start_settle_seconds >= 0 && floor(var.start_settle_seconds) == var.start_settle_seconds
-    error_message = "start_settle_seconds must be a whole number of seconds, 0 or more: the plant tests it with bash's integer -gt, which rejects a fraction and silently skips the settle."
+    condition     = var.start_settle_seconds >= 0 && var.start_settle_seconds <= 86400 && floor(var.start_settle_seconds) == var.start_settle_seconds
+    error_message = "start_settle_seconds must be a whole number of seconds between 0 and 86400."
   }
 }
 

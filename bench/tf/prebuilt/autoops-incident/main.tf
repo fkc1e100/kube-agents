@@ -502,7 +502,7 @@ resource "null_resource" "incident" {
           echo "k8s-event-watcher sent the quiet follow-up for ${local.ns} after $${elapsed}s."
         fi
       fi
-      if [ "${var.start_settle_seconds}" -gt 0 ]; then
+      if [ "${var.start_settle_seconds}" != "0" ]; then
         echo "Waiting ${var.start_settle_seconds}s for the incident cards to settle before the board read."
         sleep "${var.start_settle_seconds}"
       fi

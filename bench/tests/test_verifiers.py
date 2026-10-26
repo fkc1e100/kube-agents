@@ -4855,6 +4855,14 @@ def test_removed_paths_unreadable_files_are_unevaluable(token, github):
     assert res.status == "error"
     assert "pull_requests: read" in res.reason
 
+    _stash_pr_report()
+    github.routes[_pr_api()] = (200, _pr_payload())
+    _pr_head_routes(github, changed_files=3001)
+    _pr_files_route(github, *(dict(filename=p, status="removed") for p in _REMOVED))
+    res = _pr_check(removed_paths=_REMOVED).verify(5.0)
+    assert res.status == "error"
+    assert "3000-file listing cap" in res.reason
+
 
 # ---- content: what the pull request writes, read at its head
 
