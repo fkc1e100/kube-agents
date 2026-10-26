@@ -93,7 +93,7 @@ A top-level `toolsets: [kanban]` key exposes the kanban orchestrator surface (`k
 
 ### Plugins
 
-- `hermes_otel` — exports OpenTelemetry traces and metrics to the configured OTLP collector (GKE Managed OTel by default).
+- `hermes_otel` — exports OpenTelemetry traces to the configured OTLP collector (GKE Managed OTel by default).
 - `tool_call_audit` — appends every tool call and approval decision as a structured record to `logs/audit.jsonl`, which the fluent-bit sidecar ships to Cloud Logging ([Concepts → Observability](/kube-agents/concepts/observability/#tool-call-audit)).
 - `incident_context` — registered on both the Platform Agent and Planning Agent profiles; inbound thread replies hit the Planning Agent's gateway, where Kubernetes incident context is injected on reply.
 - `pr_opened` — records each pull or merge request opened by a Platform Agent kanban worker as an event on its card, posting it into the Slack thread as a dedicated message when `KAGE_SLACK_UX` is enabled ([ChatOps](/kube-agents/concepts/chatops/)).
