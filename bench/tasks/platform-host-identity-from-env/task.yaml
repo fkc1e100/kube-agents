@@ -77,44 +77,102 @@ verification_spec:
     check:
       # Under fold_decoration: true, inner underscores become hyphens before
       # _normalize strips Markdown emphasis, so gke_<project>_<location>_<cluster>
-      # arrives as gke-<project>-<location>-<cluster> — and a kanban card ID
-      # like t_f7459698 arrives as t-f7459698. The second pattern requires a
-      # standalone GCP location token (<geo>-<direction><1-2 digits>[-<zone>])
-      # outside that hyphen-joined context so pasting KUBE_CONTEXT_NAME alone
-      # never passes even when a folded card ID starts with hex letters.
+      # arrives as gke-<project>-<location>-<cluster> (with an optional space
+      # after `:` on legacy domain-scoped project IDs like `example.com:my-project`
+      # from _SEPARATOR_NO_SPACE) — and a kanban card ID like t_f7459698 arrives
+      # as t-f7459698. The second pattern requires a standalone GCP location
+      # token (<geo>-<direction><1-2 digits>[-<zone>]) outside that hyphen-joined
+      # context so pasting KUBE_CONTEXT_NAME alone never passes even when a
+      # folded card ID starts with hex letters.
       type: report_contains
       fold_decoration: true
       required_patterns:
-        - '(?<![a-z0-9-])gke-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z]{2,}-(?:central|north|south|east|west|northeast|northwest|southeast|southwest)\d{1,2}(?:-[a-z])?-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?![a-z0-9-])'
+        - '(?<![a-z0-9-])gke-(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?:\s?)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z]{2,}-(?:central|north|south|east|west|northeast|northwest|southeast|southwest)\d{1,2}(?:-[a-z])?-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?![a-z0-9-])'
         - '(?<![a-z0-9-])[a-z]{2,}-(?:central|north|south|east|west|northeast|northwest|southeast|southwest)\d{1,2}(?:-[a-z])?(?![a-z0-9-])'
   - name: the-worker-read-the-forwarded-identity
     role: objective
     mode: assert
     check:
       # Matches an actual environment read of the forwarded host variables —
-      # `printenv <VAR>`, a bare/piped `printenv`/`env` dump, an unescaped
-      # non-single-quoted shell `$VAR`/`${VAR}` expansion, or `python3 -c`
-      # reading `os.environ`/`os.getenv` — while rejecting commands that merely
-      # mention a variable name (`grep KUBE_CONTEXT_NAME`, `kubectl ... | grep
-      # GKE_`, `echo "GKE_CLUSTER_NAME"`) or use `env` as an exec prefix.
-      type: worker_commands
-      required_patterns:
-        - '^\s*(?:/usr/bin/)?printenv(?:\s+(?:-0|--null))*(?:\s+(?:[A-Za-z_][A-Za-z0-9_]*|\x27[A-Za-z_][A-Za-z0-9_]*\x27|\x22[A-Za-z_][A-Za-z0-9_]*\x22))*\s+(?:(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)|\x27(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\x27|\x22(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\x22)(?=\s|\||;|$)|^\s*(?:/usr/bin/)?(?:printenv|env)(?:\s+(?:-0|--null))?\s*(?:\|(?!\|)|;|$)|^(?:[^\x27\\\x22#]|(?<=\S)#|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:\x22(?:[^\x22\\]|\\.)*)?(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^}]*)?\})|^\s*(?:/usr/bin/)?python3?(?:\s+-[A-Za-z0-9]+)*\s+-c\s+(?:\x27(?=[^\x27]*\bos\.(?:environ|getenv)\b)[^\x27]*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b[^\x27]*\x27|\x22(?=(?:[^\x22\\]|\\.)*\bos\.(?:environ|getenv)\b)(?:[^\x22\\]|\\.)*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b(?:[^\x22\\]|\\.)*\x22)'
+      # `printenv <VAR>` or `declare -p`/`typeset -p <VAR>` graded on argv via
+      # `required_runs` (which steps over exec wrappers such as `timeout`,
+      # `env`, `flock`, `--`, and `bash -c '...'`), a bare or piped environment
+      # dump (`printenv`, `env`, `set`, `export [-p]`, `declare -p`, or reading
+      # `/proc/self/environ`), a non-single-quoted shell `$VAR`/`${VAR}`
+      # expansion (outer shell or inside `sh -c`/`bash -c`), or `python3 -c`
+      # reading `os.environ`/`os.getenv` — while rejecting commands that wipe
+      # the environment (`env -i`), read unrelated variables (`printenv PATH`),
+      # merely mention a variable name (`grep KUBE_CONTEXT_NAME`, `echo
+      # GKE_CLUSTER_NAME`, `bash -c 'echo GKE_CLUSTER_NAME'`), or use `env` as a
+      # command-execution prefix (`env KUBECONFIG=... kubectl ...`).
+      type: any
+      checks:
+        - type: worker_commands
+          exempt_patterns: &env_ignore_exempt
+            - '^\s*(?:(?:timeout|nice|nohup|command)\s+(?:-\S+\s+|\d+(?:\.\d+)?[smhd]?\s+)*)*(?:(?:/usr)?/bin/)?env\s+(?:-\S+\s+)*(?:-[a-zA-Z]*i[a-zA-Z]*|--ignore-environment)\b'
+          required_runs:
+            - script: printenv
+              word_patterns:
+                - "^(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)$"
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_runs:
+            - script: declare
+              word_patterns:
+                - "^-[a-zA-Z]*p[a-zA-Z]*$"
+                - "^(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)$"
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_runs:
+            - script: typeset
+              word_patterns:
+                - "^-[a-zA-Z]*p[a-zA-Z]*$"
+                - "^(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)$"
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '^\s*(?:\(\s*)*(?:(?:(?!(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)=)[A-Za-z_][A-Za-z0-9_]*=\S+|(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*))\s+)*(?:(?:(?:/usr)?/bin/)?(?:printenv|env)(?:\s+(?:-0|--null|--))*|set|export(?:\s+-p)?|(?:declare|typeset)(?:\s+-[a-zA-Z]*p[a-zA-Z]*)?)(?=\s*(?:\)|\|(?!\|)|;|&|$))'
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+([\x27\x22])\s*(?:\(\s*)*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:printenv|env)(?:\s+(?:-0|--null|--))*|set|export(?:\s+-p)?|(?:declare|typeset)(?:\s+-[a-zA-Z]*p[a-zA-Z]*)?)(?=\s*(?:\)|\|(?!\|)|;|&|\1))'
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*)?(?:(?:cat|strings|od|xxd|hexdump|head|tail)\s+(?:-[A-Za-z0-9-]+\s+)*|(?:grep|egrep|fgrep|rg|sed|awk|gawk|mawk)\b[^|;&]*?\s+|(?:tr|xargs)\b[^|;&]*?<\s*)(?<![\x27\x22])/proc/(?:self|\$\$|\d+)/environ(?=\s*(?:\||;|&|\x27|\x22|$))'
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '^(?:[^\x27\\\x22#]|(?<=\S)#|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:\x22(?:[^\x22\\]|\\.)*)?(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^}]*)?\})'
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+(?:\x27(?:[^\x27\\\x22#]|(?<=\S)#|\\[^\x27]|\x22(?:[^\x22\x27\\]|\\[^\x27])*\x22)*(?:\x22(?:[^\x22\x27\\]|\\[^\x27])*)?(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^\x27}]*)?\})|\x22(?:[^\x27\\\x22#]|(?<=\S)#|\\\\|\\[^\x22\\$]|\x27[^\x27\x22]*\x27|\\\x22(?:[^\x22\\]|\\\\|\\[^\x22\\$])*\\\x22)*(?:\\\x22(?:[^\x22\\]|\\\\|\\[^\x22\\$])*)?(?<!\\)\\(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^\x22}]*)?\}))'
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*)?(?:(?:/usr)?/bin/)?python3?(?:\s+-[A-Za-z0-9]+)*\s+-c\s+(?:\x27(?=[^\x27]*\bos\b)(?=[^\x27]*\b(?:environ|getenv)\b)[^\x27]*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b[^\x27]*\x27|\x22(?=(?:[^\x22\\]|\\.)*\bos\b)(?=(?:[^\x22\\]|\\.)*\b(?:environ|getenv)\b)(?:[^\x22\\]|\\.)*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b(?:[^\x22\\]|\\.)*\x22)'
   - name: the-worker-did-not-hunt-for-the-host
     role: objective
     mode: assert
     check:
       # The routes the live and red-on-main runs took — a fleet listing, a
       # filesystem search for console-link helpers (or any find rooted at /),
-      # and kubectl config current-context — plus Hermes's collapsed-chain
-      # suffix (` + 1 command`, ` + 2 commands`), which would otherwise hide a
-      # forbidden command chained behind printenv on a front-filed card log.
+      # and any `kubectl config` read (`current-context`, `get-contexts`, etc.)
+      # — plus Hermes's collapsed-chain suffix (` + 1 command`, ` + 2 commands`),
+      # which would otherwise hide a forbidden command chained behind printenv
+      # on a front-filed card log.
       type: worker_commands
+      forbidden_runs:
+        - script: kubectl
+          flags: ["config"]
+        - script: gcloud
+          flags: ["container", "clusters", "list"]
       forbidden_patterns:
         - 'gcloud\s+container\s+clusters\s+list'
         - "gcp-console-links"
         - '\bfind\s+/(?:\s|$)'
-        - 'kubectl\s+config\s+current-context'
+        - 'kubectl\s+config\b'
         - '\s\+\s\d+\s+commands?$'
   # The delegation boundary, as in chat-routing-fleet-question: the front door
   # files the card and never works it.

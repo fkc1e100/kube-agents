@@ -17,27 +17,34 @@
 Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml``:
 
 1. ``the-answer-names-the-host-context`` is install-independent: it passes on
-   both CI's ``platform-agent-host`` and differently named dev host clusters
-   when the reply states a real ``gke_<project>_<location>_<cluster>`` context
-   alongside the cluster's location, relies on ``fold_decoration: true`` so
-   ``_normalize`` does not delete inner underscores before matching, and rejects
-   answers that omit the context, omit the standalone location (even when a
-   folded Kanban card ID like ``t_f7459698`` or ``t_fa123456`` starts with hex
-   letters followed by digits), echo unresolved placeholders, or mention
-   unrelated ``gke-*`` nouns.
-2. ``the-worker-read-the-forwarded-identity`` accepts explicit environment reads
-   of the forwarded variables (``printenv <VAR>``, bare or piped ``printenv``/
-   ``env`` dumps, unescaped non-single-quoted shell ``$VAR``/``${VAR}``
-   expansions, and ``python3 -c`` reading ``os.environ``/``os.getenv``), while
-   rejecting commands that merely mention a variable name (``kubectl ... | grep
-   GKE_``, ``grep -r KUBE_CONTEXT_NAME ...``, ``echo "GKE_CLUSTER_NAME"``,
-   ``echo '$GKE_CLUSTER_NAME'``) or use ``env`` as a command-execution prefix
-   (``env KUBECONFIG=...``, ``env -i ...``, ``env GOOGLE_CLOUD_PROJECT=...``).
+   CI's ``platform-agent-host``, differently named dev host clusters, numeric
+   project IDs, and legacy domain-scoped project IDs
+   (``example.com:my-project``) when the reply states a real
+   ``gke_<project>_<location>_<cluster>`` context alongside the cluster's
+   location, relies on ``fold_decoration: true`` so ``_normalize`` does not
+   delete inner underscores before matching, and rejects answers that omit the
+   context, omit the standalone location (even when a folded Kanban card ID
+   like ``t_f7459698`` or ``t_fa123456`` starts with hex letters followed by
+   digits), echo unresolved placeholders, or mention unrelated ``gke-*`` nouns.
+2. ``the-worker-read-the-forwarded-identity`` accepts genuine single-command
+   environment reads of the forwarded variables (``printenv <VAR>`` and
+   ``declare -p``/``typeset -p <VAR>`` including ``--`` and exec wrappers such
+   as ``timeout``, ``env``, and ``flock``; bare or piped ``printenv``, ``env``,
+   ``set``, ``export [-p]``, ``declare -p``, and ``/proc/self/environ`` dumps;
+   unescaped non-single-quoted shell ``$VAR``/``${VAR}`` expansions in both the
+   outer shell and ``sh -c``/``bash -c``; and ``python3 -c`` reading
+   ``os.environ``/``os.getenv``), while rejecting commands that wipe the
+   environment (``env -i``), read unrelated variables (``printenv PATH``),
+   merely mention a variable name (``kubectl ... | grep GKE_``, ``grep -r
+   KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``bash -c 'echo
+   GKE_CLUSTER_NAME'``), or use ``env`` as a command-execution prefix
+   (``env KUBECONFIG=...``, ``env GKE_CLUSTER_NAME=foo kubectl ...``).
 3. ``the-worker-did-not-hunt-for-the-host`` rejects both standalone forbidden
-   commands (``kubectl config current-context``, ``gcloud container clusters
-   list``, ``gcp-console-links``, ``find /``) and Hermes's collapsed-chain
-   card-log rendering (``<first command> + 1 command``, ``+ 2 commands``), which
-   would otherwise hide a forbidden route chained behind ``printenv``.
+   commands (``kubectl config`` subcommands such as ``current-context`` and
+   ``get-contexts``, ``gcloud container clusters list``, ``gcp-console-links``,
+   ``find /``) and Hermes's collapsed-chain card-log rendering
+   (``<first command> + 1 command``, ``+ 2 commands``), which would otherwise
+   hide a forbidden route chained behind ``printenv``.
 """
 
 from __future__ import annotations
@@ -47,11 +54,12 @@ from typing import Any
 import pytest
 import yaml
 from conftest import TASKS
+from devops_bench.verification.base import VerificationResult
 from devops_bench.verification.rollup import rollup
 from devops_bench.verification.runner import VerifierAgent
 from devops_bench.verification.spec import VerificationEntry
 from kube_agents_bench import transcript
-from kube_agents_bench.verifiers import ReportContainsVerifier, WorkerCommandsVerifier
+from kube_agents_bench.verifiers import ReportContainsVerifier
 
 CASE = TASKS / "platform-host-identity-from-env" / "task.yaml"
 
@@ -119,6 +127,20 @@ VALID_REPORTS = [
         "Cluster `dev-zonal-host` in `example-project` (`europe-west12-c`), "
         "context `gke_example-project_europe-west12-c_dev-zonal-host`."
     ),
+    # Legacy domain-scoped GCP project IDs (`example.com:my-project`), where
+    # _SEPARATOR_NO_SPACE inserts a space after `:` under fold_decoration: true.
+    (
+        "Task `t_81ab23cd` is done.\n\n"
+        "The `kube-agents` harness runs on `host` in project `example.com:my-project` "
+        "(`us-central1`), and its kubectl context is "
+        "`gke_example.com:my-project_us-central1_host`."
+    ),
+    (
+        "- **Cluster:** `dev-host`\n"
+        "- **GCP project:** `sub.example.co.uk:my-proj-01`\n"
+        "- **Location:** `europe-west1-b`\n"
+        "- **kubectl context:** `gke_sub.example.co.uk:my-proj-01_europe-west1-b_dev-host`"
+    ),
 ]
 
 INVALID_REPORTS = [
@@ -141,6 +163,9 @@ INVALID_REPORTS = [
     ),
     # Dumps KUBE_CONTEXT_NAME alone without stating the location outside the context string.
     "The kubectl context name is `gke_example-project_us-central1_dev-host-cluster`.",
+    "The kubectl context name is `gke_example.com:my-project_us-central1_host`.",
+    # Dot inside project segment without a domain-scope colon is not a valid GCP project ID.
+    "Cluster `host` in `us-central1`, context `gke_example.com_us-central1_host`.",
     # Hex-leading Kanban card IDs folded by _INNER_UNDERSCORE (`t_f7459698` -> `t-f7459698`,
     # `t_fa123456` -> `t-fa123456`, `t_deadbeef`, `t_ab12cd34`) must never stand in for a
     # missing standalone GCP location token.
@@ -161,30 +186,80 @@ INVALID_REPORTS = [
 CLEAN_ENV_COMMANDS = [
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME",
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID",
+    "timeout 30 printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME",
+    "flock /tmp/lock printenv GKE_CLUSTER_NAME",
+    "env -u FOO printenv GKE_CLUSTER_NAME",
+    "printenv -- GKE_CLUSTER_NAME",
+    "/usr/bin/printenv -0 KUBE_CONTEXT_NAME",
+    "bash -c 'printenv GKE_CLUSTER_NAME'",
     "printenv",
     "env",
+    "printenv | grep GKE_",
     "env | grep -E 'GKE_|KUBE_'",
+    "timeout 10 env | grep GKE_",
+    "bash -c 'env | grep GKE_'",
+    "set | grep GKE_",
+    "export -p",
+    "export -p | grep GKE_",
+    "declare -p GKE_CLUSTER_NAME",
+    "declare -xp GKE_CLUSTER_NAME",
+    "typeset -p KUBE_CONTEXT_NAME",
+    "declare -p | grep GKE_",
+    "cat /proc/self/environ | tr '\\0' '\\n' | grep GKE_",
+    "tr '\\0' '\\n' < /proc/self/environ | grep GKE_",
+    "strings /proc/self/environ | grep GKE_",
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $KUBE_CONTEXT_NAME"',
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION"',
     'echo "$GKE_CLUSTER_NAME $KUBE_CONTEXT_NAME"',
+    'echo "GKE_CLUSTER_NAME=$GKE_CLUSTER_NAME GKE_PROJECT_ID=$GKE_PROJECT_ID"',
     'printf \'%s\\n\' "${GKE_CLUSTER_NAME}"',
+    'bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+    'sh -c \'printf "%s\\n" "${KUBE_CONTEXT_NAME}"\'',
+    'timeout 10 bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+    'bash -lc "echo \\$GKE_CLUSTER_NAME"',
     'python3 -c "import os; print(os.environ[\'GKE_CLUSTER_NAME\'])"',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'timeout 30 python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'from os import getenv; print(getenv("KUBE_CONTEXT_NAME"))\'',
 ]
 
 NON_ENV_READ_COMMANDS = [
     "env KUBECONFIG=/tmp/k kubectl config get-contexts",
+    "env GKE_CLUSTER_NAME=foo kubectl config get-contexts",
     "env -i bash -c 'gcloud config get-value project'",
+    "env -i printenv GKE_CLUSTER_NAME",
+    "env -i env",
+    'env -i bash -c \'echo "$GKE_CLUSTER_NAME"\'',
     "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
     "printenv PATH",
+    "timeout 10 printenv PATH",
+    "printenv -- PATH",
+    "bash -c 'printenv PATH'",
     "printenv PATH | grep GKE_CLUSTER_NAME",
+    "declare -p PATH",
+    "declare GKE_CLUSTER_NAME=foo",
+    "declare -x GKE_CLUSTER_NAME",
+    "export GKE_CLUSTER_NAME=foo",
+    "export PATH",
+    "set -e",
+    "set -euo pipefail",
     "kubectl get deploy platform-agent -n kubeagents-system -o yaml | grep -E 'GKE_|KUBE_CONTEXT_NAME'",
     "grep -r KUBE_CONTEXT_NAME /opt/defaults/skills",
+    "grep GKE_CLUSTER_NAME README.md",
     "kubectl get pods -A -o yaml | grep GKE_CLUSTER_NAME",
     "grep -r '$GKE_CLUSTER_NAME' /opt/defaults/skills",
+    "echo GKE_CLUSTER_NAME",
     'echo "GKE_CLUSTER_NAME"',
     "echo '$GKE_CLUSTER_NAME'",
     r'echo "\$GKE_CLUSTER_NAME"',
+    "bash -c 'echo GKE_CLUSTER_NAME'",
+    'bash -c "echo \'GKE_CLUSTER_NAME\'"',
+    r"bash -c 'echo \$GKE_CLUSTER_NAME'",
+    'bash -c "echo \'\\$GKE_CLUSTER_NAME\'"',
+    "bash -c 'echo hi # $GKE_CLUSTER_NAME'",
     "kubectl get pods # $GKE_CLUSTER_NAME",
+    "echo /proc/self/environ",
+    'grep "/proc/self/environ" README.md',
     'python3 -c "print(\'GKE_CLUSTER_NAME\')"',
     'python3 -c "import os; print(os.environ[\'PATH\'])" | grep GKE_CLUSTER_NAME',
 ]
@@ -192,7 +267,11 @@ NON_ENV_READ_COMMANDS = [
 FORBIDDEN_WORKER_COMMANDS = [
     # Standalone forbidden routes.
     "kubectl config current-context",
+    "kubectl config get-contexts",
+    "kubectl config view --minify",
+    "kubectl --kubeconfig /tmp/k config get-contexts",
     "gcloud container clusters list --project example-project",
+    "gcloud --project example-project container clusters list",
     "find / -name gcp-console-links.md 2>/dev/null",
     "find /",
     "cat /opt/defaults/docs/gcp-console-links.md",
@@ -209,6 +288,12 @@ def _spec_entries() -> list[VerificationEntry]:
     return [VerificationEntry.model_validate(e) for e in doc["verification_spec"]]
 
 
+def _entry(name: str) -> VerificationEntry:
+    matches = [e for e in _spec_entries() if e.name == name]
+    assert len(matches) == 1, f"{CASE} declares {name} {len(matches)} times"
+    return matches[0]
+
+
 def _check_dict(name: str) -> dict[str, Any]:
     doc = yaml.safe_load(CASE.read_text(encoding="utf-8"))
     matches = [e for e in doc["verification_spec"] if e.get("name") == name]
@@ -220,8 +305,8 @@ def _report_verifier() -> ReportContainsVerifier:
     return ReportContainsVerifier(**_check_dict(HOST_CONTEXT))
 
 
-def _worker_verifier(name: str) -> WorkerCommandsVerifier:
-    return WorkerCommandsVerifier(**_check_dict(name))
+def _eval_entry(name: str) -> VerificationResult:
+    return VerifierAgent().run_entry(_entry(name), timeout_sec=5.0)
 
 
 def _router_trajectory(worker_commands: list[str]) -> list[dict[str, Any]]:
@@ -320,8 +405,8 @@ def test_host_context_check_accepts_every_gcp_region_family() -> None:
 def test_single_unchained_env_read_passes_both_worker_checks(command: str) -> None:
     transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
     try:
-        read_res = _worker_verifier(ENV_READ).verify(5.0)
-        hunt_res = _worker_verifier(NO_HUNT).verify(5.0)
+        read_res = _eval_entry(ENV_READ)
+        hunt_res = _eval_entry(NO_HUNT)
     finally:
         transcript.clear()
     assert read_res.status == "pass", f"{command!r} failed {ENV_READ}: {read_res.reason}"
@@ -332,7 +417,7 @@ def test_single_unchained_env_read_passes_both_worker_checks(command: str) -> No
 def test_env_exec_wrappers_fail_env_read_check(command: str) -> None:
     transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
     try:
-        res = _worker_verifier(ENV_READ).verify(5.0)
+        res = _eval_entry(ENV_READ)
     finally:
         transcript.clear()
     assert res.status == "fail", f"{command!r} slipped past {ENV_READ}: {res.reason}"
@@ -346,10 +431,21 @@ def test_forbidden_or_chained_worker_command_fails_no_hunt_check(command: str) -
         worker_commands=[{"task": "t_host01", "command": command}],
     )
     try:
-        res = _worker_verifier(NO_HUNT).verify(5.0)
+        res = _eval_entry(NO_HUNT)
     finally:
         transcript.clear()
     assert res.status == "fail", f"{command!r} slipped past {NO_HUNT}: {res.reason}"
+
+
+def test_worker_checks_fail_closed_when_worker_commands_missing() -> None:
+    transcript.set("ok", [], worker_commands=None)
+    try:
+        read_res = _eval_entry(ENV_READ)
+        hunt_res = _eval_entry(NO_HUNT)
+    finally:
+        transcript.clear()
+    assert read_res.status == "error"
+    assert hunt_res.status == "error"
 
 
 def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route() -> None:
