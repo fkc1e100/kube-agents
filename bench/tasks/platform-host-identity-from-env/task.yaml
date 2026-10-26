@@ -15,15 +15,26 @@
 # A front door that answers without delegating leaves nothing to read, which
 # is status "error", not a pass.
 #
-# The required phrase is the eval install's host cluster name,
-# HOST_CLUSTER_NAME in hack/ci-env.sh (platform-agent-host). A dev install
-# whose host cluster has another name fails that one check for the name alone;
-# read its failure reason before calling a run red.
+# Which cluster hosts the install varies between CI (HOST_CLUSTER_NAME in
+# hack/ci-env.sh, platform-agent-host) and dev clusters, so the report check
+# grades the resolved gke_<project>_<location>_<cluster> context and standalone
+# GCP location by shape rather than hardcoding one cluster name. report_contains
+# deletes underscores as Markdown emphasis unless fold_decoration: true folds
+# inner underscores to hyphens first, so the context pattern spells those
+# separators with hyphens; the worker_commands checks below are what tie that
+# triple to the forwarded host environment rather than another kubeconfig
+# context.
 #
 # Red on main rests on the forbidden-route check: main's worker answered too,
-# only slowly, so the name check and the env-read check can pass there. The
-# env-read check reads terminal commands; a worker that reads os.environ
-# through execute_code leaves no card-log row for it and fails that check.
+# only slowly, so the context check and the env-read check pass there. For a
+# card the front door filed, worker_commands reads Hermes's one-line card-log
+# rendering (summarize_shell_command), which collapses a `;`, `&&` or `||`
+# chain to `<first command> + N command(s)` and hides what followed; the
+# forbidden-route check therefore also rejects a collapsed chain
+# (`\s\+\s\d+\s+commands?$`). The persona dictates a single call, and
+# `printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME` is
+# one unchained command. A worker that reads os.environ through execute_code
+# leaves no card-log row for it and fails the env-read check.
 #
 # Domain: chat and routing. Isolation class: read-only. Eligible tier: nightly.
 id: platform-host-identity-from-env
@@ -33,10 +44,12 @@ prompt: >-
   project, its location and its kubectl context name.
 expected_output: >-
   The front door files a kanban task for the platform specialist. The worker
-  reads the host cluster's name, project, location and kubectl context name from
-  its environment (GKE_CLUSTER_NAME, GKE_PROJECT_ID, GKE_LOCATION and
-  KUBE_CONTEXT_NAME) and the answer names the host cluster, platform-agent-host
-  on the eval install, with its project, location and kubectl context name. The
+  reads the host cluster's name, GCP project, location and kubectl context name
+  from its environment (GKE_CLUSTER_NAME, GKE_PROJECT_ID, GKE_LOCATION and
+  KUBE_CONTEXT_NAME) in one unchained command, and the answer states whatever
+  host cluster name, GCP project, location and gke_<project>_<location>_<cluster>
+  kubectl context name that install runs on (for example platform-agent-host on
+  the CI eval install, or the host cluster's own name on a dev install). The
   worker does not run kubectl config current-context, does not list the fleet's
   clusters and does not search the filesystem for console link helpers.
 infrastructure:
@@ -58,18 +71,26 @@ verification_spec:
       type: tool_called
       tool_names: ["kanban_create"]
       require_success: true
-  - name: the-answer-names-the-host-cluster
+  - name: the-answer-names-the-host-context
     role: objective
     mode: assert
     check:
+      # Under fold_decoration: true, inner underscores become hyphens before
+      # _normalize strips Markdown emphasis, so gke_<project>_<location>_<cluster>
+      # arrives as gke-<project>-<location>-<cluster>. The second pattern
+      # requires a standalone GCP location token outside that hyphen-joined
+      # context so pasting KUBE_CONTEXT_NAME alone does not pass.
       type: report_contains
-      required_phrases: ["platform-agent-host"]
+      fold_decoration: true
+      required_patterns:
+        - '(?<![a-z0-9-])gke-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z]+-[a-z]+\d+(?:-[a-z])?-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?![a-z0-9-])'
+        - '(?<![a-z0-9-])[a-z]+-[a-z]+\d+(?:-[a-z])?(?![a-z0-9-])'
   - name: the-worker-read-the-forwarded-identity
     role: objective
     mode: assert
     check:
-      # The card log renders a chained command as its first command, so the
-      # variable name or the bare printenv/env call is what can be matched.
+      # Matches an explicit read of the forwarded host variables or a bare
+      # printenv/env call in the worker's terminal log.
       type: worker_commands
       required_patterns:
         - 'GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME|^\s*(?:printenv|env)\b'
@@ -77,16 +98,18 @@ verification_spec:
     role: objective
     mode: assert
     check:
-      # The two routes the live run took: a fleet listing, and a filesystem
-      # search for the console link reference. A find rooted at / is the
-      # filesystem hunt whatever file it names. The kubeconfig's current
-      # context is the route the SOUL bullet names as not the host.
+      # The routes the live and red-on-main runs took — a fleet listing, a
+      # filesystem search for console-link helpers (or any find rooted at /),
+      # and kubectl config current-context — plus Hermes's collapsed-chain
+      # suffix (` + 1 command`, ` + 2 commands`), which would otherwise hide a
+      # forbidden command chained behind printenv on a front-filed card log.
       type: worker_commands
       forbidden_patterns:
         - 'gcloud\s+container\s+clusters\s+list'
         - "gcp-console-links"
         - '\bfind\s+/(?:\s|$)'
         - 'kubectl\s+config\s+current-context'
+        - '\s\+\s\d+\s+commands?$'
   # The delegation boundary, as in chat-routing-fleet-question: the front door
   # files the card and never works it.
   - name: front-door-stays-out-of-the-worker-verbs
