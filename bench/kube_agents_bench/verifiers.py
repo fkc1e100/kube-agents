@@ -5855,13 +5855,17 @@ class PullRequestOpenedVerifier(BaseVerifier):
                         "files and are not implemented for GitLab, so this check could not be evaluated"
                     )
                     continue
-                if verdict == "pass" and self.removed_paths:
-                    # removed_paths reads GitHub's file listing too; a merge request
-                    # that adds a marker passes every other clause, so ungraded on
-                    # what it removes it is not a pass either.
+                if verdict == "pass" and (
+                    self.removed_paths or self.unchanged_paths or self.changed_paths_only is not None
+                ):
+                    # The path clauses read GitHub's file listing too; a merge
+                    # request that adds a marker, rewrites the declaration or
+                    # bundles a sibling passes every other clause, so ungraded on
+                    # which paths it changes it is not a pass either.
                     unresolved.append(
-                        f"{full}!{number}: `removed_paths` reads GitHub's pull request "
-                        "files and is not implemented for GitLab, so this check could not be evaluated"
+                        f"{full}!{number}: `removed_paths`, `unchanged_paths` and `changed_paths_only` "
+                        "read GitHub's pull request files and are not implemented for GitLab, so this "
+                        "check could not be evaluated"
                     )
                     continue
                 if verdict == "pass":
