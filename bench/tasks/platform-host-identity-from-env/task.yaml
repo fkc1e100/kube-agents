@@ -26,15 +26,16 @@
 # context.
 #
 # Red on main rests on the forbidden-route check: main's worker answered too,
-# only slowly, so the context check and the env-read check pass there. For a
-# card the front door filed, worker_commands reads Hermes's one-line card-log
-# rendering (summarize_shell_command), which collapses a `;`, `&&` or `||`
-# chain to `<first command> + N command(s)` and hides what followed; the
-# forbidden-route check therefore also rejects a collapsed chain
-# (`\s\+\s\d+\s+commands?$`). The persona dictates a single call, and
+# only slowly, so the context check and the env-read check pass there. The
+# persona dictates a single call (`max_commands: 1`), and
 # `printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME` is
-# one unchained command. A worker that reads os.environ through execute_code
-# leaves no card-log row for it and fails the env-read check.
+# one unchained command. For a card the front door filed, worker_commands reads
+# Hermes's one-line card-log rendering (summarize_shell_command), which
+# collapses a `;`, `&&` or `||` chain to `<first command> + N command(s)` and
+# hides what followed; the forbidden-route check therefore also rejects a
+# collapsed chain (`\s\+\s\d+\s+commands?$`). A worker that reads os.environ
+# through execute_code leaves no card-log row for it and fails the env-read
+# check.
 #
 # Domain: chat and routing. Isolation class: read-only. Eligible tier: nightly.
 id: platform-host-identity-from-env
@@ -46,12 +47,13 @@ expected_output: >-
   The front door files a kanban task for the platform specialist. The worker
   reads the host cluster's name, GCP project, location and kubectl context name
   from its environment (GKE_CLUSTER_NAME, GKE_PROJECT_ID, GKE_LOCATION and
-  KUBE_CONTEXT_NAME) in one unchained command, and the answer states whatever
-  host cluster name, GCP project, location and gke_<project>_<location>_<cluster>
-  kubectl context name that install runs on (for example platform-agent-host on
-  the CI eval install, or the host cluster's own name on a dev install). The
-  worker does not run kubectl config current-context, does not list the fleet's
-  clusters and does not search the filesystem for console link helpers.
+  KUBE_CONTEXT_NAME) in a single unchained terminal call, and the answer states
+  whatever host cluster name, GCP project, location and
+  gke_<project>_<location>_<cluster> kubectl context name that install runs on
+  (for example platform-agent-host on the CI eval install, or the host cluster's
+  own name on a dev install). The worker issues at most one command, does not
+  run kubectl config subcommands or gcloud container clusters list, and does not
+  run find /... or search the filesystem for console-link helpers.
 infrastructure:
   deployer: noop
 validated: false
@@ -99,9 +101,11 @@ verification_spec:
       # `env`, `flock`, `--`, and `bash -c '...'`), a bare or piped environment
       # dump (`printenv`, `env`, `set`, `export [-p]`, `declare -p`, or reading
       # `/proc/self/environ`), a non-single-quoted shell `$VAR`/`${VAR}`
-      # expansion (outer shell or inside `sh -c`/`bash -c`), or `python3 -c`
-      # reading `os.environ`/`os.getenv` — while rejecting commands that wipe
-      # the environment (`env -i`), read unrelated variables (`printenv PATH`),
+      # expansion (outer shell or inside `sh -c`/`bash -c`), or `python3` (`-c`
+      # or heredoc) reading `os.environ`/`os.getenv` — while rejecting commands
+      # that wipe or override the forwarded variables (`env -i` anywhere on the
+      # command, `env -u GKE_...`, `env GKE_CLUSTER_NAME=foo ...`, or leading
+      # `GKE_CLUSTER_NAME=foo ...`), read unrelated variables (`printenv PATH`),
       # merely mention a variable name (`grep KUBE_CONTEXT_NAME`, `echo
       # GKE_CLUSTER_NAME`, `bash -c 'echo GKE_CLUSTER_NAME'`), or use `env` as a
       # command-execution prefix (`env KUBECONFIG=... kubectl ...`).
@@ -109,7 +113,8 @@ verification_spec:
       checks:
         - type: worker_commands
           exempt_patterns: &env_ignore_exempt
-            - '^\s*(?:(?:timeout|nice|nohup|command)\s+(?:-\S+\s+|\d+(?:\.\d+)?[smhd]?\s+)*)*(?:(?:/usr)?/bin/)?env\s+(?:-\S+\s+)*(?:-[a-zA-Z]*i[a-zA-Z]*|--ignore-environment)\b'
+            - '(?:^|[\s(;&|\x27\x22])(?:(?:/usr)?/bin/)?env\s+(?:(?:-u|--unset)\s+\S+\s+|-\S+\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:-[a-zA-Z]*i[a-zA-Z]*|--ignore-environment|(?:-u|--unset)(?:=|\s+)(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME))\b'
+            - '(?:^(?:[^\x27\\\x22#]|(?<=\S)#|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*[;|&\n(]|^)\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|\S*)|(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|export|declare|typeset|env(?:\s+(?:-\S+|(?:-u|--unset)\s+\S+))*))\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*(?:\(\s*)*(?:(?:[^\x27\x22;|&]|\x22(?:[^\x22\\]|\\.)*\x22)*[;|&]\s*)*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|(?:(?:/usr)?/bin/)?(?:timeout\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|command|builtin|export|declare|typeset|env(?:\s+(?:-\S+|(?:-u|--unset)\s+\S+))*))\s+)*)?(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)='
           required_runs:
             - script: printenv
               word_patterns:
@@ -152,27 +157,35 @@ verification_spec:
           exempt_patterns: *env_ignore_exempt
           required_patterns:
             - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*)?(?:(?:/usr)?/bin/)?python3?(?:\s+-[A-Za-z0-9]+)*\s+-c\s+(?:\x27(?=[^\x27]*\bos\b)(?=[^\x27]*\b(?:environ|getenv)\b)[^\x27]*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b[^\x27]*\x27|\x22(?=(?:[^\x22\\]|\\.)*\bos\b)(?=(?:[^\x22\\]|\\.)*\b(?:environ|getenv)\b)(?:[^\x22\\]|\\.)*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b(?:[^\x22\\]|\\.)*\x22)'
+        - type: worker_commands
+          exempt_patterns: *env_ignore_exempt
+          required_patterns:
+            - '(?s)^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:/usr)?/bin/)?python3?(?:\s+-[A-Za-z0-9]+)*\s+(?:-\s+)?<<-?\s*[\x27\x22]?([A-Za-z_][A-Za-z0-9_]*)[\x27\x22]?\s+(?=(?:(?!\s\1(?:\s|$)).)*\bos\b)(?=(?:(?!\s\1(?:\s|$)).)*\b(?:environ|getenv)\b)(?:(?!\s\1(?:\s|$)).)*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b(?:(?!\s\1(?:\s|$)).)*\s\1(?:\s|$)'
   - name: the-worker-did-not-hunt-for-the-host
     role: objective
     mode: assert
     check:
-      # The routes the live and red-on-main runs took — a fleet listing, a
-      # filesystem search for console-link helpers (or any find rooted at /),
-      # and any `kubectl config` read (`current-context`, `get-contexts`, etc.)
-      # — plus Hermes's collapsed-chain suffix (` + 1 command`, ` + 2 commands`),
-      # which would otherwise hide a forbidden command chained behind printenv
-      # on a front-filed card log.
+      # Enforces the single-call contract (`max_commands: 1` plus Hermes's
+      # collapsed-chain suffix ` + N command(s)`) and forbids the routes the
+      # live and red-on-main runs took: `kubectl config` subcommands and
+      # `gcloud container clusters list` on argv (`forbidden_runs`, with no
+      # duplicate text pattern that would match comments or grep patterns), any
+      # `find` rooted under `/`, and filesystem searches for console-link
+      # helpers.
       type: worker_commands
+      max_commands: 1
       forbidden_runs:
         - script: kubectl
-          flags: ["config"]
+          subcommands: ["config"]
         - script: gcloud
-          flags: ["container", "clusters", "list"]
+          subcommands: ["container", "clusters", "list"]
+        - script: gcloud
+          subcommands: ["beta", "container", "clusters", "list"]
+        - script: gcloud
+          subcommands: ["alpha", "container", "clusters", "list"]
       forbidden_patterns:
-        - 'gcloud\s+container\s+clusters\s+list'
-        - "gcp-console-links"
-        - '\bfind\s+/(?:\s|$)'
-        - 'kubectl\s+config\b'
+        - 'gcp-console-links|console\.cloud\.google\.com|\*console\*'
+        - '\bfind\s+/'
         - '\s\+\s\d+\s+commands?$'
   # The delegation boundary, as in chat-routing-fleet-question: the front door
   # files the card and never works it.

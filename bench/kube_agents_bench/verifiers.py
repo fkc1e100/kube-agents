@@ -253,6 +253,39 @@ _PATTERN_EXPANSION_REASON = "a pattern does not compile once its cluster placeho
 # so a pattern spells each contraction ("don't") exactly once.
 _MARKDOWN_NOISE = str.maketrans({"*": None, "_": None, "`": None, "’": "'"})
 
+# Option tokens skipped ahead of positional subcommands in ``WorkerRun.subcommands``:
+# ``--flag=value`` carries its value inline, ``--no-*`` and these boolean global flags take no
+# following value word, and other options before ``--`` take the next non-flag word as their value.
+_FLAG_VALUE_SEPARATOR = "="
+_CLI_NEGATED_FLAG_PREFIX = "--no-"
+_CLI_BOOLEAN_FLAGS = frozenset(
+    (
+        "-A",
+        "--all-namespaces",
+        "-q",
+        "--quiet",
+        "--verbose",
+        "--debug",
+        "--dry-run",
+        "--global",
+        "--insecure-skip-tls-verify",
+        "--disable-compression",
+        "--match-server-version",
+        "--warnings-as-errors",
+        "--user-output-enabled",
+        "--log-http",
+        "--dns-endpoint",
+        "--internal-ip",
+        "--show-package-vulnerability",
+        "--version",
+        "-V",
+    )
+)
+_UNJOINED_MAX_COMMANDS_REASON = (
+    "worker command count cannot be bounded against max_commands={max_commands} because a "
+    "card-log row carries no task id to deduplicate against tagged trajectory calls"
+)
+
 
 def _normalize(text: str) -> str:
     """Lowercase, strip Markdown emphasis, collapse runs of whitespace.
@@ -2392,17 +2425,29 @@ _USAGE_FLAGS = ("-h", "--help")
 
 class WorkerRun(BaseModel):
     """One program run a case requires of a worker, or forbids: a script by its basename (or its
-    module stem under ``-m``), the flags that have to follow it on the same shell segment as exact
-    words, and ``word_patterns``, regular expressions each of which some later word of the segment
-    must match on its own (``^(?:get|describe)$`` for a verb; a resource list such as
+    module stem under ``-m``), any leading positional ``subcommands`` in order (options and their
+    values skipped, so ``subcommands: ["config"]`` on ``kubectl`` matches ``kubectl --kubeconfig
+    /tmp/k config get-contexts`` and not ``kubectl get configmap config`` or ``kubectl -n config
+    get pods``), the flags that have to follow it on the same shell segment as exact words, and
+    ``word_patterns``, regular expressions each of which some later word of the segment must match
+    on its own (``^(?:get|describe)$`` for a verb; a resource list such as
     ``pdb,validatingwebhookconfigurations`` is one word, so a pattern over the word reads it
     whole, and a quoted mention of the whole command is one word that is no command)."""
 
     model_config = ConfigDict(extra="forbid")
 
     script: str
+    subcommands: list[str] = Field(default_factory=list)
     flags: list[str] = Field(default_factory=list)
     word_patterns: list[str] = Field(default_factory=list)
+
+    @field_validator("subcommands")
+    @classmethod
+    def _subcommands_are_positional_words(cls, subcommands: list[str]) -> list[str]:
+        for subcommand in subcommands:
+            if not subcommand or any(char.isspace() for char in subcommand) or subcommand.startswith(_SHELL_FLAG_PREFIX):
+                raise ValueError(f"each subcommand must be one non-flag word, not {subcommand!r}")
+        return subcommands
 
     @field_validator("word_patterns")
     @classmethod
@@ -2727,9 +2772,45 @@ def _argv_runs(argv: list[str], run: WorkerRun) -> bool:
     return False
 
 
+def _positional_words(words: list[str]) -> list[str]:
+    """The positional words after a command in order, options, redirects and their values skipped."""
+    positionals: list[str] = []
+    takes_value = False
+    redirect_target = False
+    options_ended = False
+    for index, word in enumerate(words):
+        if _is_redirect(word) or (word.isdigit() and index + 1 < len(words) and _is_redirect(words[index + 1])):
+            redirect_target = not word.isdigit()
+            continue
+        if redirect_target:
+            redirect_target = False
+            continue
+        if options_ended:
+            positionals.append(word)
+            continue
+        if word == _SHELL_OPTIONS_END:
+            options_ended = True
+            takes_value = False
+            continue
+        if word != _SHELL_FLAG_PREFIX and word.startswith(_SHELL_FLAG_PREFIX):
+            takes_value = (
+                _FLAG_VALUE_SEPARATOR not in word
+                and not word.startswith(_CLI_NEGATED_FLAG_PREFIX)
+                and word not in _CLI_BOOLEAN_FLAGS
+            )
+            continue
+        if takes_value:
+            takes_value = False
+            continue
+        positionals.append(word)
+    return positionals
+
+
 def _words_after_carry(words: list[str], run: WorkerRun) -> bool:
-    """Whether the words after the script carry every flag as an exact word and, for every word
-    pattern, some word that matches it on its own."""
+    """Whether the words after the script open with ``run.subcommands`` as positional words, carry
+    every flag as an exact word and, for every word pattern, some word that matches it on its own."""
+    if run.subcommands and _positional_words(words)[: len(run.subcommands)] != run.subcommands:
+        return False
     return all(flag in words for flag in run.flags) and all(any(re.search(pattern, word) for word in words) for pattern in run.word_patterns)
 
 
@@ -2877,8 +2958,9 @@ class WorkerCommandsVerifier(BaseVerifier):
     followed, so an exemption refuses it and the first command's own words
     are graded.
     ``required_runs``: each names a script (by basename, or module stem under
-    ``-m``), flags and word patterns; some command's shell segment, read as an
-    argv, must run it with those flags after it, a word matching each pattern,
+    ``-m``), leading positional ``subcommands``, flags and word patterns; some
+    command's shell segment, read as an argv, must run it with those subcommands
+    at the front, those flags after it, a word matching each pattern,
     and no ``-h``/``--help`` (:func:`_argv_runs`). ``forbidden_runs``: the same
     shape, and no segment may run it. An argv tells a quoted mention of the
     invocation from a run, where a pattern over the text cannot: a forbidden
@@ -2886,6 +2968,9 @@ class WorkerCommandsVerifier(BaseVerifier):
     or an echoed sentence, where ``forbidden_patterns`` over the text would be.
     A command an exemption touched is out of the required runs as it is out
     of the required patterns; the forbidden runs read every command as typed.
+    ``max_commands``: upper bound on how many commands the workers may issue
+    (across the run, or inside the ``after_result_pattern`` window when set),
+    exempted commands included.
 
     ``after_result_pattern`` makes the forbidden set order-aware, for a
     retry-after-refusal check (#2173): the defect is a write after the policy
@@ -2971,6 +3056,7 @@ class WorkerCommandsVerifier(BaseVerifier):
     forbidden_runs: list[WorkerRun] = Field(default_factory=list)
     forbidden_result_patterns: list[str] = Field(default_factory=list)
     after_result_pattern: str | None = None
+    max_commands: int | None = Field(default=None, ge=0)
 
     @field_validator("required_patterns", "forbidden_patterns", "exempt_patterns", "forbidden_result_patterns")
     @classmethod
@@ -3010,7 +3096,11 @@ class WorkerCommandsVerifier(BaseVerifier):
         window = ""
         sources = ""
         result_hits: list[tuple[str, str]] = []
-        forbidding = bool(self.forbidden_patterns or self.forbidden_runs or self.forbidden_result_patterns)
+        unjoined_count = False
+        observed_floor = 0
+        forbidding = bool(
+            self.forbidden_patterns or self.forbidden_runs or self.forbidden_result_patterns or self.max_commands is not None
+        )
         if self.after_result_pattern is None:
             # ``None`` stays an error even when the trajectory carries tagged calls: it
             # means a filed card's log could not be read (or nothing was filed), and
@@ -3047,6 +3137,8 @@ class WorkerCommandsVerifier(BaseVerifier):
             if "" in logged:
                 children = [command for _, _, command, _, _ in calls]
                 if children:
+                    unjoined_count = True
+                    observed_floor = max(len(logged_commands), len(children))
                     sources = (
                         f" ({len(logged_commands)} from the filed cards' logs and {len(children)} tagged calls,"
                         " unjoined because a log row names no card, so a command may be counted twice)"
@@ -3137,11 +3229,16 @@ class WorkerCommandsVerifier(BaseVerifier):
         typed_argvs = [argv for c in typed for argv in _shell_argvs(c)]
         unrun = [run for run in self.required_runs if not any(_argv_runs(argv, run) for argv in argvs)]
         ran = [(run, argv) for run in self.forbidden_runs for argv in typed_argvs if _argv_runs(argv, run)]
+        observed_count = observed_floor if unjoined_count else len(windowed)
+        too_many = self.max_commands is not None and observed_count > self.max_commands
+        unjoined_ambiguous = (
+            self.max_commands is not None and unjoined_count and observed_floor <= self.max_commands < len(windowed)
+        )
         # A forbidden command that was read is conclusive whatever else was
         # not; a missing required command, or a clean read, is not when the
         # capture has gaps (the siblings' rule, ``worker_agents`` first).
         partial = self.after_result_pattern is not None and snap.worker_capture_gaps
-        if hits or ran or ((missing or unrun) and not partial):
+        if hits or ran or too_many or ((missing or unrun) and not partial):
             parts = []
             if missing:
                 parts.append(
@@ -3149,7 +3246,7 @@ class WorkerCommandsVerifier(BaseVerifier):
                     f"across {len(commands)} command(s){exempted}{sources}"
                 )
             if unrun:
-                named = ", ".join(" ".join([run.script, *run.flags]) for run in unrun)
+                named = ", ".join(" ".join([run.script, *run.subcommands, *run.flags]) for run in unrun)
                 parts.append(f"no worker command ran {named} across {len(commands)} command(s){sources}")
             if hits:
                 shown = "; ".join(
@@ -3166,10 +3263,23 @@ class WorkerCommandsVerifier(BaseVerifier):
                 shown = "; ".join(f"{run.script} ran as {' '.join(argv)[:_SHOWN_COMMAND_CHARS]!r}" for run, argv in ran[:_MAX_NAMED_COMMANDS])
                 more = f" (+{len(ran) - _MAX_NAMED_COMMANDS} more)" if len(ran) > _MAX_NAMED_COMMANDS else ""
                 parts.append(f"forbidden run(s) made by worker commands: {shown}{more}")
+            if too_many:
+                shown = "; ".join(repr(c[:_SHOWN_COMMAND_CHARS]) for c in windowed[:_MAX_NAMED_COMMANDS])
+                more = f" (+{len(windowed) - _MAX_NAMED_COMMANDS} more)" if len(windowed) > _MAX_NAMED_COMMANDS else ""
+                parts.append(
+                    f"worker ran {observed_count} command(s), exceeding max_commands={self.max_commands}{sources}: {shown}{more}"
+                )
             return VerificationResult(
                 success=False,
                 elapsed_time=time.monotonic() - start,
                 reason="; ".join(parts) + window,
+            )
+        if unjoined_ambiguous:
+            return VerificationResult(
+                success=False,
+                status="error",
+                elapsed_time=time.monotonic() - start,
+                reason=_UNJOINED_MAX_COMMANDS_REASON.format(max_commands=self.max_commands) + sources,
             )
         # A required command that was read is conclusive the same way: a gap
         # beside a satisfied required set errors only a check that also has a
@@ -3178,7 +3288,9 @@ class WorkerCommandsVerifier(BaseVerifier):
             unseen = f"; required pattern(s) {missing} not seen in what was read" if missing else ""
             reason = _PARTIAL_WORKER_CAPTURE_REASON.format(gaps="; ".join(snap.worker_capture_gaps)) + unseen + window
             if not forbidding:
-                not_seen = [f"pattern {p!r}" for p in missing] + [" ".join(["run", run.script, *run.flags]) for run in unrun]
+                not_seen = [f"pattern {p!r}" for p in missing] + [
+                    " ".join(["run", run.script, *run.subcommands, *run.flags]) for run in unrun
+                ]
                 reason = _PARTIAL_REQUIRED_CAPTURE_REASON.format(gaps="; ".join(snap.worker_capture_gaps), unseen=", ".join(not_seen))
             return VerificationResult(
                 success=False,
@@ -3194,6 +3306,7 @@ class WorkerCommandsVerifier(BaseVerifier):
                 f"required pattern(s) matched, all {len(self.required_runs)} required run(s) made, "
                 f"none of {len(self.forbidden_patterns) + len(self.forbidden_result_patterns)} forbidden pattern(s) matched, "
                 f"none of {len(self.forbidden_runs)} forbidden run(s) made"
+                + (f", within max_commands={self.max_commands}" if self.max_commands is not None else "")
                 + window
             ),
         )

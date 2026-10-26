@@ -32,19 +32,21 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    as ``timeout``, ``env``, and ``flock``; bare or piped ``printenv``, ``env``,
    ``set``, ``export [-p]``, ``declare -p``, and ``/proc/self/environ`` dumps;
    unescaped non-single-quoted shell ``$VAR``/``${VAR}`` expansions in both the
-   outer shell and ``sh -c``/``bash -c``; and ``python3 -c`` reading
-   ``os.environ``/``os.getenv``), while rejecting commands that wipe the
-   environment (``env -i``), read unrelated variables (``printenv PATH``),
+   outer shell and ``sh -c``/``bash -c``; and ``python3`` via ``-c`` or heredoc
+   reading ``os.environ``/``os.getenv``), while rejecting commands that wipe or
+   override the forwarded variables (``env -i`` anywhere on the line,
+   ``env -u GKE_...``, ``env GKE_CLUSTER_NAME=foo ...``, or leading
+   ``GKE_CLUSTER_NAME=foo ...``), read unrelated variables (``printenv PATH``),
    merely mention a variable name (``kubectl ... | grep GKE_``, ``grep -r
    KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``bash -c 'echo
    GKE_CLUSTER_NAME'``), or use ``env`` as a command-execution prefix
    (``env KUBECONFIG=...``, ``env GKE_CLUSTER_NAME=foo kubectl ...``).
-3. ``the-worker-did-not-hunt-for-the-host`` rejects both standalone forbidden
-   commands (``kubectl config`` subcommands such as ``current-context`` and
-   ``get-contexts``, ``gcloud container clusters list``, ``gcp-console-links``,
-   ``find /``) and Hermes's collapsed-chain card-log rendering
-   (``<first command> + 1 command``, ``+ 2 commands``), which would otherwise
-   hide a forbidden route chained behind ``printenv``.
+3. ``the-worker-did-not-hunt-for-the-host`` enforces the single-call contract
+   (``max_commands: 1`` plus Hermes's collapsed-chain card-log suffix ``+ N
+   command(s)``) and rejects ``kubectl config`` subcommands and ``gcloud
+   container clusters list`` on argv (without false-positiving on ``kubectl get
+   configmap config``, ``kubectl -n config get pods``, or shell comments) as
+   well as ``find /...`` and console-link helper searches.
 """
 
 from __future__ import annotations
@@ -221,13 +223,28 @@ CLEAN_ENV_COMMANDS = [
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
     'timeout 30 python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
     'python3 -c \'from os import getenv; print(getenv("KUBE_CONTEXT_NAME"))\'',
+    'python3 - <<\'EOF\' import os print(os.environ["GKE_CLUSTER_NAME"]) EOF',
+    'python3 - <<\'EOF\' import os; print(os.environ["GKE_CLUSTER_NAME"]) EOF',
+    'python3 <<EOF\nimport os\nprint(os.getenv("KUBE_CONTEXT_NAME"))\nEOF',
+    'python3 - <<\'EOF\'\nimport os\nprint(os.environ["GKE_CLUSTER_NAME"])\nEOF',
+    "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
 ]
 
 NON_ENV_READ_COMMANDS = [
     "env KUBECONFIG=/tmp/k kubectl config get-contexts",
     "env GKE_CLUSTER_NAME=foo kubectl config get-contexts",
+    "env GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME",
+    "GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME",
+    "bash -c 'GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME'",
+    "bash -c 'env GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME'",
+    "env -u GKE_CLUSTER_NAME printenv GKE_CLUSTER_NAME",
     "env -i bash -c 'gcloud config get-value project'",
     "env -i printenv GKE_CLUSTER_NAME",
+    "bash -c 'env -i printenv GKE_CLUSTER_NAME'",
+    "flock /tmp/lock env -i printenv GKE_CLUSTER_NAME",
+    "stdbuf -oL env -i printenv GKE_CLUSTER_NAME",
+    "(env -i printenv GKE_CLUSTER_NAME)",
+    "env -u FOO -i printenv GKE_CLUSTER_NAME",
     "env -i env",
     'env -i bash -c \'echo "$GKE_CLUSTER_NAME"\'',
     "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
@@ -262,6 +279,18 @@ NON_ENV_READ_COMMANDS = [
     'grep "/proc/self/environ" README.md',
     'python3 -c "print(\'GKE_CLUSTER_NAME\')"',
     'python3 -c "import os; print(os.environ[\'PATH\'])" | grep GKE_CLUSTER_NAME',
+    'python3 - <<\'EOF\' print("GKE_CLUSTER_NAME") EOF',
+    'python3 - <<\'EOF\' import os; print(os.environ["PATH"]) EOF | grep GKE_CLUSTER_NAME',
+]
+
+ALLOWED_NO_HUNT_COMMANDS = [
+    "kubectl get configmap config -n kubeagents-system",
+    "kubectl -n kubeagents-system get secret config -o yaml",
+    "kubectl exec deploy/platform-agent -- cat config",
+    "kubectl -n config get pods",
+    "gcloud container clusters describe list --zone us-central1-a",
+    "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
+    'grep -r "kubectl config" /opt/defaults/skills',
 ]
 
 FORBIDDEN_WORKER_COMMANDS = [
@@ -270,11 +299,15 @@ FORBIDDEN_WORKER_COMMANDS = [
     "kubectl config get-contexts",
     "kubectl config view --minify",
     "kubectl --kubeconfig /tmp/k config get-contexts",
+    "kubectl --warnings-as-errors config get-contexts",
     "gcloud container clusters list --project example-project",
     "gcloud --project example-project container clusters list",
+    "gcloud --quiet beta container clusters list",
     "find / -name gcp-console-links.md 2>/dev/null",
+    "find /opt/defaults -name '*console*'",
     "find /",
     "cat /opt/defaults/docs/gcp-console-links.md",
+    "grep -rn console.cloud.google.com /opt/defaults",
     # Collapsed chains as Hermes's summarize_shell_command renders `cmd1 && cmd2`
     # or `cmd1 ; cmd2` on a front-filed card's worker log.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION + 1 command",
@@ -423,6 +456,20 @@ def test_env_exec_wrappers_fail_env_read_check(command: str) -> None:
     assert res.status == "fail", f"{command!r} slipped past {ENV_READ}: {res.reason}"
 
 
+@pytest.mark.parametrize("command", ALLOWED_NO_HUNT_COMMANDS)
+def test_non_config_subcommands_and_comments_pass_no_hunt_check(command: str) -> None:
+    transcript.set(
+        "ok",
+        [],
+        worker_commands=[{"task": "t_host01", "command": command}],
+    )
+    try:
+        res = _eval_entry(NO_HUNT)
+    finally:
+        transcript.clear()
+    assert res.status == "pass", f"{command!r} falsely tripped {NO_HUNT}: {res.reason}"
+
+
 @pytest.mark.parametrize("command", FORBIDDEN_WORKER_COMMANDS)
 def test_forbidden_or_chained_worker_command_fails_no_hunt_check(command: str) -> None:
     transcript.set(
@@ -435,6 +482,22 @@ def test_forbidden_or_chained_worker_command_fails_no_hunt_check(command: str) -
     finally:
         transcript.clear()
     assert res.status == "fail", f"{command!r} slipped past {NO_HUNT}: {res.reason}"
+
+
+def test_multiple_worker_commands_fail_no_hunt_single_call_cap() -> None:
+    transcript.set(
+        "ok",
+        [],
+        worker_commands=[
+            {"task": "t_host01", "command": "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME"},
+            {"task": "t_host01", "command": "kubectl get nodes"},
+        ],
+    )
+    try:
+        res = _eval_entry(NO_HUNT)
+    finally:
+        transcript.clear()
+    assert res.status == "fail" and "exceeding max_commands=1" in res.reason
 
 
 def test_worker_checks_fail_closed_when_worker_commands_missing() -> None:

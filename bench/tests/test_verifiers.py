@@ -8960,6 +8960,116 @@ def test_worker_commands_required_run_names_what_did_not_run():
     assert res.status == "fail" and "no worker command ran fleet_upgrade_report.py --readiness across 2 command(s)" in res.reason
 
 
+def test_worker_run_subcommands_match_leading_positionals_only():
+    from kube_agents_bench.verifiers import WorkerRun, _argv_runs, _shell_argvs
+
+    kubectl_config = WorkerRun(script="kubectl", subcommands=["config"])
+    for hit in (
+        "kubectl config current-context",
+        "kubectl config get-contexts",
+        "kubectl --kubeconfig /tmp/k config get-contexts",
+        "kubectl --kubeconfig=/tmp/k -n default config view",
+        "kubectl --warnings-as-errors config get-contexts",
+        "kubectl --insecure-skip-tls-verify config current-context",
+        "kubectl 2>/dev/null config current-context",
+        "kubectl -- config current-context",
+    ):
+        assert any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(hit)), hit
+    for miss in (
+        "kubectl get configmap config -n kubeagents-system",
+        "kubectl -n kubeagents-system get secret config -o yaml",
+        "kubectl exec deploy/platform-agent -- cat config",
+        "kubectl -n config get pods",
+        "kubectl -A get configmap config",
+        "printenv KUBE_CONTEXT_NAME # not kubectl config current-context",
+    ):
+        assert not any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(miss)), miss
+
+    gcloud_clusters_list = WorkerRun(script="gcloud", subcommands=["container", "clusters", "list"])
+    for hit in (
+        "gcloud container clusters list --project example-project",
+        "gcloud --project example-project container --region us-central1 clusters list",
+        "gcloud -q --no-user-output-enabled container clusters list",
+    ):
+        assert any(_argv_runs(argv, gcloud_clusters_list) for argv in _shell_argvs(hit)), hit
+    assert not any(
+        _argv_runs(argv, gcloud_clusters_list)
+        for argv in _shell_argvs("gcloud container clusters describe list --zone us-central1-a")
+    )
+
+    for bad in (["--config"], ["container clusters"], [""]):
+        with pytest.raises(ValueError):
+            WorkerRun(script="kubectl", subcommands=bad)
+
+    _stash_commands(["kubectl get configmap config -n kubeagents-system"])
+    missing = WorkerCommandsVerifier(type="worker_commands", required_runs=[kubectl_config]).verify(5.0)
+    assert missing.status == "fail" and "no worker command ran kubectl config across 1 command(s)" in missing.reason
+
+
+def test_worker_commands_max_commands_bounds_run_and_window():
+    with pytest.raises(ValidationError):
+        WorkerCommandsVerifier(type="worker_commands", max_commands=-1)
+
+    cap_one = WorkerCommandsVerifier(
+        type="worker_commands",
+        max_commands=1,
+        exempt_patterns=[r"^\s*grep\s[^;&|`$()\n]*$"],
+    )
+    _stash_commands(None)
+    assert cap_one.verify(5.0).status == "error"
+
+    _stash_commands(["printenv GKE_CLUSTER_NAME"])
+    ok = cap_one.verify(5.0)
+    assert ok.status == "pass" and "within max_commands=1" in ok.reason
+
+    _stash_commands(["printenv GKE_CLUSTER_NAME", "kubectl get nodes"])
+    over = cap_one.verify(5.0)
+    assert over.status == "fail" and "worker ran 2 command(s), exceeding max_commands=1" in over.reason
+
+    # An exemption does not hide a terminal call from max_commands.
+    _stash_commands(["grep -rn foo /opt/defaults", "printenv GKE_CLUSTER_NAME"])
+    exempt_over = cap_one.verify(5.0)
+    assert exempt_over.status == "fail" and "exceeding max_commands=1" in exempt_over.reason
+
+    cap_zero = WorkerCommandsVerifier(type="worker_commands", max_commands=0)
+    _stash_commands([])
+    assert cap_zero.verify(5.0).status == "pass"
+    _stash_commands(["ls"])
+    assert cap_zero.verify(5.0).status == "fail"
+
+    # Unkeyed legacy log rows beside tagged calls cannot deduplicate 1+1 against cap 1 -> error,
+    # whereas 2 unkeyed rows alone conclusively exceed cap 1 -> fail, and cap 2 passes.
+    call = _terminal("printenv GKE_CLUSTER_NAME", task="t_1")
+    transcript.set("ok", _TRAJECTORY + [call], worker_commands=[{"command": "printenv GKE_CLUSTER_NAME"}])
+    ambiguous = cap_one.verify(5.0)
+    assert ambiguous.status == "error" and "no task id to deduplicate" in ambiguous.reason
+    assert WorkerCommandsVerifier(type="worker_commands", max_commands=2).verify(5.0).status == "pass"
+    transcript.set(
+        "ok",
+        _TRAJECTORY + [call],
+        worker_commands=[{"command": "printenv GKE_CLUSTER_NAME"}, {"command": "kubectl get nodes"}],
+    )
+    assert cap_one.verify(5.0).status == "fail"
+
+    # Under after_result_pattern, max_commands bounds calls inside the window and fails closed on gaps.
+    window_cap = WorkerCommandsVerifier(
+        type="worker_commands",
+        after_result_pattern=r"policy rule: kubernetes\.read-only",
+        max_commands=1,
+    )
+    entries = [
+        _terminal("kubectl scale deploy kube-dns --replicas=3", _REFUSAL, at=1),
+        _terminal("kubectl get deploy kube-dns", at=2),
+    ]
+    _stash_terminal(entries)
+    assert window_cap.verify(5.0).status == "pass"
+    transcript.set("ok", _TRAJECTORY + entries, worker_capture_gaps=["card t_9: locked"])
+    assert window_cap.verify(5.0).status == "error"
+    entries.append(_terminal("kubectl describe deploy kube-dns", at=3))
+    transcript.set("ok", _TRAJECTORY + entries, worker_capture_gaps=["card t_9: locked"])
+    assert window_cap.verify(5.0).status == "fail"
+
+
 # ------------------------------- the retrospective's drained-budget case's line
 #
 # The budget's declared line, read out of its task file: the planted object under
