@@ -110,6 +110,11 @@ SCOPE_PARTIAL_UNRESOLVED = (
     "discovery has not resolved yet"
 )
 SCOPE_NONE_LISTED = "none read yet"
+# How many in-scope projects _format_scope names individually before counting
+# the rest: maxProjects admits up to 5000, and a folder or organisation past it
+# adds one over-cap row per remaining cluster-holding project
+# (bootstrap_scan_gate.py uses the same 20-project cap).
+SCOPE_NAMED_LIMIT = 20
 SCOPE_UNDECLARED = (
     "- No project scope is declared for this install (spec.scope is unset), so "
     "there is no fixed list to recite."
@@ -314,23 +319,43 @@ def _profile_name(project: str, cluster: str, location: str) -> str:
     return name
 
 
-def read_host_identity(agents: list[dict[str, str]] | None) -> dict[str, str] | None:
+def _management_project_id(base: Path | None = None) -> str:
+    """The install's own project ID from fleet_scope.json's management row, or ""."""
+    reader = _scope_reader()
+    fn = getattr(reader, "management_project_id", None) if reader is not None else None
+    if not callable(fn):
+        return ""
+    root = PROFILES_BASE if base is None else base
+    try:
+        return fn(root.parent) or ""
+    except Exception as e:
+        log(f"cannot read the management project: {e}")
+        return ""
+
+
+def read_host_identity(
+    agents: list[dict[str, str]] | None,
+    base: Path | None = None,
+) -> dict[str, str] | None:
     """The cluster this pod runs on, and its Cluster Agent when one exists.
 
     No cluster name, no host: a project or location alone cannot say which
     cluster "this cluster" is. The operator lets spec.harness.projectId be a
-    project number while the reconcile scaffolds every profile on the resolved
-    project ID, so an all-digit GKE_PROJECT_ID is never printed as the project
-    and matches the host profile on cluster and location instead (adopting its
-    stamped project ID when unambiguous). An assignee that is not a discovered
-    profile is never advertised, because a card filed to it is never dispatched.
+    project number while the reconcile resolves it to the project ID in
+    fleet_scope.json's management row and scaffolds every profile on that ID,
+    so an all-digit GKE_PROJECT_ID is never printed as the project and completes
+    the triple from the snapshot instead (omitting project and assignee until
+    the snapshot records it, rather than guessing on cluster and location). A
+    derived-name fallback applies only to an unstamped profile directory so a
+    hyphen-boundary collision never overrides a disagreeing cluster_identity.
+    An assignee that is not a discovered profile is never advertised, because a
+    card filed to it is never dispatched.
     """
     cluster = _host_env(HOST_CLUSTER_ENV)
     if not cluster:
         return None
     raw_project = _host_env(HOST_PROJECT_ENV)
-    numeric_project = raw_project.isdigit()
-    project = "" if numeric_project else raw_project
+    project = _management_project_id(base) if raw_project.isdigit() else raw_project
     location = _host_env(HOST_LOCATION_ENV)
     host = {IDENTITY_NAME_KEY: cluster}
     if project:
@@ -343,7 +368,7 @@ def read_host_identity(agents: list[dict[str, str]] | None) -> dict[str, str] | 
             IDENTITY_PROJECT_KEY: project,
             IDENTITY_LOCATION_KEY: location,
         }
-        names = {a["name"] for a in agents or []}
+        by_name = {a["name"]: a for a in agents or []}
         match = next(
             (
                 a["name"]
@@ -353,21 +378,16 @@ def read_host_identity(agents: list[dict[str, str]] | None) -> dict[str, str] | 
             "",
         )
         derived = _profile_name(project, cluster, location)
-        assignee = match or (derived if derived in names else "")
+        derived_entry = by_name.get(derived)
+        unstamped = (
+            derived
+            if derived_entry is not None
+            and not any(derived_entry.get(IDENTITY_FIELD_PREFIX + k) for k in IDENTITY_KEYS)
+            else ""
+        )
+        assignee = match or unstamped
         if assignee:
             host[HOST_ASSIGNEE_KEY] = assignee
-    elif numeric_project and location:
-        wanted = {IDENTITY_NAME_KEY: cluster, IDENTITY_LOCATION_KEY: location}
-        matches = [
-            a
-            for a in agents or []
-            if all(a.get(IDENTITY_FIELD_PREFIX + k) == v for k, v in wanted.items())
-        ]
-        if len(matches) == 1:
-            stamped = matches[0].get(IDENTITY_FIELD_PREFIX + IDENTITY_PROJECT_KEY, "")
-            if stamped and not stamped.isdigit():
-                host[IDENTITY_PROJECT_KEY] = stamped
-            host[HOST_ASSIGNEE_KEY] = matches[0]["name"]
     return host
 
 
@@ -416,8 +436,26 @@ def _format_scope(base: Path | None = None) -> str:
     if targets is None:
         return f"{SCOPE_HEADING}\n{SCOPE_UNDECLARED}"
     unresolved_row = getattr(reader, "UNRESOLVED_SCOPE_ROW", None)
-    listed = list(targets.projects)
-    listed += [f"{p} ({outcome})" for p, outcome in targets.unread if p != unresolved_row]
+    entries: list[tuple[str, str | None]] = [
+        *((p, None) for p in targets.projects),
+        *((p, outcome) for p, outcome in targets.unread if p != unresolved_row),
+    ]
+    total = len(entries)
+    listed = [
+        p if outcome is None else f"{p} ({outcome})"
+        for p, outcome in entries[:SCOPE_NAMED_LIMIT]
+    ]
+    if total > SCOPE_NAMED_LIMIT:
+        omitted = entries[SCOPE_NAMED_LIMIT:]
+        outcome_counts: dict[str, int] = {}
+        for _, outcome in omitted:
+            if outcome is not None:
+                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        if outcome_counts:
+            breakdown = ", ".join(f"{n} {outcome}" for outcome, n in outcome_counts.items())
+            listed.append(f"and {len(omitted)} more ({breakdown})")
+        else:
+            listed.append(f"and {len(omitted)} more")
     if targets.note:
         note_reasons = {
             getattr(reader, "RENDER_NOTE", None): SCOPE_PARTIAL_PENDING,
@@ -431,7 +469,7 @@ def _format_scope(base: Path | None = None) -> str:
     projects = ", ".join(listed) or SCOPE_NONE_LISTED
     if reason:
         return f"{SCOPE_HEADING}\n{SCOPE_PARTIAL_LINE.format(reason=reason, projects=projects)}"
-    return f"{SCOPE_HEADING}\n{SCOPE_LINE.format(count=len(listed), projects=projects)}"
+    return f"{SCOPE_HEADING}\n{SCOPE_LINE.format(count=total, projects=projects)}"
 
 
 def render(base: Path | None = None) -> str | None:
@@ -444,5 +482,5 @@ def render(base: Path | None = None) -> str | None:
     roster = format_roster(agents)
     if roster is None:
         return None
-    extra = [b for b in (_format_host(read_host_identity(agents)), _format_scope(base)) if b]
+    extra = [b for b in (_format_host(read_host_identity(agents, base)), _format_scope(base)) if b]
     return "\n\n".join([roster, *extra])

@@ -282,6 +282,37 @@ def snapshot_path(agent_home: str | os.PathLike | None = None) -> Path:
     return Path(root) / SNAPSHOT_FILE
 
 
+def management_project_id(agent_home: str | os.PathLike | None = None) -> str | None:
+    """The install's own project ID from the reconcile snapshot's management row, or None.
+
+    When spec.harness.projectId is a project number, the reconcile resolves it to
+    its project ID before writing the snapshot (cluster_agent_reconcile.py),
+    whether or not spec.scope is declared. A digit-only value is refused so a
+    corrupt file never hands on a project number as an ID.
+    """
+    path = snapshot_path(agent_home)
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("projects"), list):
+        return None
+    for row in parsed["projects"]:
+        if not isinstance(row, dict) or row.get("state", STATE_IN_SCOPE) != STATE_IN_SCOPE:
+            continue
+        via = row.get("via")
+        project = row.get("id")
+        if (
+            isinstance(via, list)
+            and VIA_MANAGEMENT in via
+            and isinstance(project, str)
+            and project
+            and not project.isdigit()
+        ):
+            return project
+    return None
+
+
 def _read_render() -> dict | None:
     """The operator's render of spec.scope; None when no render is named (a
     checkout, an image ahead of its operator). A named render that cannot be

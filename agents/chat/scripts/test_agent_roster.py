@@ -337,21 +337,90 @@ class TestHostAndScopeSections(unittest.TestCase):
             out = self._render(base, env)
         self.assertIn("assignee=cluster-kube-agents-demo-fresh-host-us-central1", out)
 
+    def test_derived_name_fallback_rejects_colliding_profile_with_different_identity(self):
+        # _profile_name is not injective on interior hyphens: ("a-b", "c", loc) and
+        # ("a", "b-c", loc) both derive cluster-a-b-c-<loc>. When the colliding
+        # profile carries a stamped cluster_identity for the other cluster, the
+        # host line must not advertise it as assignee.
+        env = {
+            "GKE_PROJECT_ID": "a-b",
+            "GKE_CLUSTER_NAME": "c",
+            "GKE_LOCATION": "us-central1",
+        }
+        with TemporaryDirectory() as tmp:
+            base = self._fleet(tmp)
+            colliding = base / "cluster-a-b-c-us-central1"
+            colliding.mkdir()
+            (colliding / "CAPABILITIES.md").write_text("One cluster's runtime state.\n")
+            (colliding / "config.yaml").write_text(
+                "cluster_identity:\n  cluster: b-c\n  location: us-central1\n  project: a\n"
+            )
+            out = self._render(base, env)
+        host_section = out.split(agent_roster.HOST_IDENTITY_HEADING)[1].split("\n\n")[0]
+        self.assertIn("- cluster=c, project=a-b, location=us-central1", host_section)
+        self.assertNotIn("assignee=", host_section)
+
     def test_numeric_host_project_matches_the_scaffolded_profile_and_adopts_its_id(self):
         # spec.harness.projectId accepts a project number; the reconcile resolves
-        # it to the project ID before scaffolding profiles, so the host line must
-        # match on (cluster, location), adopt the stamped project ID, and never
-        # recite the project number as an ID.
+        # it to the project ID in fleet_scope.json's management row before
+        # scaffolding profiles, whether or not spec.scope is declared.
         env = dict(self.HOST_ENV, GKE_PROJECT_ID="123456789012")
+        for boundary in (False, True):
+            with self.subTest(boundary=boundary), TemporaryDirectory() as tmp:
+                base = self._fleet(tmp)
+                self._snapshot(tmp, {
+                    "boundary": boundary, "present": boundary, "declared": {},
+                    "projects": [
+                        {"id": "kube-agents-demo", "state": "in-scope", "outcome": "ok", "via": ["management"]},
+                    ],
+                })
+                out = self._render(base, env)
+                self.assertIn(
+                    agent_roster.HOST_IDENTITY_HEADING + "\n"
+                    "- cluster=platform-agent-host, project=kube-agents-demo, location=us-central1, "
+                    "assignee=cluster-kube-agents-demo-platform-agent-host-us-central1",
+                    out,
+                )
+                self.assertNotIn("123456789012", out)
+
+    def test_numeric_host_project_does_not_elect_another_projects_same_named_cluster(self):
+        # When the host's own profile is absent (excluded in spec.scope.exclude.clusters
+        # or not yet scaffolded) and another project has a same-named cluster in the
+        # same location, numeric GKE_PROJECT_ID must never adopt that other project's
+        # ID or assignee — neither before the snapshot exists nor after.
+        env = {
+            "GKE_CLUSTER_NAME": "prod",
+            "GKE_PROJECT_ID": "123456789012",
+            "GKE_LOCATION": "us-central1",
+        }
         with TemporaryDirectory() as tmp:
-            out = self._render(self._fleet(tmp), env)
-        self.assertIn(
-            agent_roster.HOST_IDENTITY_HEADING + "\n"
-            "- cluster=platform-agent-host, project=kube-agents-demo, location=us-central1, "
-            "assignee=cluster-kube-agents-demo-platform-agent-host-us-central1",
-            out,
-        )
-        self.assertNotIn("123456789012", out)
+            base = self._fleet(tmp)
+            other = base / "cluster-team-a-prod-us-central1"
+            other.mkdir()
+            (other / "CAPABILITIES.md").write_text("One cluster's runtime state.\n")
+            (other / "config.yaml").write_text(
+                "cluster_identity:\n  cluster: prod\n  location: us-central1\n  project: team-a\n"
+            )
+            before_snapshot = self._render(base, env)
+            before_host = before_snapshot.split(agent_roster.HOST_IDENTITY_HEADING)[1].split("\n\n")[0]
+            self.assertIn("- cluster=prod, location=us-central1", before_host)
+            self.assertNotIn("project=", before_host)
+            self.assertNotIn("assignee=", before_host)
+            self.assertNotIn("team-a", before_host)
+
+            self._snapshot(tmp, {
+                "boundary": True, "present": True,
+                "declared": {"projects": ["team-a"]},
+                "projects": [
+                    {"id": "host-proj", "state": "in-scope", "outcome": "ok", "via": ["management"]},
+                    {"id": "team-a", "state": "in-scope", "outcome": "ok", "via": ["projects"]},
+                ],
+            })
+            after_snapshot = self._render(base, env)
+            after_host = after_snapshot.split(agent_roster.HOST_IDENTITY_HEADING)[1].split("\n\n")[0]
+            self.assertIn("- cluster=prod, project=host-proj, location=us-central1", after_host)
+            self.assertNotIn("assignee=", after_host)
+            self.assertNotIn("team-a", after_host)
 
     def test_numeric_host_project_without_a_matching_profile_omits_the_number(self):
         env = {
@@ -444,6 +513,105 @@ class TestHostAndScopeSections(unittest.TestCase):
             })
             out = self._render(base, {})
         self.assertIn("kube-agents-demo, no-clusters-here (unresolved)", out)
+
+    def test_snapshot_with_unresolved_container_uses_unresolved_partial_reason(self):
+        cases = [
+            {
+                "boundary": True, "present": False,
+                "declared": {"folders": ["123"]},
+                "projects": [
+                    {"id": "kube-agents-demo", "state": "in-scope", "outcome": "ok", "via": ["management"]},
+                ],
+            },
+            {
+                "boundary": True, "present": True,
+                "declared": {"folders": ["123"]},
+                "containers": [{"id": "folders/123", "outcome": "denied"}],
+                "projects": [
+                    {"id": "kube-agents-demo", "state": "in-scope", "outcome": "ok", "via": ["management"]},
+                ],
+            },
+        ]
+        for payload in cases:
+            with self.subTest(present=payload["present"]), TemporaryDirectory() as tmp:
+                base = self._fleet(tmp)
+                self._snapshot(tmp, payload)
+                out = self._render(base, {})
+                scope_section = out.split(agent_roster.SCOPE_HEADING)[1]
+                self.assertIn(
+                    f"- GCP projects in scope (partial: {agent_roster.SCOPE_PARTIAL_UNRESOLVED}): kube-agents-demo",
+                    scope_section,
+                )
+                self.assertNotRegex(scope_section, r"GCP projects in scope \(\d+\)")
+                self.assertNotIn("declared-scope", scope_section)
+
+    def test_scope_bounds_large_in_scope_and_over_cap_lists(self):
+        # An install with many readable or over-cap rows must cap named projects
+        # at SCOPE_NAMED_LIMIT and summarize the remainder on every turn.
+        with TemporaryDirectory() as tmp:
+            base = self._fleet(tmp)
+            self._snapshot(tmp, {
+                "boundary": True, "present": True,
+                "declared": {"folders": ["123"]},
+                "projects": [
+                    {"id": "kube-agents-demo", "state": "in-scope", "outcome": "ok", "via": ["management"]},
+                    {"id": "app-prod", "state": "in-scope", "outcome": "ok", "via": ["folders/123"]},
+                    *[
+                        {"id": f"cap-{i:02d}", "state": "in-scope", "outcome": "over-cap", "via": ["folders/123"]}
+                        for i in range(30)
+                    ],
+                ],
+            })
+            out = self._render(base, {})
+        scope_section = out.split(agent_roster.SCOPE_HEADING)[1]
+        self.assertIn("- GCP projects in scope (32): kube-agents-demo, app-prod, cap-00 (over-cap)", scope_section)
+        self.assertIn("cap-17 (over-cap), and 12 more (12 over-cap)", scope_section)
+        self.assertNotIn("cap-18", scope_section)
+
+        with TemporaryDirectory() as tmp:
+            base = self._fleet(tmp)
+            self._snapshot(tmp, {
+                "boundary": True, "present": True,
+                "declared": {"folders": ["123"]},
+                "projects": [
+                    *[
+                        {"id": f"ok-{i:02d}", "state": "in-scope", "outcome": "ok",
+                         "via": ["management"] if i == 0 else ["folders/123"]}
+                        for i in range(25)
+                    ],
+                    *[
+                        {"id": f"cap-{i:02d}", "state": "in-scope", "outcome": "over-cap", "via": ["folders/123"]}
+                        for i in range(10)
+                    ],
+                    *[
+                        {"id": f"den-{i:02d}", "state": "in-scope", "outcome": "denied", "via": ["folders/123"]}
+                        for i in range(2)
+                    ],
+                ],
+            })
+            out_mixed = self._render(base, {})
+        mixed_section = out_mixed.split(agent_roster.SCOPE_HEADING)[1]
+        self.assertIn("- GCP projects in scope (37): ok-00", mixed_section)
+        self.assertIn("ok-19, and 17 more (10 over-cap, 2 denied)", mixed_section)
+        self.assertNotIn("ok-20", mixed_section)
+        self.assertNotIn("cap-00", mixed_section)
+
+        with TemporaryDirectory() as tmp:
+            base = self._fleet(tmp)
+            self._snapshot(tmp, {
+                "boundary": True, "present": True,
+                "declared": {"folders": ["123"]},
+                "projects": [
+                    {"id": f"ok-{i:02d}", "state": "in-scope", "outcome": "ok",
+                     "via": ["management"] if i == 0 else ["folders/123"]}
+                    for i in range(25)
+                ],
+            })
+            out_ok = self._render(base, {})
+        ok_section = out_ok.split(agent_roster.SCOPE_HEADING)[1]
+        self.assertIn("- GCP projects in scope (25): ok-00", ok_section)
+        self.assertTrue(ok_section.strip().endswith("ok-19, and 5 more"), ok_section)
+        self.assertNotIn("ok-20", ok_section)
 
     def test_boundary_false_reads_the_render_and_says_partial(self):
         # The CR gained spec.scope since the last tick: the snapshot predates it.
