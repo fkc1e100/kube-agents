@@ -660,6 +660,7 @@ ENTRY_MODES = frozenset({"converge", "assert"})
 # case's turn too, since the nightly runs every case against one install.
 GREET_EVAL_STACK = "prebuilt/first-install-hello"
 GREET_EVAL_PHRASE_MIN_LENGTH = 12
+WORKER_COMMANDS_NEVER_OPENING_WINDOW = "(?!)"
 
 
 def _populated(value: Any) -> bool:
@@ -1009,6 +1010,17 @@ def _check_assertions(node: Any, where: str, problems: list[str]) -> None:
         problems.append(
             f"{where}: check '{node_type}' populates none of "
             f"{list(fields)}, so it can only pass"
+        )
+    if (
+        node_type == "worker_commands"
+        and node.get("max_commands") is not None
+        and isinstance(node.get("after_result_pattern"), str)
+        and node["after_result_pattern"].strip() == WORKER_COMMANDS_NEVER_OPENING_WINDOW
+    ):
+        problems.append(
+            f"{where}: check 'worker_commands' sets 'max_commands' beside "
+            f"after_result_pattern {WORKER_COMMANDS_NEVER_OPENING_WINDOW!r}, "
+            "which never opens a window and can never fail the cap"
         )
 
 

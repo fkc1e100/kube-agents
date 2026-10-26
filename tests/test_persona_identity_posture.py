@@ -17,6 +17,7 @@ Run:
 from __future__ import annotations
 
 import re
+import shlex
 import unittest
 from pathlib import Path
 
@@ -39,23 +40,51 @@ NEGATIVE_PROSE_LITERAL_RE = re.compile(r"\bliteral\s+`\$\{?GCP_PROJECT_ID\}?`")
 SANDBOX_UNREACHABLE_DOCS = "/opt/defaults/docs/"
 CONSOLE_URL_RE = re.compile(r"`(https://console\.cloud\.google\.com/[^`]+)`")
 FORWARDED_ENV_RE = re.compile(r'SANDBOX_FORWARDED_ENV_NAMES="([^"]+)"')
-# Matches `$VAR` / `${VAR}` expansions (including single-word names) and bare
-# SCREAMING_SNAKE_CASE identifiers anywhere in the bullet.
-ENV_VAR_NAME_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?|\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b")
-# Matches bare uppercase variable names (single-word or multi-word, such as
-# `printenv HOSTNAME` or `declare -p PROJECT`) in executable env-read contexts.
+CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+ENV_IDENT_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# Closed code-span scan: cites every uppercase identifier token inside a
+# backticked span (excluding `/`-prefixed path segments, `-[A-Z]` CLI flags,
+# `%XX` URL escapes, and uppercase filenames like `INVENTORY.md`), so no quoted,
+# piped, awk/grep, or other command spelling in a SOUL code span can hide an
+# unforwarded variable name behind an unenumerated verb.
+CODE_SPAN_ENV_RE = re.compile(
+    r"(?<![/%-])\b([A-Z][A-Z0-9_]*)\b(?!\.(?:md|yaml|yml|json|py|sh|txt|toml)\b)"
+)
+# Matches `$VAR`, `${VAR}`, `${!VAR}`, `${#VAR}`, and `${VAR:-...}` expansions
+# anywhere in prose or code spans, plus bare SCREAMING_SNAKE_CASE identifiers.
+DOLLAR_ENV_RE = re.compile(r"\$(?:\{[!#]?([A-Z][A-Z0-9_]*)(?:[^}]*)?\}|([A-Z][A-Z0-9_]*)\b)")
+SCREAMING_SNAKE_RE = re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b")
+# Unbackticked fallbacks for plain-prose shell or Python env reads written
+# without code fences (including quoted variable names and piped grep dumps).
+QUOTED_OR_BARE_ENV_TOKEN_RE = re.compile(r"[\"']?([A-Z][A-Z0-9_]*)[\"']?")
 EXEC_ENV_ARGS_RE = re.compile(
-    r"(?:\b(?:printenv(?:\s+(?:-0|--null))*|(?:declare|typeset)(?:\s+-[A-Za-z]+)*|export(?:\s+-[A-Za-z]+)+|"
-    r"env\s+(?:-u|--unset))(?:=|\s+)(?:--\s+)?|`export\s+)"
-    r"([A-Z][A-Z0-9_]*(?:\s+[A-Z][A-Z0-9_]*)*)"
+    r"\b(?:printenv(?:\s+(?:-0|--null))*|(?:declare|typeset)(?:\s+-[A-Za-z]+)*|"
+    r"export(?:\s+-[A-Za-z]+)+|env\s+(?:-u|--unset))(?:=|\s+)(?:--\s+)?"
+    r"([\"']?[A-Z][A-Z0-9_]*[\"']?(?:\s+[\"']?[A-Z][A-Z0-9_]*[\"']?)*)"
+)
+DUMP_PIPE_GREP_RE = re.compile(
+    r"\b(?:printenv|env|set|export|declare|typeset)\b[^.\n]*?\|\s*(?:e?grep|fgrep|rg)\b"
+    r"(?:\s+(?:-[A-Za-z0-9-]+|\d+)\s+)*\s*[\"'^(]*([A-Z][A-Z0-9_]*)"
 )
 PY_ENV_LOOKUP_RE = re.compile(r"\b(?:environ(?:\.get)?\s*[\[(]|getenv\s*\()\s*['\"]([A-Z][A-Z0-9_]*)['\"]")
 
 
 def _cited_env_vars(text: str) -> set[str]:
-    names = {dollar or bare for dollar, bare in ENV_VAR_NAME_RE.findall(text)}
+    names = {braced or bare for braced, bare in DOLLAR_ENV_RE.findall(text)}
+    names.update(SCREAMING_SNAKE_RE.findall(text))
+    for span in CODE_SPAN_RE.findall(text):
+        try:
+            tokens = shlex.split(span, posix=True)
+        except ValueError:
+            tokens = []
+        for token in tokens:
+            candidate = token.split("=", 1)[0] if "=" in token else token
+            if ENV_IDENT_RE.fullmatch(candidate):
+                names.add(candidate)
+        names.update(CODE_SPAN_ENV_RE.findall(span))
     for arg_group in EXEC_ENV_ARGS_RE.findall(text):
-        names.update(arg_group.split())
+        names.update(QUOTED_OR_BARE_ENV_TOKEN_RE.findall(arg_group))
+    names.update(DUMP_PIPE_GREP_RE.findall(text))
     names.update(PY_ENV_LOOKUP_RE.findall(text))
     return names
 
@@ -114,8 +143,9 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         self.assertIsNotNone(match, "deploy/sandbox/entrypoint.sh must define SANDBOX_FORWARDED_ENV_NAMES")
         forwarded = set(match.group(1).split())
 
-        # Assert every environment variable cited in the identity bullet (`$VAR`, `${VAR}`, bare
-        # SCREAMING_SNAKE_CASE, or bare single-word `printenv HOSTNAME`) is forwarded to the sandbox.
+        # Assert every environment variable cited in the identity bullet (any uppercase
+        # identifier in a backticked code span, any `$VAR`/`${VAR}`/`${!VAR}` expansion, bare
+        # SCREAMING_SNAKE_CASE, or unbackticked env-read command) is forwarded to the sandbox.
         vars_in_bullet = _cited_env_vars(bullet)
         self.assertTrue(vars_in_bullet, "identity bullet must cite at least one forwarded env var")
         self.assertTrue(
@@ -149,9 +179,22 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             ("GCP_PROJECT_ID", "`$GKE_PROJECT_ID`, i.e. `${GCP_PROJECT_ID}`"),
             ("GCP_PROJECT_ID", "or `printenv GCP_PROJECT_ID`"),
             ("HOSTNAME", "resolve it with `printenv HOSTNAME`"),
+            ("HOSTNAME", 'resolve it with `printenv "HOSTNAME"`'),
+            ("HOSTNAME", "resolve it with `printenv 'HOSTNAME'`"),
+            ("HOSTNAME", 'printenv "HOSTNAME"'),
             ("HOSTNAME", "printenv -- HOSTNAME"),
             ("HOSTNAME", "printenv GKE_PROJECT_ID HOSTNAME"),
+            ("HOSTNAME", "`env | grep HOSTNAME`"),
+            ("HOSTNAME", "env | grep HOSTNAME"),
+            ("HOSTNAME", "`printenv | grep -w HOSTNAME`"),
+            ("HOSTNAME", "printenv | grep -w HOSTNAME"),
+            ("HOSTNAME", "`env | grep '^HOSTNAME='`"),
+            ("HOSTNAME", "`awk 'BEGIN{print ENVIRON[\"HOSTNAME\"]}'`"),
+            ("HOSTNAME", "read `HOSTNAME` from the environment"),
+            ("HOSTNAME", "${!HOSTNAME}"),
+            ("HOSTNAME", "`${!HOSTNAME}`"),
             ("PROJECT", "declare -p PROJECT"),
+            ("PROJECT", 'declare -p "PROJECT"'),
             ("PROJECT", "typeset -xp PROJECT"),
             ("HOSTNAME", "$HOSTNAME"),
         ):
@@ -172,7 +215,8 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         self.assertEqual(
             _cited_env_vars(
                 "on GKE installs in GCP (`in-cluster`, `gke_kind_kind_kind`, "
-                "`gke_<project>_<location>_<cluster>`, `/opt/data/INVENTORY.md`)"
+                "`gke_<project>_<location>_<cluster>`, `/opt/data/INVENTORY.md`, "
+                "`INVENTORY.md`, `kubectl get pods -A`)"
             ),
             set(),
         )

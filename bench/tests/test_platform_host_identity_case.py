@@ -38,11 +38,12 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    filters), with parity pinned across all ``_SHELL_EXEC_WRAPPERS`` (including
    ``setsid``, ``ionice``, ``sudo``, ``time``, ``watch``, ``exec``, ``xargs``,
    ``chroot``, ``timeout infinity``, and ``timeout $T``), while rejecting
-   commands that wipe or override the forwarded variables (``env -i`` anywhere
-   on the line, ``env -u GKE_...``, ``env GKE_CLUSTER_NAME=foo ...``, or leading
-   ``GKE_CLUSTER_NAME=foo ...``), read unrelated variables (``printenv PATH``,
-   ``KUBE_POD_NAME``), merely mention a variable name (``kubectl ... | grep
-   GKE_``, ``grep -r KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``for v
+   commands that wipe or override the forwarded variables (``env -i`` or
+   ``env -`` anywhere on the line, ``env -u GKE_...``,
+   ``env GKE_CLUSTER_NAME=foo ...``, or leading ``GKE_CLUSTER_NAME=foo ...``),
+   read unrelated variables (``printenv PATH``, ``KUBE_POD_NAME``), merely
+   mention a variable name (``kubectl ... | grep GKE_``, ``grep -r
+   KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``for v
    in GKE_CLUSTER_NAME; do echo "$v"; done``), or use ``env`` as a
    command-execution prefix (``env KUBECONFIG=...``,
    ``env GKE_CLUSTER_NAME=foo kubectl ...``).
@@ -209,6 +210,7 @@ CLEAN_ENV_COMMANDS = [
     "timeout 30 printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME",
     "flock /tmp/lock printenv GKE_CLUSTER_NAME",
     "env -u FOO printenv GKE_CLUSTER_NAME",
+    "env -- printenv GKE_CLUSTER_NAME",
     "printenv -- GKE_CLUSTER_NAME",
     "/usr/bin/printenv -0 KUBE_CONTEXT_NAME",
     "bash -c 'printenv GKE_CLUSTER_NAME'",
@@ -278,6 +280,14 @@ NON_ENV_READ_COMMANDS = [
     "env -u FOO -i printenv GKE_CLUSTER_NAME",
     "env -i env",
     'env -i bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+    "env -",
+    "env - printenv GKE_CLUSTER_NAME",
+    "env '-' printenv GKE_CLUSTER_NAME",
+    "env -u FOO - printenv GKE_CLUSTER_NAME",
+    "env FOO=1 - printenv GKE_CLUSTER_NAME",
+    "env - FOO=1 printenv GKE_CLUSTER_NAME",
+    "bash -c 'env - printenv GKE_CLUSTER_NAME'",
+    'env - bash -c \'echo "$GKE_CLUSTER_NAME"\'',
     "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
     "printenv PATH",
     "timeout 10 printenv PATH",
@@ -599,6 +609,7 @@ def test_exec_wrappers_agree_across_argv_and_text_env_read_leaves(prefix: str) -
 
     negative_overrides = (
         f"{prefix} env -i printenv GKE_CLUSTER_NAME",
+        f"{prefix} env - printenv GKE_CLUSTER_NAME",
         f"{prefix} GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME",
         f"{prefix} bash -c 'GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME'",
     )

@@ -1019,6 +1019,29 @@ class TestTheRulesReject(unittest.TestCase):
             ),
         )
 
+    def test_worker_commands_max_commands_beside_never_opening_window_is_rejected(self):
+        self._only(
+            "never opens a window and can never fail the cap",
+            verification_spec=self._entry(
+                check={
+                    "type": "worker_commands",
+                    "after_result_pattern": "(?!)",
+                    "max_commands": 1,
+                }
+            ),
+        )
+        self._only(
+            "never opens a window and can never fail the cap",
+            verification_spec=self._entry(
+                check={
+                    "type": "worker_commands",
+                    "after_result_pattern": "(?!)",
+                    "required_patterns": ["printenv"],
+                    "max_commands": 1,
+                }
+            ),
+        )
+
 
 class TestTheSanitizer(unittest.TestCase):
     """The fixture scan, against a tree built to trip exactly one rule at a time.

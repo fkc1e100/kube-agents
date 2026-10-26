@@ -9101,12 +9101,47 @@ def test_worker_commands_max_commands_bounds_run_and_window():
         _terminal("kubectl get deploy kube-dns", at=2),
     ]
     _stash_terminal(entries)
-    assert window_cap.verify(5.0).status == "pass"
+    opened_ok = window_cap.verify(5.0)
+    assert opened_ok.status == "pass" and "within max_commands=1" in opened_ok.reason
     transcript.set("ok", _TRAJECTORY + entries, worker_capture_gaps=["card t_9: locked"])
     assert window_cap.verify(5.0).status == "error"
     entries.append(_terminal("kubectl describe deploy kube-dns", at=3))
     transcript.set("ok", _TRAJECTORY + entries, worker_capture_gaps=["card t_9: locked"])
     assert window_cap.verify(5.0).status == "fail"
+
+    # When no result opens the window, max_commands bounds nothing: the reason
+    # names max_commands in "graded nothing" and omits "within max_commands".
+    unopened_entries = [
+        _terminal("kubectl get deploy kube-dns", "ok", at=1),
+        _terminal("kubectl describe deploy kube-dns", "ok", at=2),
+        _terminal("kubectl get pods", "ok", at=3),
+    ]
+    _stash_terminal(unopened_entries)
+    unopened_res = window_cap.verify(5.0)
+    assert unopened_res.status == "pass"
+    assert "within max_commands" not in unopened_res.reason
+    assert "and max_commands=1 graded nothing" in unopened_res.reason
+
+    window_cap_with_forbid = WorkerCommandsVerifier(
+        type="worker_commands",
+        after_result_pattern=r"policy rule: kubernetes\.read-only",
+        forbidden_patterns=[r"kubectl apply"],
+        max_commands=1,
+    )
+    unopened_both = window_cap_with_forbid.verify(5.0)
+    assert unopened_both.status == "pass"
+    assert "within max_commands" not in unopened_both.reason
+    assert "the forbidden pattern(s) and max_commands=1 graded nothing" in unopened_both.reason
+
+    # Combining max_commands with the documented never-opening "(?!)" idiom is refused.
+    for never_pattern in ("(?!)", " (?!) "):
+        with pytest.raises(ValueError, match=r'after_result_pattern: "\(\?!\)" would bound nothing'):
+            WorkerCommandsVerifier(
+                type="worker_commands",
+                after_result_pattern=never_pattern,
+                required_patterns=["printenv"],
+                max_commands=1,
+            )
 
 
 # ------------------------------- the retrospective's drained-budget case's line

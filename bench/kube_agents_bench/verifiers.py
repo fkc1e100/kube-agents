@@ -261,6 +261,7 @@ _MARKDOWN_NOISE = str.maketrans({"*": None, "_": None, "`": None, "’": "'"})
 _FLAG_VALUE_SEPARATOR = "="
 _CLI_NEGATED_FLAG_PREFIX = "--no-"
 _SHORT_FLAG_LEN = 2
+_NEVER_OPENING_WINDOW_PATTERN = "(?!)"
 _UNJOINED_MAX_COMMANDS_REASON = (
     "worker command count cannot be bounded against max_commands={max_commands} because a "
     "card-log row carries no task id to deduplicate against tagged trajectory calls"
@@ -2981,7 +2982,10 @@ class WorkerCommandsVerifier(BaseVerifier):
     (on a logged card without ``after_result_pattern``, ``execute_code`` calls
     are absent from the log and are not counted; see Limits below) — the
     workers may issue (across the run, or inside the ``after_result_pattern``
-    window when set), exempted entries included.
+    window when set: setting ``max_commands`` makes the check forbidding and
+    counts only calls after the opener, so an unopened window bounds nothing
+    and ``after_result_pattern: "(?!)"`` is rejected), exempted entries
+    included.
 
     ``after_result_pattern`` makes the forbidden set order-aware, for a
     retry-after-refusal check (#2173): the defect is a write after the policy
@@ -3058,7 +3062,10 @@ class WorkerCommandsVerifier(BaseVerifier):
     untimed call and a gap beside a satisfied required set do not error it,
     and the card log's rows join its typed set, so a command the trajectory
     missed still counts (a case sets ``after_result_pattern: "(?!)"`` to
-    read the required commands as typed and nothing else). Fails closed like its siblings -- a run with no captured
+    read the required commands as typed and nothing else; ``max_commands``
+    cannot be combined with ``"(?!)"``, because setting a cap makes the check
+    forbidding and counts only calls after the opener, so a window that never
+    opens bounds nothing). Fails closed like its siblings -- a run with no captured
     worker commands is ``status="error"``, not a pass.
     """
 
@@ -3078,6 +3085,19 @@ class WorkerCommandsVerifier(BaseVerifier):
         for pattern in patterns:
             re.compile(pattern)
         return patterns
+
+    @model_validator(mode="after")
+    def _max_commands_cannot_use_never_opening_window(self) -> WorkerCommandsVerifier:
+        if (
+            self.max_commands is not None
+            and self.after_result_pattern is not None
+            and self.after_result_pattern.strip() == _NEVER_OPENING_WINDOW_PATTERN
+        ):
+            raise ValueError(
+                "max_commands counts only commands after after_result_pattern opens a window, "
+                'so after_result_pattern: "(?!)" would bound nothing'
+            )
+        return self
 
     @field_validator("after_result_pattern")
     @classmethod
@@ -3220,9 +3240,16 @@ class WorkerCommandsVerifier(BaseVerifier):
             if not forbidding:
                 window = ""
             elif not opened:
+                graded_targets = "the forbidden pattern(s)"
+                if self.max_commands is not None:
+                    graded_targets = (
+                        f"the forbidden pattern(s) and max_commands={self.max_commands}"
+                        if (self.forbidden_patterns or self.forbidden_result_patterns)
+                        else f"max_commands={self.max_commands}"
+                    )
                 window = (
                     f"; no worker command opened the window ({self.after_result_pattern!r} in the result"
-                    " of any command, failed or not), so no command is after it and the forbidden pattern(s) graded nothing"
+                    f" of any command, failed or not), so no command is after it and {graded_targets} graded nothing"
                 )
             else:
                 window = (
@@ -3320,7 +3347,11 @@ class WorkerCommandsVerifier(BaseVerifier):
                 f"required pattern(s) matched, all {len(self.required_runs)} required run(s) made, "
                 f"none of {len(self.forbidden_patterns) + len(self.forbidden_result_patterns)} forbidden pattern(s) matched, "
                 f"none of {len(self.forbidden_runs)} forbidden run(s) made"
-                + (f", within max_commands={self.max_commands}" if self.max_commands is not None else "")
+                + (
+                    f", within max_commands={self.max_commands}"
+                    if self.max_commands is not None and (self.after_result_pattern is None or bool(opened))
+                    else ""
+                )
                 + window
             ),
         )
