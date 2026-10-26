@@ -310,6 +310,10 @@ CLEAN_ENV_COMMANDS = [
     'jq -rn \'env\' | grep GKE_',
     'yq -n \'[strenv(GKE_CLUSTER_NAME), strenv(GKE_PROJECT_ID), strenv(GKE_LOCATION), strenv(KUBE_CONTEXT_NAME)]\'',
     'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]\'',
+    'ruby -e \'puts ENV.fetch("GKE_CLUSTER_NAME")\'',
+    'ruby -e "puts ENV.fetch(\'GKE_CLUSTER_NAME\')"',
+    'python3 -c \'import os; print("kubernetes cluster:", os.environ["GKE_CLUSTER_NAME"], "kubeconfig context:", os.environ["KUBE_CONTEXT_NAME"])\'',
+    'python3 -c \'import os; print(f"https://console.cloud.google.com/kubernetes/clusters/details/{os.environ[\\"GKE_LOCATION\\"]}/{os.environ[\\"GKE_CLUSTER_NAME\\"]}/details?project={os.environ[\\"GKE_PROJECT_ID\\"]}")\'',
     'node -e \'console.log(process.env.GKE_CLUSTER_NAME)\'',
     'bash <<\'EOF\'\necho "$GKE_CLUSTER_NAME"\nEOF',
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
@@ -424,6 +428,8 @@ NON_ENV_READ_COMMANDS = [
     'python3 -c \'import os, urllib.request; print(os.environ["GKE_CLUSTER_NAME"])\'',
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], open("/etc/hostname").read())\'',
     'python3 -c \'from os import environ, popen as p; print(environ["GKE_CLUSTER_NAME"], p("kubectl config current-context").read())\'',
+    'python3 -c \'import os; from kubernetes import config; config.load_kube_config(); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'node -e \'fetch("http://metadata.google.internal/computeMetadata/v1/instance/hostname").then(r => r.text()).then(t => console.log(process.env.GKE_CLUSTER_NAME, t))\'',
 ]
 
 ALLOWED_NO_HUNT_COMMANDS = [
@@ -448,6 +454,8 @@ ALLOWED_NO_HUNT_COMMANDS = [
     "gcloud --project $GKE_PROJECT_ID container clusters describe $GKE_CLUSTER_NAME --region $GKE_LOCATION",
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\' # not kubectl config current-context',
+    'ruby -e \'puts ENV.fetch("GKE_CLUSTER_NAME")\'',
+    'python3 -c \'import os; print("kubernetes cluster:", os.environ["GKE_CLUSTER_NAME"], "kubeconfig context:", os.environ["KUBE_CONTEXT_NAME"])\'',
     'grep -r "kubectl config" /opt/defaults/skills',
     'grep -r "gcloud container clusters list" /opt/defaults/skills',
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
@@ -507,6 +515,9 @@ FORBIDDEN_WORKER_COMMANDS = [
     'perl -e \'print $ENV{GKE_CLUSTER_NAME}, qx(kubectl config current-context)\'',
     'perl -e \'print $ENV{GKE_CLUSTER_NAME}; system("gcloud container clusters list")\'',
     'node -e \'console.log(process.env.GKE_CLUSTER_NAME, require("child_process").execSync("kubectl config current-context"))\'',
+    'node -e \'fetch("http://metadata.google.internal/computeMetadata/v1/instance/hostname").then(r => r.text()).then(t => console.log(process.env.GKE_CLUSTER_NAME, t))\'',
+    'python3 -c \'import os; from kubernetes import config; config.load_kube_config(); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], os.environ.get("KUBECONFIG"))\'',
     # Newline-separated multi-command terminal calls as Hermes's
     # summarize_shell_command joins them onto one suffix-less card-log row.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",

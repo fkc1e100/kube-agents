@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import functools
 import re
-import shlex
 import time
 import unittest
 from pathlib import Path
@@ -50,26 +49,28 @@ FORWARDED_ENV_RE = re.compile(r'SANDBOX_FORWARDED_ENV_NAMES="([^"]+)"')
 # Environment variable names must open with `[A-Z]` and end with `[A-Z0-9]` so a
 # trailing-underscore prefix filter like `env | grep GKE_` or `GKE_|KUBE_CONTEXT_`
 # is not misreported as an unforwarded variable name.
-ENV_IDENT_RE = re.compile(r"^[A-Z](?:[A-Z0-9_]*[A-Z0-9])?$")
-ATTACHED_UNSET_OPT_RE = re.compile(r"^-[A-HJ-TV-Za-hj-tv-z]*u([A-Z](?:[A-Z0-9_]*[A-Z0-9])?)$")
 # Closed code-span scan: cites every uppercase identifier token inside a
 # backticked span (excluding `/`-prefixed path segments, `-[A-Z]` CLI flags,
 # `%XX` URL escapes / `%ENV`, `BEGIN{`/`END{` awk blocks, `ENVIRON[...]`/`in
 # ENVIRON)` table names, `ENV{...}`/`ENV[...]`/`ENV.<method>` table names,
 # trailing-underscore prefixes like `GKE_`, and uppercase filenames like
-# `INVENTORY.md`), so no quoted, piped, awk/perl/grep, or other command spelling
-# in a SOUL code span can hide an unforwarded variable name behind an
-# unenumerated verb.
+# `INVENTORY_2026.md` or `CLUSTER_POLICY.yaml`), paired with
+# `ATTACHED_UNSET_OPT_RE` for attached `env -uVAR` short options, so no quoted,
+# piped, awk/perl/grep, or other command spelling in a SOUL code span can hide
+# an unforwarded variable name behind an unenumerated verb.
 CODE_SPAN_ENV_RE = re.compile(
     r"(?<![/%-])\b(?!(?:BEGIN|END)\s*\{)(?!ENVIRON\s*[\[\)])"
     r"(?!ENV(?:\s*[\{\[]|\.[A-Za-z_]))"
     r"([A-Z](?:[A-Z0-9_]*[A-Z0-9])?)\b(?!\.(?:md|yaml|yml|json|py|sh|txt|toml)\b)"
 )
+ATTACHED_UNSET_OPT_RE = re.compile(
+    r"(?<![\w-])-[A-HJ-TV-Za-hj-tv-z]*u([A-Z](?:[A-Z0-9_]*[A-Z0-9])?)\b"
+)
 # Matches `$VAR`, `${VAR}`, `${!VAR}`, `${#VAR}`, and `${VAR:-...}` expansions
-# anywhere in prose or code spans (excluding `$ENV{...}` / `$ENV.VAR` table
-# prefixes and trailing-underscore `$GKE_`), plus bare SCREAMING_SNAKE_CASE
-# identifiers. `[^A-Z0-9_}]` keeps the identifier and operator suffix disjoint
-# on unclosed `${...`.
+# in unbackticked prose (excluding `$ENV{...}` / `$ENV.VAR` table prefixes and
+# trailing-underscore `$GKE_`), plus bare SCREAMING_SNAKE_CASE identifiers.
+# `[^A-Z0-9_}]` keeps the identifier and operator suffix disjoint on unclosed
+# `${...`.
 DOLLAR_ENV_RE = re.compile(
     r"\$(?:\{[!#]?([A-Z](?:[A-Z0-9_]*[A-Z0-9])?)(?:[^A-Z0-9_}][^}]*)?\}|"
     r"(?!ENV(?:\s*\{|\.[A-Za-z_]))([A-Z](?:[A-Z0-9_]*[A-Z0-9])?)\b)"
@@ -129,22 +130,8 @@ def _cited_env_vars(text: str) -> set[str]:
     names = {braced or bare for braced, bare in DOLLAR_ENV_RE.findall(prose)}
     names.update(SCREAMING_SNAKE_RE.findall(prose))
     for span in code_spans:
-        names.update(braced or bare for braced, bare in DOLLAR_ENV_RE.findall(span))
-        names.update(SCREAMING_SNAKE_RE.findall(span))
-        try:
-            tokens = shlex.split(span, posix=True)
-        except ValueError:
-            tokens = []
-        for raw_token in tokens:
-            token = raw_token.strip("`")
-            unset_match = ATTACHED_UNSET_OPT_RE.match(token)
-            if unset_match:
-                names.add(unset_match.group(1))
-                continue
-            candidate = token.split("=", 1)[0] if "=" in token else token
-            if ENV_IDENT_RE.fullmatch(candidate):
-                names.add(candidate)
         names.update(CODE_SPAN_ENV_RE.findall(span))
+        names.update(ATTACHED_UNSET_OPT_RE.findall(span))
     return names
 
 
@@ -439,26 +426,34 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         prose_with_code = (
             "on GKE installs in GCP (`in-cluster`, `gke_kind_kind_kind`, "
             "`gke_<project>_<location>_<cluster>`, `/opt/data/INVENTORY.md`, "
-            "`INVENTORY.md`, `kubectl get pods -A`)"
+            "`/opt/data/INVENTORY_2026.md`, `INVENTORY.md`, `CLUSTER_POLICY.yaml`, "
+            "`kubectl get pods -A --GKE_X`, `%2F_PATH`)"
         )
         self.assertEqual(_unbackticked_env_reads(prose_with_code), [])
         self.assertEqual(_cited_env_vars(prose_with_code), set())
 
     def test_posture_regexes_run_linearly_on_adversarial_inputs(self):
-        start = time.process_time()
-        for payload in (
+        payloads = (
             "env | grep" + "   0" * ADVERSARIAL_REPEAT_COUNT + "!",
             "printenv | grep" + " -w" * ADVERSARIAL_REPEAT_COUNT + "!",
             "printenv" + " | sort" * ADVERSARIAL_REPEAT_COUNT + "!",
             "env " * ADVERSARIAL_REPEAT_COUNT + "!",
             "${" + "A" * ADVERSARIAL_REPEAT_COUNT,
             "`" + "A" * ADVERSARIAL_REPEAT_COUNT + "_`",
+            "`env -" + "u" * ADVERSARIAL_REPEAT_COUNT + "1`",
             "$" + "A" * ADVERSARIAL_REPEAT_COUNT + "_",
             "declare -" + "p" * ADVERSARIAL_REPEAT_COUNT + "1",
             "env -" + "u" * ADVERSARIAL_REPEAT_COUNT + "1",
             "set-" + "u" * ADVERSARIAL_REPEAT_COUNT + "1",
             "x#y\n" * ADVERSARIAL_REPEAT_COUNT,
-        ):
+        )
+        # Pre-tokenize CommonMark once outside the CPU timer so coverage.py line
+        # tracing inside pure-Python markdown-it-py is not charged against the
+        # posture regexes' O(n) backtracking budget.
+        for payload in payloads:
+            _code_spans_and_prose(payload)
+        start = time.process_time()
+        for payload in payloads:
             self.assertEqual(_cited_env_vars(payload), set())
             _unbackticked_env_reads(payload)
         elapsed = time.process_time() - start
