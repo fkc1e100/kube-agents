@@ -257,9 +257,11 @@ _MARKDOWN_NOISE = str.maketrans({"*": None, "_": None, "`": None, "’": "'"})
 # ``--flag=value`` carries its value inline; under the strict single reading for ``required_runs``,
 # ``--no-*`` and attached short options longer than ``-x`` (``-nkube-system``, ``-v6``) take no
 # following value word while other options before ``--`` take one; under ``forbidden_runs``,
-# options without ``=`` try both arities (0 and 1) so no untabled CLI flag hides a subcommand
-# (intentionally erring toward over-matching when a separate option value equals ``subcommands[0]``,
-# such as ``kubectl -n config get pods``, unlike inline ``--namespace=config`` or ``-nconfig``).
+# options without ``=`` try both arities (0 and 1) and unresolved shell expansions (``$OPTS``,
+# ``"$@"``) also try a transparent 0-word reading so neither an untabled CLI flag nor an
+# unexpanded option variable hides a subcommand (intentionally erring toward over-matching when a
+# separate option value equals ``subcommands[0]``, such as ``kubectl -n config get pods``, unlike
+# inline ``--namespace=config`` or ``-nconfig``).
 _FLAG_VALUE_SEPARATOR = "="
 _CLI_NEGATED_FLAG_PREFIX = "--no-"
 _SHORT_FLAG_LEN = 2
@@ -2762,18 +2764,25 @@ def _argv_runs(argv: list[str], run: WorkerRun, *, forbid: bool = False) -> bool
     return False
 
 
+def _is_shell_expansion_word(word: str) -> bool:
+    return word.lstrip(_SHELL_SINGLE_QUOTE + _SHELL_DOUBLE_QUOTE).startswith(
+        (_SHELL_EXPANSION_PREFIX, _SHELL_BACKTICK)
+    )
+
+
 def _subcommands_match(words: list[str], subcommands: list[str], *, forbid: bool = False) -> bool:
     """Whether ``words`` opens with ``subcommands`` as leading positional words once options,
     redirects and their values are skipped. An option carrying ``=`` holds its value inline; under
     the single reading used for ``required_runs`` (``forbid=False``), ``--no-*`` and short options
     longer than ``-x`` (``-nkube-system``, ``-v6``) also take no value word and any other option
     before ``--`` takes one. Under ``forbidden_runs`` (``forbid=True``), any option without ``=``
-    has unknown arity without the CLI's flag table, so both arities (``0`` and ``1``) are tried and
-    the run matches if either reading places ``subcommands`` at the front — intentionally erring
-    toward over-matching on the denylist side when an option's separate value word equals
-    ``subcommands[0]`` (e.g. ``kubectl -n config get pods`` or ``kubectl --context config ...``
-    matches ``subcommands=["config"]``, whereas inline ``--namespace=config`` or ``-nconfig`` does
-    not)."""
+    has unknown arity without the CLI's flag table, so both arities (``0`` and ``1``) are tried —
+    and an unresolved shell expansion (``$OPTS``, ``"$OPTS"``, ``"$@"``, ``$(...)``) also tries a
+    transparent 0-word reading alongside positional matching — so the run matches if any reading
+    places ``subcommands`` at the front, intentionally erring toward over-matching on the denylist
+    side when an option's separate value word equals ``subcommands[0]`` (e.g. ``kubectl -n config
+    get pods`` or ``kubectl --context config ...`` matches ``subcommands=["config"]``, whereas
+    inline ``--namespace=config`` or ``-nconfig`` does not)."""
     if not subcommands:
         return True
     target = len(subcommands)
@@ -2789,6 +2798,8 @@ def _subcommands_match(words: list[str], subcommands: list[str], *, forbid: bool
         next_states: set[tuple[int, bool, bool]] = set()
         for matched, takes_value, options_ended in states:
             if options_ended:
+                if forbid and _is_shell_expansion_word(word):
+                    next_states.add((matched, False, True))
                 if word == subcommands[matched]:
                     if matched + 1 == target:
                         return True
@@ -2814,6 +2825,8 @@ def _subcommands_match(words: list[str], subcommands: list[str], *, forbid: bool
             if takes_value:
                 next_states.add((matched, False, False))
                 continue
+            if forbid and _is_shell_expansion_word(word):
+                next_states.add((matched, False, False))
             if word == subcommands[matched]:
                 if matched + 1 == target:
                     return True
@@ -3051,10 +3064,12 @@ class WorkerCommandsVerifier(BaseVerifier):
     which flags take a value is not tabled, so the word after a bare flag is
     read as its value in ``required_runs`` (``sudo -n ls <script> --readiness``
     is still credited), while ``forbidden_runs`` tries both arities on an
-    option without ``=`` ahead of ``subcommands`` so an untabled boolean flag
-    cannot hide a forbidden subcommand (intentionally over-matching when a
-    separate option value equals ``subcommands[0]``, such as ``kubectl -n config
-    get pods``, unlike inline ``--namespace=config`` or ``-nconfig``);
+    option without ``=`` and treats unresolved shell expansions (``$OPTS``,
+    ``"$@"``) as optionally transparent ahead of ``subcommands`` so neither an
+    untabled boolean flag nor an unexpanded option variable can hide a
+    forbidden subcommand (intentionally over-matching when a separate option
+    value equals ``subcommands[0]``, such as ``kubectl -n config get pods``,
+    unlike inline ``--namespace=config`` or ``-nconfig``);
     and a run made through a script file or a shell's standard input
     (``bash run.sh``, ``nohup bash /tmp/run.sh &``, ``echo "<command>" | bash``,
     ``bash -s < run.sh``) is not read as one, since the argv names the file or

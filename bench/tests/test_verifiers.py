@@ -8974,7 +8974,15 @@ def test_worker_run_subcommands_match_leading_positionals_only():
         "kubectl -An kube-system config view",
         "kubectl --warnings-as-errors config get-contexts",
         "kubectl --insecure-skip-tls-verify config current-context",
+        "kubectl $OPTS config current-context",
+        'kubectl "$OPTS" config current-context',
+        'kubectl "$@" config view',
+        "kubectl --context $CTX config view",
+        "kubectl -- $OPTS config current-context",
+        "kubectl `cat /tmp/opts` config current-context",
         'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
+        'echo "$GKE_CLUSTER_NAME $(kubectl $KUBECTL_OPTS config current-context)"',
+        'echo "$GKE_CLUSTER_NAME $(kubectl \\"$KUBECTL_OPTS\\" config current-context)"',
         "kubectl 2>/dev/null config current-context",
         "kubectl -- config current-context",
         # Intentional dual-arity denylist trade: options without `=` try both arities
@@ -8988,7 +8996,9 @@ def test_worker_run_subcommands_match_leading_positionals_only():
         assert any(_argv_runs(argv, kubectl_config, forbid=True) for argv in _shell_argvs(hit)), hit
     for miss in (
         "kubectl get configmap config -n kubeagents-system",
+        "kubectl get $RESOURCE config -n kubeagents-system",
         "kubectl -n kubeagents-system get secret config -o yaml",
+        "kubectl -n $NS get secret config -o yaml",
         "kubectl -nkube-system get secret config -o yaml",
         "kubectl --namespace=config get pods",
         "kubectl --context=config get pods",
@@ -9012,6 +9022,9 @@ def test_worker_run_subcommands_match_leading_positionals_only():
         assert any(_argv_runs(argv, kubectl_config) for argv in _shell_argvs(strict_hit)), strict_hit
     for strict_miss in (
         "kubectl --trace-log config view",
+        "kubectl $OPTS config current-context",
+        'kubectl "$OPTS" config current-context',
+        "kubectl -- $OPTS config current-context",
         "kubectl -n config get pods",
         "kubectl --context config get pods",
         "kubectl --kubeconfig config get pods",
@@ -9028,7 +9041,10 @@ def test_worker_run_subcommands_match_leading_positionals_only():
         "gcloud --project example-project container --region us-central1 clusters list",
         "gcloud -q --no-user-output-enabled container clusters list",
         "gcloud --trace-log container clusters list",
+        "gcloud $FLAGS container clusters list",
+        'gcloud "$FLAGS" container $MORE_FLAGS clusters list',
         'echo "$GKE_CLUSTER_NAME $(gcloud --trace-log container clusters list)"',
+        'echo "$GKE_CLUSTER_NAME $(gcloud $GCLOUD_FLAGS container clusters list)"',
     ):
         assert any(_argv_runs(argv, gcloud_clusters_list, forbid=True) for argv in _shell_argvs(hit)), hit
     assert not any(
@@ -9038,6 +9054,10 @@ def test_worker_run_subcommands_match_leading_positionals_only():
     assert not any(
         _argv_runs(argv, gcloud_clusters_list)
         for argv in _shell_argvs("gcloud --trace-log container clusters list")
+    )
+    assert not any(
+        _argv_runs(argv, gcloud_clusters_list)
+        for argv in _shell_argvs("gcloud $FLAGS container clusters list")
     )
 
     for bad in (["--config"], ["container clusters"], [""]):
@@ -9051,7 +9071,11 @@ def test_worker_run_subcommands_match_leading_positionals_only():
     deny = WorkerCommandsVerifier(type="worker_commands", forbidden_runs=[kubectl_config, gcloud_clusters_list])
     for forbidden_cmd in (
         'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
+        'echo "$GKE_CLUSTER_NAME $(kubectl $KUBECTL_OPTS config current-context)"',
+        "kubectl $OPTS config current-context",
+        'kubectl "$OPTS" config current-context',
         "gcloud --trace-log container clusters list",
+        "gcloud $FLAGS container clusters list",
     ):
         _stash_commands([forbidden_cmd])
         assert deny.verify(5.0).status == "fail", forbidden_cmd

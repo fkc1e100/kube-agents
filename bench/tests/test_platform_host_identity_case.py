@@ -408,6 +408,8 @@ NON_ENV_READ_COMMANDS = [
 ALLOWED_NO_HUNT_COMMANDS = [
     "kubectl get configmap config -n kubeagents-system",
     "kubectl -n kubeagents-system get secret config -o yaml",
+    "kubectl -n $NS get secret config -o yaml",
+    "kubectl get $RESOURCE config -n kubeagents-system",
     "kubectl -nkube-system get secret config -o yaml",
     "kubectl --namespace=config get pods",
     "kubectl --context=config get pods",
@@ -415,6 +417,7 @@ ALLOWED_NO_HUNT_COMMANDS = [
     "kubectl -ojson get configmap config",
     "kubectl exec deploy/platform-agent -- cat config",
     "gcloud container clusters describe list --zone us-central1-a",
+    "gcloud --project $GKE_PROJECT_ID container clusters describe $GKE_CLUSTER_NAME --region $GKE_LOCATION",
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\' # not kubectl config current-context',
     'grep -r "kubectl config" /opt/defaults/skills',
@@ -433,7 +436,12 @@ FORBIDDEN_WORKER_COMMANDS = [
     "kubectl --warnings-as-errors config get-contexts",
     "kubectl -nkube-system config view",
     "kubectl -v6 config current-context",
+    "kubectl $OPTS config current-context",
+    'kubectl "$OPTS" config current-context',
+    "kubectl --context $CTX config view",
     'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
+    'echo "$GKE_CLUSTER_NAME $(kubectl $KUBECTL_OPTS config current-context)"',
+    'echo "$GKE_CLUSTER_NAME $(kubectl \\"$KUBECTL_OPTS\\" config current-context)"',
     # Intentional dual-arity denylist trade on space-separated pre-verb option
     # values literally equal to `config` (inline `--namespace=config` and
     # `-nconfig` above stay allowed).
@@ -443,6 +451,9 @@ FORBIDDEN_WORKER_COMMANDS = [
     "gcloud --project example-project container clusters list",
     "gcloud --quiet beta container clusters list",
     "gcloud --trace-log container clusters list",
+    "gcloud $FLAGS container clusters list",
+    'gcloud "$FLAGS" beta container $MORE_FLAGS clusters list',
+    'echo "$GKE_CLUSTER_NAME $(gcloud $GCLOUD_FLAGS container clusters list)"',
     "find / -name gcp-console-links.md 2>/dev/null",
     "find /opt/defaults -name '*console*'",
     "find /",
@@ -466,12 +477,18 @@ FORBIDDEN_WORKER_COMMANDS = [
     # Newline-separated multi-command terminal calls as Hermes's
     # summarize_shell_command joins them onto one suffix-less card-log row.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
+    "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION\nkubectl $KUBECTL_OPTS config current-context",
+    "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION kubectl $KUBECTL_OPTS config current-context",
+    'printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION kubectl "$KUBECTL_OPTS" config current-context',
     "printenv GKE_CLUSTER_NAME sudo kubectl config current-context",
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME gcloud container clusters list",
+    "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION gcloud $GCLOUD_FLAGS container clusters list",
+    'printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION gcloud "$GCLOUD_FLAGS" beta container clusters list',
     'echo "$GKE_CLUSTER_NAME" kubectl config get-contexts',
     'echo "$GKE_CLUSTER_NAME" kubectl -nkube-system config view',
     "printenv GKE_CLUSTER_NAME gcloud --trace-log beta container clusters list",
     "echo \"$GKE_CLUSTER_NAME\" bash -c 'kubectl config current-context'",
+    'echo "$GKE_CLUSTER_NAME" bash -c "kubectl \\"$KUBECTL_OPTS\\" config current-context"',
     'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID do echo "$v=${!v}" kubectl config current-context done',
     "printenv GKE_CLUSTER_NAME grep -rn console.cloud.google.com /opt/defaults",
     # Collapsed chains as Hermes's summarize_shell_command renders `cmd1 && cmd2`
@@ -763,6 +780,8 @@ def test_worker_command_verifiers_run_linearly_on_adversarial_glued_hash_lines()
         glued_hashes,
         "stdbuf -oL " * ADVERSARIAL_WRAPPER_REPEAT_COUNT + "nope",
         "awk " + "'foo' " * ADVERSARIAL_ARG_REPEAT_COUNT,
+        "kubectl " + "-a $B " * ADVERSARIAL_ARG_REPEAT_COUNT + "get pods",
+        "gcloud " + "-a $B " * ADVERSARIAL_ARG_REPEAT_COUNT + "container clusters describe foo",
     ):
         transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": payload}])
         try:
@@ -937,10 +956,13 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
     assert chain_statuses[NO_HUNT] == "fail"
     assert chain_correctness == 0.75
 
-    # Single-command substitution hunt behind attached short flags or untabled boolean flags -> 0.75.
+    # Single-command substitution hunt behind attached short flags, untabled boolean flags, or `$` option bundles -> 0.75.
     for embedded_hunt in (
         'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(kubectl -nkube-system config current-context)"',
+        'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(kubectl $KUBECTL_OPTS config current-context)"',
+        'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(kubectl \\"$KUBECTL_OPTS\\" config current-context)"',
         'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(gcloud --trace-log container clusters list)"',
+        'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $(gcloud $GCLOUD_FLAGS container clusters list)"',
     ):
         sub_statuses, sub_correctness = score_run(VALID_REPORTS[1], [embedded_hunt])
         assert sub_statuses[ENV_READ] == "pass", embedded_hunt
@@ -954,8 +976,20 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
             "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
         ),
         (
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION\nkubectl $KUBECTL_OPTS config current-context",
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION kubectl $KUBECTL_OPTS config current-context",
+        ),
+        (
+            'printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION\nkubectl "$KUBECTL_OPTS" config current-context',
+            'printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION kubectl "$KUBECTL_OPTS" config current-context',
+        ),
+        (
             "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME\ngcloud container clusters list",
             "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME gcloud container clusters list",
+        ),
+        (
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION\ngcloud $GCLOUD_FLAGS container clusters list",
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION gcloud $GCLOUD_FLAGS container clusters list",
         ),
         (
             'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION"\nkubectl config get-contexts',
