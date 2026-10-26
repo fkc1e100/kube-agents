@@ -505,6 +505,72 @@ class AutoopsIncidentPlantTest(unittest.TestCase):
             f"`sleep 7` ran before the watcher poll finished:\n{chr(10).join(calls)}",
         )
 
+    def test_start_settle_seconds_rejects_fractional_and_negative_values(self):
+        # main.tf tests `[ "${var.start_settle_seconds}" -gt 0 ]` with bash's
+        # integer `-gt`, which exits 2 on a fraction like `2.5` and treats a
+        # negative number as false, silently skipping the settle inside `if`.
+        # Pin the non-negative integer validation rule in variables.tf, and
+        # evaluate it with Terraform itself when the binary is present.
+        block = re.search(
+            r'variable "start_settle_seconds"\s*\{(.*?)\n\}',
+            _VARIABLES.read_text(),
+            re.S,
+        )
+        self.assertIsNotNone(
+            block, f"start_settle_seconds variable block not found in {_VARIABLES}"
+        )
+        body = block.group(1)
+        self.assertIn("var.start_settle_seconds >= 0", body)
+        self.assertIn(
+            "floor(var.start_settle_seconds) == var.start_settle_seconds", body
+        )
+        if not shutil.which("terraform"):
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copy2(_VARIABLES, pathlib.Path(tmp) / "variables.tf")
+            init = subprocess.run(
+                ["terraform", f"-chdir={tmp}", "init", "-input=false", "-no-color"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(init.returncode, 0, init.stderr)
+
+            def plan(val: str) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    [
+                        "terraform",
+                        f"-chdir={tmp}",
+                        "plan",
+                        "-input=false",
+                        "-no-color",
+                        "-var",
+                        "host_cluster_name=platform-agent-host",
+                        "-var",
+                        "host_cluster_location=us-central1",
+                        "-var",
+                        f"start_settle_seconds={val}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+
+            for accepted in ("0", "180"):
+                with self.subTest(accepted=accepted):
+                    res = plan(accepted)
+                    self.assertEqual(res.returncode, 0, res.stderr)
+            for refused in ("2.5", "-1"):
+                with self.subTest(refused=refused):
+                    res = plan(refused)
+                    self.assertNotEqual(res.returncode, 0, res.stdout)
+                    self.assertIn(
+                        "start_settle_seconds must be a whole number of seconds",
+                        res.stderr,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

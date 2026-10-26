@@ -188,6 +188,11 @@ variable "start_settle_seconds" {
   type        = number
   description = "Seconds to wait after the watcher poll before the agent turn so filed incident cards have a head start toward completion before the board read starts."
   default     = 0
+
+  validation {
+    condition     = var.start_settle_seconds >= 0 && floor(var.start_settle_seconds) == var.start_settle_seconds
+    error_message = "start_settle_seconds must be a whole number of seconds, 0 or more: the plant tests it with bash's integer -gt, which rejects a fraction and silently skips the settle."
+  }
 }
 
 # Identify the CI run that planted this, so a janitor can find what a run killed
