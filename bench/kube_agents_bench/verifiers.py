@@ -2976,9 +2976,12 @@ class WorkerCommandsVerifier(BaseVerifier):
     A command an exemption touched is out of the required runs as it is out
     of the required patterns; the forbidden runs read every command as typed.
     ``max_commands``: upper bound on how many command entries — one per
-    card-log row or tagged ``terminal``/``execute_code`` call — the workers may
-    issue (across the run, or inside the ``after_result_pattern`` window when
-    set), exempted entries included.
+    card-log row or, for a card with no log row (or under
+    ``after_result_pattern``), per tagged ``terminal``/``execute_code`` call
+    (on a logged card without ``after_result_pattern``, ``execute_code`` calls
+    are absent from the log and are not counted; see Limits below) — the
+    workers may issue (across the run, or inside the ``after_result_pattern``
+    window when set), exempted entries included.
 
     ``after_result_pattern`` makes the forbidden set order-aware, for a
     retry-after-refusal check (#2173): the defect is a write after the policy

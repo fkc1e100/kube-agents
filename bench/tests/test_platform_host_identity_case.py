@@ -28,30 +28,39 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    digits), echo unresolved placeholders, or mention unrelated ``gke-*`` nouns.
 2. ``the-worker-read-the-forwarded-identity`` accepts genuine single-command
    environment reads of the forwarded variables (``printenv <VAR>`` and
-   ``declare -p``/``typeset -p <VAR>`` including ``--`` and exec wrappers such
-   as ``timeout``, ``env``, and ``flock``; bare or piped ``printenv``, ``env``,
-   ``set``, ``export [-p]``, ``declare -p``, and ``/proc/self/environ`` dumps;
+   ``declare -p``/``typeset -p <VAR>`` including ``--`` and every exec wrapper
+   in ``_SHELL_EXEC_WRAPPERS``; bare or piped ``printenv``, ``env``, ``set``,
+   ``export [-p]``, ``declare -p``, and ``/proc/self/environ`` dumps; ``for``
+   loops over the forwarded names using indirect expansion or ``printenv``;
    unescaped non-single-quoted shell ``$VAR``/``${VAR}`` expansions in both the
    outer shell and ``sh -c``/``bash -c``; and ``python3`` via ``-c`` or heredoc
-   reading ``os.environ``/``os.getenv``), while rejecting commands that wipe or
-   override the forwarded variables (``env -i`` anywhere on the line,
-   ``env -u GKE_...``, ``env GKE_CLUSTER_NAME=foo ...``, or leading
-   ``GKE_CLUSTER_NAME=foo ...``), read unrelated variables (``printenv PATH``),
-   merely mention a variable name (``kubectl ... | grep GKE_``, ``grep -r
-   KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``bash -c 'echo
-   GKE_CLUSTER_NAME'``), or use ``env`` as a command-execution prefix
-   (``env KUBECONFIG=...``, ``env GKE_CLUSTER_NAME=foo kubectl ...``).
+   reading ``os.environ``/``os.getenv``, including ``GKE_``/``KUBE_`` prefix
+   filters), with parity pinned across all ``_SHELL_EXEC_WRAPPERS`` (including
+   ``setsid``, ``ionice``, ``sudo``, ``time``, ``watch``, ``exec``, ``xargs``,
+   ``chroot``, ``timeout infinity``, and ``timeout $T``), while rejecting
+   commands that wipe or override the forwarded variables (``env -i`` anywhere
+   on the line, ``env -u GKE_...``, ``env GKE_CLUSTER_NAME=foo ...``, or leading
+   ``GKE_CLUSTER_NAME=foo ...``), read unrelated variables (``printenv PATH``,
+   ``KUBE_POD_NAME``), merely mention a variable name (``kubectl ... | grep
+   GKE_``, ``grep -r KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``for v
+   in GKE_CLUSTER_NAME; do echo "$v"; done``), or use ``env`` as a
+   command-execution prefix (``env KUBECONFIG=...``,
+   ``env GKE_CLUSTER_NAME=foo kubectl ...``).
 3. ``the-worker-did-not-hunt-for-the-host`` bounds recorded command entries to
-   one card-log row or tagged tool call (``max_commands: 1`` plus Hermes's
-   collapsed-chain card-log suffix ``+ N command(s)``; splitting a
-   newline-joined multi-command call whose second line is off the denylist is
-   tracked in #3971 and pinned ``xfail`` below) and rejects ``kubectl config``
-   subcommands and ``gcloud container clusters list`` on argv and on
-   newline-joined card-log rows (including behind attached short options such
-   as ``-nkube-system`` or untabled boolean flags such as ``--trace-log``,
-   without false-positiving on ``kubectl get configmap config``, ``kubectl -n
-   kubeagents-system get secret config``, quoted ``grep`` arguments, or shell
-   comments) as well as ``find /...`` and console-link helper searches.
+   one card-log row, or one tagged tool call on a card with no log row
+   (``max_commands: 1`` plus Hermes's collapsed-chain card-log suffix ``+ N
+   command(s)``; splitting a newline-joined multi-command call whose second line
+   is off the denylist and counting ``execute_code`` calls beside a logged
+   ``terminal`` command are tracked in #3971 and pinned ``xfail`` below) and
+   rejects ``kubectl config`` subcommands and ``gcloud container clusters list``
+   on argv, on newline-joined card-log rows (including behind attached short
+   options such as ``-nkube-system`` or untabled boolean flags such as
+   ``--trace-log``, without false-positiving on ``kubectl get configmap
+   config``, ``kubectl -n kubeagents-system get secret config``, quoted ``grep``
+   arguments, or shell comments), and inside ``python``/``python3`` ``-c`` or
+   heredoc programs (along with Python ``subprocess``/``popen``/``system``
+   shell-outs, ``.kube/config`` reads, and ``glob``/root walks), as well as
+   ``find /...`` and console-link helper searches.
 """
 
 from __future__ import annotations
@@ -66,7 +75,11 @@ from devops_bench.verification.rollup import rollup
 from devops_bench.verification.runner import VerifierAgent
 from devops_bench.verification.spec import VerificationEntry
 from kube_agents_bench import transcript
-from kube_agents_bench.verifiers import ReportContainsVerifier
+from kube_agents_bench.verifiers import (
+    _SHELL_EXEC_WRAPPERS,
+    _SHELL_WRAPPER_POSITIONALS,
+    ReportContainsVerifier,
+)
 
 CASE = TASKS / "platform-host-identity-from-env" / "task.yaml"
 
@@ -223,15 +236,27 @@ CLEAN_ENV_COMMANDS = [
     'bash -c \'echo "$GKE_CLUSTER_NAME"\'',
     'sh -c \'printf "%s\\n" "${KUBE_CONTEXT_NAME}"\'',
     'timeout 10 bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+    'timeout infinity printenv | grep GKE_',
+    'timeout $T bash -c \'echo "$GKE_CLUSTER_NAME"\'',
     'bash -lc "echo \\$GKE_CLUSTER_NAME"',
+    'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME; do echo "$v=${!v}"; done',
+    'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME; do printenv "$v"; done',
+    'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME\ndo\n  printf \'%s=%s\\n\' "$v" "${!v}"\ndone',
+    # Newline-delimited `for` loop as Hermes's summarize_shell_command renders it (`_oneline` before `;` split).
+    'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME do echo "$v=${!v}" done',
+    'bash -c \'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME; do echo "$v=${!v}"; done\'',
     'python3 -c "import os; print(os.environ[\'GKE_CLUSTER_NAME\'])"',
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
     'timeout 30 python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
     'python3 -c \'from os import getenv; print(getenv("KUBE_CONTEXT_NAME"))\'',
+    'python3 -c \'import os; print({k: v for k, v in os.environ.items() if k.startswith(("GKE_", "KUBE_CONTEXT"))})\'',
+    'python3 -c \'import os; print({k: v for k, v in os.environ.items() if k.startswith(("GKE_", "KUBE_"))})\'',
+    'bash -c "python3 -c \\"import os; print(os.environ[\'GKE_CLUSTER_NAME\'])\\""',
     'python3 - <<\'EOF\' import os print(os.environ["GKE_CLUSTER_NAME"]) EOF',
     'python3 - <<\'EOF\' import os; print(os.environ["GKE_CLUSTER_NAME"]) EOF',
     'python3 <<EOF\nimport os\nprint(os.getenv("KUBE_CONTEXT_NAME"))\nEOF',
     'python3 - <<\'EOF\'\nimport os\nprint(os.environ["GKE_CLUSTER_NAME"])\nEOF',
+    'python3 - <<\'EOF\'\nimport os\nprint({k: v for k, v in os.environ.items() if k.startswith(("GKE_", "KUBE_CONTEXT"))})\nEOF',
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
 ]
@@ -281,10 +306,15 @@ NON_ENV_READ_COMMANDS = [
     'bash -c "echo \'\\$GKE_CLUSTER_NAME\'"',
     "bash -c 'echo hi # $GKE_CLUSTER_NAME'",
     "kubectl get pods # $GKE_CLUSTER_NAME",
+    'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID; do echo "$v"; done',
+    'for v in PATH HOME; do echo "$v=${!v}"; done',
+    'echo \'for v in GKE_CLUSTER_NAME; do printenv "$v"; done\'',
     "echo /proc/self/environ",
     'grep "/proc/self/environ" README.md',
     'python3 -c "print(\'GKE_CLUSTER_NAME\')"',
     'python3 -c "import os; print(os.environ[\'PATH\'])" | grep GKE_CLUSTER_NAME',
+    'python3 -c \'import os; print(os.environ.get("KUBE_POD_NAME"))\'',
+    'python3 -c \'import os; print(os.environ.get("GKE_OTHER_VAR"))\'',
     'python3 - <<\'EOF\' print("GKE_CLUSTER_NAME") EOF',
     'python3 - <<\'EOF\' import os; print(os.environ["PATH"]) EOF | grep GKE_CLUSTER_NAME',
 ]
@@ -297,6 +327,7 @@ ALLOWED_NO_HUNT_COMMANDS = [
     "kubectl exec deploy/platform-agent -- cat config",
     "gcloud container clusters describe list --zone us-central1-a",
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\' # not kubectl config current-context',
     'grep -r "kubectl config" /opt/defaults/skills',
     'grep -r "gcloud container clusters list" /opt/defaults/skills',
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
@@ -322,6 +353,16 @@ FORBIDDEN_WORKER_COMMANDS = [
     "find /",
     "cat /opt/defaults/docs/gcp-console-links.md",
     "grep -rn console.cloud.google.com /opt/defaults",
+    # Python `-c` and heredoc programs shelling out or hunting the filesystem.
+    'python3 -c \'import os, subprocess; print(os.environ["GKE_CLUSTER_NAME"], subprocess.check_output(["kubectl","config","current-context"]).decode())\'',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], os.popen("gcloud container clusters list").read())\'',
+    'python3 -c \'import os, subprocess; subprocess.run("kubectl config get-contexts", shell=True); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os # note\nimport subprocess\nprint(os.environ["GKE_CLUSTER_NAME"], subprocess.check_output(["kubectl","config","current-context"]))\'',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"]); \'"import subprocess; subprocess.run([\'kubectl\',\'config\',\'current-context\'])"',
+    'bash -c \'python3 -c "import os, subprocess; print(os.environ[\\"GKE_CLUSTER_NAME\\"], subprocess.check_output([\\"kubectl\\",\\"config\\",\\"current-context\\"]))"\'',
+    'python3 - <<\'EOF\'\nimport os, subprocess\nprint(os.environ["GKE_CLUSTER_NAME"], subprocess.check_output(["kubectl", "config", "current-context"]).decode())\nEOF',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], open(os.path.expanduser("~/.kube/config")).read())\'',
+    'python3 -c \'import os, glob; print(os.environ["GKE_CLUSTER_NAME"], glob.glob("/opt/defaults/**/*", recursive=True))\'',
     # Newline-separated multi-command terminal calls as Hermes's
     # summarize_shell_command joins them onto one suffix-less card-log row.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
@@ -330,6 +371,7 @@ FORBIDDEN_WORKER_COMMANDS = [
     'echo "$GKE_CLUSTER_NAME" kubectl -nkube-system config view',
     "printenv GKE_CLUSTER_NAME gcloud --trace-log beta container clusters list",
     "echo \"$GKE_CLUSTER_NAME\" bash -c 'kubectl config current-context'",
+    'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID do echo "$v=${!v}" kubectl config current-context done',
     "printenv GKE_CLUSTER_NAME grep -rn console.cloud.google.com /opt/defaults",
     # Collapsed chains as Hermes's summarize_shell_command renders `cmd1 && cmd2`
     # or `cmd1 ; cmd2` on a front-filed card's worker log.
@@ -523,6 +565,52 @@ def test_multiple_worker_commands_fail_no_hunt_single_call_cap() -> None:
     assert res.status == "fail" and "exceeding max_commands=1" in res.reason
 
 
+def _wrapper_prefixes() -> list[str]:
+    prefixes: list[str] = []
+    for wrapper in sorted(_SHELL_EXEC_WRAPPERS):
+        if wrapper == "timeout":
+            prefixes.extend(["timeout 10", "timeout infinity", 'timeout "$T"', "timeout --foreground -s KILL 30s"])
+        elif _SHELL_WRAPPER_POSITIONALS.get(wrapper) == 1:
+            prefixes.append(f"{wrapper} /tmp/arg")
+        else:
+            prefixes.append(wrapper)
+    prefixes.extend(["sudo -E -u hermes", "stdbuf -oL", "ionice -c 3", "nice -n 5", "watch -n 5", "env -u FOO"])
+    return prefixes
+
+
+@pytest.mark.parametrize("prefix", _wrapper_prefixes())
+def test_exec_wrappers_agree_across_argv_and_text_env_read_leaves(prefix: str) -> None:
+    positive_reads = (
+        f"{prefix} printenv GKE_CLUSTER_NAME",
+        f"{prefix} printenv | grep GKE_",
+        f'{prefix} bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+        f'{prefix} bash -c \'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID; do echo "$v=${{!v}}"; done\'',
+        f'{prefix} python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
+    )
+    for command in positive_reads:
+        transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
+        try:
+            read_res = _eval_entry(ENV_READ)
+            hunt_res = _eval_entry(NO_HUNT)
+        finally:
+            transcript.clear()
+        assert read_res.status == "pass", f"{command!r} failed {ENV_READ}: {read_res.reason}"
+        assert hunt_res.status == "pass", f"{command!r} failed {NO_HUNT}: {hunt_res.reason}"
+
+    negative_overrides = (
+        f"{prefix} env -i printenv GKE_CLUSTER_NAME",
+        f"{prefix} GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME",
+        f"{prefix} bash -c 'GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME'",
+    )
+    for command in negative_overrides:
+        transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
+        try:
+            res = _eval_entry(ENV_READ)
+        finally:
+            transcript.clear()
+        assert res.status == "fail", f"{command!r} slipped past {ENV_READ}: {res.reason}"
+
+
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
@@ -535,6 +623,65 @@ def test_two_line_terminal_call_with_off_denylist_second_command_fails_no_hunt_c
         VALID_REPORTS[1],
         _router_trajectory([typed_call]),
         worker_commands=[{"task": "t_host01", "command": joined_row}],
+    )
+    try:
+        read_res = _eval_entry(ENV_READ)
+        hunt_res = _eval_entry(NO_HUNT)
+    finally:
+        transcript.clear()
+    if read_res.status != "pass" or hunt_res.status == "error":
+        raise RuntimeError(f"unexpected verifier setup failure: env_read={read_res}, no_hunt={hunt_res}")
+    assert hunt_res.status == "fail"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="#3971: summarize_shell_command collapses unquoted '; do ...; done' on a logged card to '+ 2 commands'",
+)
+def test_unquoted_semicolon_for_loop_rendered_on_card_log_passes_both_worker_checks() -> None:
+    typed_call = 'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME; do echo "$v=${!v}"; done'
+    rendered_row = "for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME + 2 commands"
+    transcript.set(
+        VALID_REPORTS[1],
+        _router_trajectory([typed_call]),
+        worker_commands=[{"task": "t_host01", "command": rendered_row}],
+    )
+    try:
+        read_res = _eval_entry(ENV_READ)
+        hunt_res = _eval_entry(NO_HUNT)
+    finally:
+        transcript.clear()
+    if read_res.status == "error" or hunt_res.status == "error":
+        raise RuntimeError(f"unexpected verifier setup failure: env_read={read_res}, no_hunt={hunt_res}")
+    assert read_res.status == "pass" and hunt_res.status == "pass"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="#3971: logged card drops tagged execute_code calls",
+)
+def test_execute_code_call_beside_logged_terminal_call_fails_no_hunt_check() -> None:
+    logged_cmd = "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME"
+    traj = _router_trajectory([logged_cmd])
+    traj.append(
+        {
+            "name": "execute_code",
+            "args": {
+                "code": 'import subprocess; print(subprocess.check_output(["kubectl", "config", "current-context"]))'
+            },
+            "result": '{"output": "ok", "exit_code": 0, "error": null}',
+            "status": "completed",
+            "agent": "platform",
+            "task": "t_host01",
+            "at": 2.0,
+        }
+    )
+    transcript.set(
+        VALID_REPORTS[1],
+        traj,
+        worker_commands=[{"task": "t_host01", "command": logged_cmd}],
     )
     try:
         read_res = _eval_entry(ENV_READ)
@@ -654,3 +801,24 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
     )
     url_statuses, url_correctness = score_run(VALID_REPORTS[1], [console_echo])
     assert url_correctness == 1.0, url_statuses
+
+    # Single-command `for` loop, Python prefix filter, and `_SHELL_EXEC_WRAPPERS` reads -> 1.0.
+    for clean_alt in (
+        'for v in GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME; do echo "$v=${!v}"; done',
+        'python3 -c \'import os; print({k: v for k, v in os.environ.items() if k.startswith(("GKE_", "KUBE_CONTEXT"))})\'',
+        "setsid printenv | grep GKE_",
+        'setsid bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+    ):
+        alt_statuses, alt_correctness = score_run(VALID_REPORTS[1], [clean_alt])
+        assert alt_correctness == 1.0, (clean_alt, alt_statuses)
+
+    # Single-command Python `-c` or heredoc that reads os.environ AND shells out to a forbidden route -> 0.75.
+    for py_hunt in (
+        'python3 -c \'import os, subprocess; print(os.environ["GKE_CLUSTER_NAME"], subprocess.check_output(["kubectl","config","current-context"]).decode())\'',
+        'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], os.popen("gcloud container clusters list").read())\'',
+        'python3 - <<\'EOF\'\nimport os, subprocess\nprint(os.environ["GKE_CLUSTER_NAME"], subprocess.check_output(["kubectl", "config", "current-context"]).decode())\nEOF',
+    ):
+        py_statuses, py_correctness = score_run(VALID_REPORTS[1], [py_hunt])
+        assert py_statuses[ENV_READ] == "pass", py_hunt
+        assert py_statuses[NO_HUNT] == "fail", py_hunt
+        assert py_correctness == 0.75, py_hunt

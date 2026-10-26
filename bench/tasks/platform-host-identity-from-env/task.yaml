@@ -28,17 +28,23 @@
 # Red on main rests on the forbidden-route check: main's worker answered too,
 # only slowly, so the context check and the env-read check pass there. The
 # persona dictates a single tool call, and `max_commands: 1` bounds recorded
-# command entries (card-log rows or tagged calls, not shell segments). For a
-# card the front door filed, worker_commands currently grades Hermes's one-line
-# card-log rendering (summarize_shell_command), which collapses a `;`, `&&` or
-# `||` chain to `<first command> + N command(s)` and joins newline-separated
-# lines with spaces and no suffix; the forbidden-route check therefore rejects
-# collapsed chains (`\s\+\s\d+\s+commands?$`) and carries quote- and
-# `#`-comment-aware text patterns alongside `forbidden_runs` so a second-line
-# `kubectl config` or `gcloud container clusters list` joined onto the env-read
-# row still fails, while splitting a newline-joined call whose second line is
-# off the denylist awaits #3971. A worker that reads os.environ through
-# execute_code leaves no card-log row for it and fails the env-read check.
+# command entries (one per card-log row, or per tagged call on a card with no
+# log row — not shell segments, and not execute_code calls on a card that also
+# logged a terminal command). For a card the front door filed, worker_commands
+# currently grades Hermes's one-line card-log rendering
+# (summarize_shell_command), which collapses a `;`, `&&` or `||` chain to
+# `<first command> + N command(s)` and joins newline-separated lines with
+# spaces and no suffix; the forbidden-route check therefore rejects collapsed
+# chains (`\s\+\s\d+\s+commands?$`) and carries quote- and `#`-comment-aware
+# text patterns alongside `forbidden_runs` so a second-line `kubectl config` or
+# `gcloud container clusters list` joined onto the env-read row (or shelled out
+# from `python3 -c`/heredoc) still fails, while splitting an off-denylist
+# newline-joined call or counting `execute_code` calls beside a logged terminal
+# call awaits #3971. A card that ran only execute_code falls back to its tagged
+# call (raw Python source without a leading `python3` shell command, so the
+# shell-anchored env-read check rejects it), whereas on a card that also logged
+# a terminal command, execute_code calls are absent from the card log and
+# dropped until #3971.
 #
 # Domain: chat and routing. Isolation class: read-only. Eligible tier: nightly.
 id: platform-host-identity-from-env
@@ -55,9 +61,10 @@ expected_output: >-
   location and gke_<project>_<location>_<cluster> kubectl context name that
   install runs on (for example platform-agent-host on the CI eval install, or
   the host cluster's own name on a dev install). The worker records at most one
-  terminal call (one card-log row or tagged tool call), does not run kubectl
-  config subcommands or gcloud container clusters list, and does not run find
-  /... or search the filesystem for console-link helpers.
+  command entry (one card-log row, or one tagged call on a card with no log
+  row), does not run kubectl config subcommands or gcloud container clusters
+  list, and does not run find /... or search the filesystem for console-link
+  helpers.
 infrastructure:
   deployer: noop
 validated: false
@@ -101,24 +108,22 @@ verification_spec:
     check:
       # Matches an actual environment read of the forwarded host variables —
       # `printenv <VAR>` or `declare -p`/`typeset -p <VAR>` graded on argv via
-      # `required_runs` (which steps over exec wrappers such as `timeout`,
-      # `env`, `flock`, `--`, and `bash -c '...'`), a bare or piped environment
-      # dump (`printenv`, `env`, `set`, `export [-p]`, `declare -p`, or reading
-      # `/proc/self/environ`), a non-single-quoted shell `$VAR`/`${VAR}`
-      # expansion (outer shell or inside `sh -c`/`bash -c`), or `python3` (`-c`
-      # or heredoc) reading `os.environ`/`os.getenv` — while rejecting commands
-      # that wipe or override the forwarded variables (`env -i` anywhere on the
-      # command, `env -u GKE_...`, `env GKE_CLUSTER_NAME=foo ...`, or leading
-      # `GKE_CLUSTER_NAME=foo ...`), read unrelated variables (`printenv PATH`),
-      # merely mention a variable name (`grep KUBE_CONTEXT_NAME`, `echo
-      # GKE_CLUSTER_NAME`, `bash -c 'echo GKE_CLUSTER_NAME'`), or use `env` as a
-      # command-execution prefix (`env KUBECONFIG=... kubectl ...`).
+      # `required_runs`, an outer-shell `$VAR`/`${VAR}` expansion, or a single
+      # consolidated shell-read pattern sharing `_SHELL_EXEC_WRAPPERS` parity
+      # across bare/piped environment dumps (`printenv`, `env`, `set`,
+      # `export [-p]`, `declare -p`, `/proc/self/environ`), `for v in GKE_...`
+      # indirect/printenv loops, `sh -c`/`bash -c` expansions, and `python`
+      # (`-c` or heredoc) `os.environ`/`os.getenv` reads (including `GKE_`/
+      # `KUBE_` prefix filters) — while rejecting commands that wipe or
+      # override the forwarded variables (`env -i`, `env -u GKE_...`, or
+      # command-position `VAR=...`), read unrelated variables (`printenv PATH`),
+      # merely mention a variable name, or use `env` as an exec prefix.
       type: any
       checks:
         - type: worker_commands
           exempt_patterns: &env_ignore_exempt
-            - '(?:^|[\s(;&|\x27\x22])(?:(?:/usr)?/bin/)?env\s+(?:(?:-u|--unset)\s+\S+\s+|-\S+\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:-[a-zA-Z]*i[a-zA-Z]*|--ignore-environment|(?:-u|--unset)(?:=|\s+)(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME))\b'
-            - '(?:^(?:[^\x27\\\x22#]|(?<=\S)#|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*[;|&\n(]|^)\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|\S*)|(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|export|declare|typeset|env(?:\s+(?:-\S+|(?:-u|--unset)\s+\S+))*))\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*(?:\(\s*)*(?:(?:[^\x27\x22;|&]|\x22(?:[^\x22\\]|\\.)*\x22)*[;|&]\s*)*(?:(?:[A-Za-z_][A-Za-z0-9_]*=\S*|(?:(?:/usr)?/bin/)?(?:timeout\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|command|builtin|export|declare|typeset|env(?:\s+(?:-\S+|(?:-u|--unset)\s+\S+))*))\s+)*)?(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)='
+            - '(?:^|[\s(;&|\x27\x22])(?:(?:/usr)?(?:/local)?/bin/)?env\s+(?:(?:-u|--unset)\s+\S+\s+|-\S+\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:-[a-zA-Z]*i[a-zA-Z]*|--ignore-environment|(?:-u|--unset)(?:=|\s+)(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME))\b'
+            - '(?:^(?:[^\x27\\\x22#]|(?<=\S)#|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*[;|&\n(]|^)\s*(?:\(\s*|[{}!]\s+|\b(?:do|then|else|export|declare|typeset)\b(?:\s+-[A-Za-z]+)*\s+|(?:\d*[<>]{1,3}&?\s*\S+|&>>?\s*\S+)\s+|(?!(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)=)[A-Za-z_][A-Za-z0-9_]*=(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|\S*)\s+|(?:(?:/usr)?(?:/local)?/bin/)?timeout(?:\s+(?:--|--[A-Za-z0-9-]+=\S+|-[^\s;|&)]+(?:\s+(?!(?:\d+(?:\.\d+)?[smhd]?|infinity|[\x22\x27]?\$\S+))(?!-)\S+)?))*\s+(?:\d+(?:\.\d+)?[smhd]?|infinity|[\x22\x27]?\$\S+)\s+|(?:(?:/usr)?(?:/local)?/bin/)?(?:flock|chroot)(?:\s+(?:--|--[A-Za-z0-9-]+=\S+|-[^\s;|&)]+(?:\s+(?!-)\S+)?))*\s+(?!-)\S+\s+|(?:(?:/usr)?(?:/local)?/bin/)?(?:nohup|env|time|nice|ionice|stdbuf|setsid|sudo|exec|command|xargs|watch|builtin)(?:\s+(?:--|--[A-Za-z0-9-]+=\S+|-[^\s;|&)]+(?:\s+(?!-)(?![A-Za-z_][A-Za-z0-9_]*=)(?!(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\b)\S+)?|\d+(?:\.\d+)?[smhd]?|infinity|[\x22\x27]?\$\S+))*\s+|(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+[\x27\x22]\s*(?:(?:[^\x27\x22;|&]|\x22(?:[^\x22\\]|\\.)*\x22)*[;|&]\s*)*)*(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)='
           required_runs:
             - script: printenv
               word_patterns:
@@ -140,52 +145,34 @@ verification_spec:
         - type: worker_commands
           exempt_patterns: *env_ignore_exempt
           required_patterns:
-            - '^\s*(?:\(\s*)*(?:(?:(?!(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)=)[A-Za-z_][A-Za-z0-9_]*=\S+|(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*))\s+)*(?:(?:(?:/usr)?/bin/)?(?:printenv|env)(?:\s+(?:-0|--null|--))*|set|export(?:\s+-p)?|(?:declare|typeset)(?:\s+-[a-zA-Z]*p[a-zA-Z]*)?)(?=\s*(?:\)|\|(?!\|)|;|&|$))'
-        - type: worker_commands
-          exempt_patterns: *env_ignore_exempt
-          required_patterns:
-            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+([\x27\x22])\s*(?:\(\s*)*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:printenv|env)(?:\s+(?:-0|--null|--))*|set|export(?:\s+-p)?|(?:declare|typeset)(?:\s+-[a-zA-Z]*p[a-zA-Z]*)?)(?=\s*(?:\)|\|(?!\|)|;|&|\1))'
-        - type: worker_commands
-          exempt_patterns: *env_ignore_exempt
-          required_patterns:
-            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*)?(?:(?:cat|strings|od|xxd|hexdump|head|tail)\s+(?:-[A-Za-z0-9-]+\s+)*|(?:grep|egrep|fgrep|rg|sed|awk|gawk|mawk)\b[^|;&]*?\s+|(?:tr|xargs)\b[^|;&]*?<\s*)(?<![\x27\x22])/proc/(?:self|\$\$|\d+)/environ(?=\s*(?:\||;|&|\x27|\x22|$))'
-        - type: worker_commands
-          exempt_patterns: *env_ignore_exempt
-          required_patterns:
             - '^(?:[^\x27\\\x22#]|(?<=\S)#|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:\x22(?:[^\x22\\]|\\.)*)?(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^}]*)?\})'
         - type: worker_commands
           exempt_patterns: *env_ignore_exempt
           required_patterns:
-            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+(?:\x27(?:[^\x27\\\x22#]|(?<=\S)#|\\[^\x27]|\x22(?:[^\x22\x27\\]|\\[^\x27])*\x22)*(?:\x22(?:[^\x22\x27\\]|\\[^\x27])*)?(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^\x27}]*)?\})|\x22(?:[^\x27\\\x22#]|(?<=\S)#|\\\\|\\[^\x22\\$]|\x27[^\x27\x22]*\x27|\\\x22(?:[^\x22\\]|\\\\|\\[^\x22\\$])*\\\x22)*(?:\\\x22(?:[^\x22\\]|\\\\|\\[^\x22\\$])*)?(?<!\\)\\(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^\x22}]*)?\}))'
-        - type: worker_commands
-          exempt_patterns: *env_ignore_exempt
-          required_patterns:
-            - '^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:(?:/usr)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c\s+[\x27\x22]\s*)?(?:(?:/usr)?/bin/)?python3?(?:\s+-[A-Za-z0-9]+)*\s+-c\s+(?:\x27(?=[^\x27]*\bos\b)(?=[^\x27]*\b(?:environ|getenv)\b)[^\x27]*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b[^\x27]*\x27|\x22(?=(?:[^\x22\\]|\\.)*\bos\b)(?=(?:[^\x22\\]|\\.)*\b(?:environ|getenv)\b)(?:[^\x22\\]|\\.)*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b(?:[^\x22\\]|\\.)*\x22)'
-        - type: worker_commands
-          exempt_patterns: *env_ignore_exempt
-          required_patterns:
-            - '(?s)^\s*(?:(?:(?:/usr)?/bin/)?(?:timeout(?:\s+(?:--[a-z-]+=\S+|-[a-zA-Z]\s+\S+|--foreground|--preserve-status|-v|--verbose))*\s+\d+(?:\.\d+)?[smhd]?|nice(?:\s+-n\s*-?\d+)?|nohup|stdbuf(?:\s+-[ioe]\S+)+|flock(?:\s+-[a-zA-Z]+)*\s+\S+|command|builtin|env(?:\s+(?:-0|--null|-u\s+\S+|--unset=\S+))*)\s+)*(?:(?:/usr)?/bin/)?python3?(?:\s+-[A-Za-z0-9]+)*\s+(?:-\s+)?<<-?\s*[\x27\x22]?([A-Za-z_][A-Za-z0-9_]*)[\x27\x22]?\s+(?=(?:(?!\s\1(?:\s|$)).)*\bos\b)(?=(?:(?!\s\1(?:\s|$)).)*\b(?:environ|getenv)\b)(?:(?!\s\1(?:\s|$)).)*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b(?:(?!\s\1(?:\s|$)).)*\s\1(?:\s|$)'
+            - '(?s)^\s*(?:\(\s*|[{}!]\s+|\b(?:do|then|else)\b\s+|(?:\d*[<>]{1,3}&?\s*\S+|&>>?\s*\S+)\s+|(?!(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)=)[A-Za-z_][A-Za-z0-9_]*=(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|\S*)\s+|(?:(?:/usr)?(?:/local)?/bin/)?timeout(?:\s+(?:--|--[A-Za-z0-9-]+=\S+|-[^\s;|&)]+(?:\s+(?!(?:\d+(?:\.\d+)?[smhd]?|infinity|[\x22\x27]?\$\S+))(?!-)\S+)?))*\s+(?:\d+(?:\.\d+)?[smhd]?|infinity|[\x22\x27]?\$\S+)\s+|(?:(?:/usr)?(?:/local)?/bin/)?(?:flock|chroot)(?:\s+(?:--|--[A-Za-z0-9-]+=\S+|-[^\s;|&)]+(?:\s+(?!-)\S+)?))*\s+(?!-)\S+\s+|(?:(?:/usr)?(?:/local)?/bin/)?(?:nohup|env|time|nice|ionice|stdbuf|setsid|sudo|exec|command|xargs|watch|builtin)(?:\s+(?:--|--[A-Za-z0-9-]+=\S+|-[^\s;|&)]+(?:\s+(?!-)(?!(?:(?:/usr)?(?:/local)?/bin/)?(?:printenv|env|set|export|declare|typeset|python[\d.]*|pypy3?|(?:ba|da|z|k|a)?sh|for|cat|strings|od|xxd|hexdump|head|tail|grep|egrep|fgrep|rg|sed|awk|gawk|mawk|tr|xargs)\b)\S+)?|\d+(?:\.\d+)?[smhd]?|infinity|[\x22\x27]?\$\S+))*\s+|(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+[\x27\x22]\s*)*(?:(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:printenv|env)(?:\s+(?:-0|--null|--))*|set|export(?:\s+-p)?|(?:declare|typeset)(?:\s+-[a-zA-Z]*p[a-zA-Z]*)?)(?=\s*(?:[);]|\|(?!\|)|&|[\x27\x22]\s*(?:[);&]|\|(?!\|)|$)|$))|(?:(?:cat|strings|od|xxd|hexdump|head|tail)\s+(?:-[A-Za-z0-9-]+\s+)*|(?:grep|egrep|fgrep|rg|sed|awk|gawk|mawk)\b[^|;&]*?\s+|(?:tr|xargs)\b[^|;&]*?<\s*)(?<![\x27\x22])/proc/(?:self|\$\$|\d+)/environ(?=\s*(?:\||;|&|\x27|\x22|$))|for\s+(?P<v>[A-Za-z_][A-Za-z0-9_]*)\s+in\b[^;\n]*\b(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b[^;\n]*(?:;|\n|\s)\s*do\b.*?(?:\$\{!(?P=v)\}|\$\{\(P\)(?P=v)\}|\b(?:printenv|(?:declare|typeset)\s+-[A-Za-z]*p[A-Za-z]*)\s+(?:--\s+)?[\x27\x22]?\\?\$\{?(?P=v)\}?[\x27\x22]?|\beval\b[^;\n]*\\?\$(?:\{(?P=v)\}|(?P=v))\b)|(?:(?:/usr)?(?:/local)?/bin/)?(?:python[\d.]*|pypy3?)(?:\s+-[A-Za-z0-9]+)*\s+-[A-Za-z0-9]*c\s+(?:\x27(?=[^\x27]*\bos\b)(?=[^\x27]*\b(?:environ|getenv)\b)[^\x27]*(?:GKE_(?:(?:CLUSTER_NAME|PROJECT_ID|LOCATION)\b|[\x27\x22|)])|KUBE_(?:CONTEXT(?:_NAME\b|[\x27\x22|)])|[\x27\x22|)]))[^\x27]*\x27|\x22(?=(?:[^\x22\\]|\\.)*\bos\b)(?=(?:[^\x22\\]|\\.)*\b(?:environ|getenv)\b)(?:[^\x22\\]|\\.)*(?:GKE_(?:(?:CLUSTER_NAME|PROJECT_ID|LOCATION)\b|\\?[\x27\x22|)])|KUBE_(?:CONTEXT(?:_NAME\b|\\?[\x27\x22|)])|\\?[\x27\x22|)]))(?:[^\x22\\]|\\.)*\x22|\\\x22(?=(?:[^\\]|\\(?![\x22]))*\bos\b)(?=(?:[^\\]|\\(?![\x22]))*\b(?:environ|getenv)\b)(?:[^\\]|\\(?![\x22]))*(?:GKE_(?:(?:CLUSTER_NAME|PROJECT_ID|LOCATION)\b|\\?[\x27\x22|)])|KUBE_(?:CONTEXT(?:_NAME\b|\\?[\x27\x22|)])|\\?[\x27\x22|)]))(?:[^\\]|\\(?![\x22]))*\\\x22)|(?:(?:/usr)?(?:/local)?/bin/)?(?:python[\d.]*|pypy3?)(?:\s+-[A-Za-z0-9]+)*\s+(?:-\s+)?<<-?\s*[\x27\x22]?(?P<eof>[A-Za-z_][A-Za-z0-9_]*)[\x27\x22]?\s+(?=(?:(?!\s(?P=eof)(?:\s|$)).)*\bos\b)(?=(?:(?!\s(?P=eof)(?:\s|$)).)*\b(?:environ|getenv)\b)(?:(?!\s(?P=eof)(?:\s|$)).)*(?:GKE_(?:(?:CLUSTER_NAME|PROJECT_ID|LOCATION)\b|\\?[\x27\x22|)])|KUBE_(?:CONTEXT(?:_NAME\b|\\?[\x27\x22|)])|\\?[\x27\x22|)]))(?:(?!\s(?P=eof)(?:\s|$)).)*\s(?P=eof)(?:\s|[\x27\x22]|$)|(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+(?:\x27(?:[^\x27\\\x22#]|(?<=\S)#|\\[^\x27]|\x22(?:[^\x22\x27\\]|\\[^\x27])*\x22)*(?:\x22(?:[^\x22\x27\\]|\\[^\x27])*)?(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^\x27}]*)?\})|\x22(?:[^\x27\\\x22#]|(?<=\S)#|\\\\|\\[^\x22\\$]|\x27[^\x27\x22]*\x27|\\\x22(?:[^\x22\\]|\\\\|\\[^\x22\\$])*\\\x22)*(?:\\\x22(?:[^\x22\\]|\\\\|\\[^\x22\\$])*)?(?<!\\)\\(?:\$(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)\b|\$\{(?:GKE_(?:CLUSTER_NAME|PROJECT_ID|LOCATION)|KUBE_CONTEXT_NAME)(?:[-:+?=#%/][^\x22}]*)?\})))'
   - name: the-worker-did-not-hunt-for-the-host
     role: objective
     mode: assert
     check:
-      # Bounds recorded command entries (`max_commands: 1` counts card-log rows
-      # and tagged tool calls rather than shell segments; Hermes's
+      # Bounds recorded command entries (`max_commands: 1` counts card-log rows,
+      # or tagged calls on a card with no log row, rather than shell segments or
+      # `execute_code` calls beside a logged terminal row; Hermes's
       # collapsed-chain suffix ` + N command(s)` rejects `;`, `&&` and `||`
-      # chains on one row, while splitting a newline-joined multi-command
-      # terminal call whose second line is off the denylist awaits #3971) and
+      # chains on one row — including an unquoted top-level `for ...; do ...;
+      # done`, whose loop body `summarize_shell_command` strips to `+ 2
+      # commands`, whereas newline-delimited or `sh -c`-quoted `for` loops keep
+      # their body on the row — while splitting an off-denylist newline-joined
+      # call, grading an unquoted `;`-delimited `for` loop on its raw call, or
+      # counting `execute_code` calls on a logged card awaits #3971) and
       # forbids the routes the live and red-on-main runs took: `kubectl config`
       # subcommands and `gcloud container clusters list` on argv
-      # (`forbidden_runs`) and on newline-joined card-log rows
-      # (`summarize_shell_command` turns `\n` into a space with no `+ N
-      # command(s)` suffix, so quote- and `#`-comment-aware text patterns catch
-      # a second-line `kubectl config` or `gcloud container clusters list`
-      # without matching quoted grep arguments, comments, or non-config verbs
-      # such as `kubectl get configmap config`), any `find` rooted under `/`,
-      # and filesystem searches for console-link helpers
-      # (`console.cloud.google.com` bound to an unquoted search verb so an
-      # `echo` composing a Cloud Console link from the forwarded variables still
-      # passes).
+      # (`forbidden_runs`), on newline-joined card-log rows, and inside
+      # `python`/`python3` `-c` or heredoc programs (along with Python
+      # subprocess/popen/system shell-outs, `.kube/config` reads, and root/glob
+      # walks), any `find` rooted under `/`, and filesystem searches for
+      # console-link helpers (`console.cloud.google.com` bound to an unquoted
+      # search verb so an `echo` composing a Cloud Console link from the
+      # forwarded variables still passes).
       type: worker_commands
       max_commands: 1
       forbidden_runs:
@@ -203,6 +190,7 @@ verification_spec:
         - '\s\+\s\d+\s+commands?$'
         - '^(?:[^\x27\\\x22#]|(?<=\S)#|#[^\n]*(?=\n)|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:^|[\s;|&(])(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\x27\x22])(?:(?:(?!\1).)*?[\s;|&(])?)?(?:(?:/usr)?(?:/local)?/bin/)?kubectl(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!config\b)(?!-)\S+))?))*\s+(?:--\s+)?config\b'
         - '^(?:[^\x27\\\x22#]|(?<=\S)#|#[^\n]*(?=\n)|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:^|[\s;|&(])(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\x27\x22])(?:(?:(?!\1).)*?[\s;|&(])?)?(?:(?:/usr)?(?:/local)?/bin/)?gcloud(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*(?:\s+(?:alpha|beta)\b(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*)?\s+container\b(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*\s+clusters\b(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*\s+list\b'
+        - '(?s)^(?:[^\x27\\\x22#]|(?<=\S)#|#[^\n]*(?=\n)|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:^|[\s;|&(])(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+(?P<q>[\x27\x22])(?:(?:(?!(?P=q)).)*?[\s;|&(])?)?(?:(?:/usr)?(?:/local)?/bin/)?(?:python[\d.]*|pypy3?)(?:\s+(?:--[A-Za-z0-9-]+(?:=\S+)?|-[A-Za-z0-9]+|-[WX]\s+\S+))*\s+(?:-[A-Za-z0-9]*c\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|\\\x22(?:[^\\]|\\(?![\x22]))*\\\x22)*(?:\x27[^\x27]*(?:\b(?:subprocess|pty|pexpect)\b|\b(?:popen|system|spawn[lv]p?e?|exec[lv]p?e?|__import__|import_module)\s*\(|\bkubectl\b[\s\S]*?\bconfig\b|\bgcloud\b[\s\S]*?\bcontainer\b[\s\S]*?\bclusters\b[\s\S]*?\blist\b|\.kube/config\b|\bos\s*\.\s*(?:walk|listdir|scandir)\s*\(\s*[\x27\x22]/|\b(?:glob|rglob)\s*\()[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*(?:\b(?:subprocess|pty|pexpect)\b|\b(?:popen|system|spawn[lv]p?e?|exec[lv]p?e?|__import__|import_module)\s*\(|\bkubectl\b[\s\S]*?\bconfig\b|\bgcloud\b[\s\S]*?\bcontainer\b[\s\S]*?\bclusters\b[\s\S]*?\blist\b|\.kube/config\b|\bos\s*\.\s*(?:walk|listdir|scandir)\s*\(\s*[\x27\x22]/|\b(?:glob|rglob)\s*\()(?:[^\x22\\]|\\.)*\x22|\\\x22(?:[^\\]|\\(?![\x22]))*(?:\b(?:subprocess|pty|pexpect)\b|\b(?:popen|system|spawn[lv]p?e?|exec[lv]p?e?|__import__|import_module)\s*\(|\bkubectl\b[\s\S]*?\bconfig\b|\bgcloud\b[\s\S]*?\bcontainer\b[\s\S]*?\bclusters\b[\s\S]*?\blist\b|\.kube/config\b|\bos\s*\.\s*(?:walk|listdir|scandir)\s*\(\s*[\x27\x22]/|\b(?:glob|rglob)\s*\()(?:[^\\]|\\(?![\x22]))*\\\x22)|(?:-+\s+)?<<-?\s*[\x27\x22]?(?P<peof>[A-Za-z_][A-Za-z0-9_]*)[\x27\x22]?\s+(?:(?!\s(?P=peof)(?:\s|$)).)*(?:\b(?:subprocess|pty|pexpect)\b|\b(?:popen|system|spawn[lv]p?e?|exec[lv]p?e?|__import__|import_module)\s*\(|\bkubectl\b[\s\S]*?\bconfig\b|\bgcloud\b[\s\S]*?\bcontainer\b[\s\S]*?\bclusters\b[\s\S]*?\blist\b|\.kube/config\b|\bos\s*\.\s*(?:walk|listdir|scandir)\s*\(\s*[\x27\x22]/|\b(?:glob|rglob)\s*\())'
   # The delegation boundary, as in chat-routing-fleet-question: the front door
   # files the card and never works it.
   - name: front-door-stays-out-of-the-worker-verbs
