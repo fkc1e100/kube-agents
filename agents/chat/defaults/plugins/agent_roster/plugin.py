@@ -26,14 +26,14 @@ _FOOTER = (
     "clusters are running, how many, or what versions is live state and goes to "
     "a specialist."
 )
-# Appended only when the roster rendered the host section, so it never points
-# at a section that is not there (agent_roster.HOST_IDENTITY_HEADING).
+# Appended only when the host cluster identity is present, so it never points
+# at a section that was not rendered (agent_roster.read_host_identity).
 _HOST_FOOTER = (
-    "The host cluster's name, project and location above are answered directly "
-    "too. For live Kubernetes state on \"this cluster\" or \"this host cluster\", "
-    "route `kanban_create` to the Host Cluster `assignee` above without asking "
-    "which cluster the user means; if that line carries no `assignee`, route to "
-    "`platform`."
+    "The host cluster's name, project and location, when listed above, are "
+    "answered directly too. For live Kubernetes state on \"this cluster\" or "
+    "\"this host cluster\", route `kanban_create` to the Host Cluster "
+    "`assignee` above without asking which cluster the user means; if that "
+    "line carries no `assignee`, route to `platform`."
 )
 
 # Cached across turns in one process, keyed by (path, st_mtime_ns) so an in-place
@@ -105,6 +105,8 @@ def handle_pre_llm_call(**kwargs: Any) -> Optional[Dict[str, str]]:
     try:
         data_dir = Path(os.environ.get("HERMES_HOME", "/opt/data"))
         roster = module.render(data_dir / "profiles")
+        read_host = getattr(module, "read_host_identity", None)
+        has_host = bool(read_host(None)) if callable(read_host) else False
     except Exception as e:
         logger.warning("Could not render the agent roster: %s", e)
         return None
@@ -124,10 +126,7 @@ def handle_pre_llm_call(**kwargs: Any) -> Optional[Dict[str, str]]:
     empty = getattr(module, "EMPTY_ROSTER", None)
     if empty and roster.startswith(empty):
         return {"context": f"\n\n{_HEADER}\n{roster}\n"}
-    footer = _FOOTER
-    heading = getattr(module, "HOST_IDENTITY_HEADING", None)
-    if heading and heading in roster:
-        footer = f"{_FOOTER} {_HOST_FOOTER}"
+    footer = f"{_FOOTER} {_HOST_FOOTER}" if has_host else _FOOTER
     return {"context": f"\n\n{_HEADER}\n{roster}\n\n{footer}\n"}
 
 

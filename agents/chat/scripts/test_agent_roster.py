@@ -337,6 +337,59 @@ class TestHostAndScopeSections(unittest.TestCase):
             out = self._render(base, env)
         self.assertIn("assignee=cluster-kube-agents-demo-fresh-host-us-central1", out)
 
+    def test_numeric_host_project_matches_the_scaffolded_profile_and_adopts_its_id(self):
+        # spec.harness.projectId accepts a project number; the reconcile resolves
+        # it to the project ID before scaffolding profiles, so the host line must
+        # match on (cluster, location), adopt the stamped project ID, and never
+        # recite the project number as an ID.
+        env = dict(self.HOST_ENV, GKE_PROJECT_ID="123456789012")
+        with TemporaryDirectory() as tmp:
+            out = self._render(self._fleet(tmp), env)
+        self.assertIn(
+            agent_roster.HOST_IDENTITY_HEADING + "\n"
+            "- cluster=platform-agent-host, project=kube-agents-demo, location=us-central1, "
+            "assignee=cluster-kube-agents-demo-platform-agent-host-us-central1",
+            out,
+        )
+        self.assertNotIn("123456789012", out)
+
+    def test_numeric_host_project_without_a_matching_profile_omits_the_number(self):
+        env = {
+            "GKE_CLUSTER_NAME": "fresh-host",
+            "GKE_PROJECT_ID": "123456789012",
+            "GKE_LOCATION": "us-central1",
+        }
+        with TemporaryDirectory() as tmp:
+            out = self._render(self._fleet(tmp), env)
+        host_section = out.split(agent_roster.HOST_IDENTITY_HEADING)[1].split("\n\n")[0]
+        self.assertIn("- cluster=fresh-host, location=us-central1", host_section)
+        self.assertNotIn("123456789012", out)
+        self.assertNotIn("project=", host_section)
+        self.assertNotIn("assignee=", host_section)
+
+    def test_numeric_host_project_with_ambiguous_cluster_location_omits_both(self):
+        env = {
+            "GKE_CLUSTER_NAME": "shared-cluster",
+            "GKE_PROJECT_ID": "123456789012",
+            "GKE_LOCATION": "us-central1",
+        }
+        with TemporaryDirectory() as tmp:
+            base = self._fleet(tmp)
+            for proj in ("proj-a", "proj-b"):
+                name = f"cluster-{proj}-shared-cluster-us-central1"
+                (base / name).mkdir()
+                (base / name / "CAPABILITIES.md").write_text("One cluster's runtime state.\n")
+                (base / name / "config.yaml").write_text(
+                    "cluster_identity:\n"
+                    f"  cluster: shared-cluster\n  location: us-central1\n  project: {proj}\n"
+                )
+            out = self._render(base, env)
+        host_section = out.split(agent_roster.HOST_IDENTITY_HEADING)[1].split("\n\n")[0]
+        self.assertIn("- cluster=shared-cluster, location=us-central1", host_section)
+        self.assertNotIn("123456789012", out)
+        self.assertNotIn("project=", host_section)
+        self.assertNotIn("assignee=", host_section)
+
     def test_profile_name_matches_the_scaffold(self):
         platform_scripts = str(Path(__file__).resolve().parents[2] / "platform" / "scripts")
         if platform_scripts not in sys.path:
@@ -406,9 +459,12 @@ class TestHostAndScopeSections(unittest.TestCase):
             render.write_text('{"present": true, "projects": ["a", "b"]}')
             out = self._render(base, {"KUBEAGENTS_SCOPE_FILE": str(render),
                                       "GCP_PROJECT_ID": "kube-agents-demo"})
-        self.assertIn("- GCP projects in scope (partial: ", out)
-        self.assertIn("kube-agents-demo, a (unresolved), b (unresolved)", out)
-        self.assertIn("Say the list is partial", out)
+        scope_section = out.split(agent_roster.SCOPE_HEADING)[1]
+        self.assertIn(f"- GCP projects in scope (partial: {agent_roster.SCOPE_PARTIAL_PENDING}): ", scope_section)
+        self.assertIn("kube-agents-demo, a (unresolved), b (unresolved)", scope_section)
+        self.assertIn("Say the list is partial", scope_section)
+        for jargon in ("sweep", "swept", "render", "snapshot", "management project"):
+            self.assertNotIn(jargon, scope_section)
 
     def test_folders_only_render_with_no_snapshot_is_partial(self):
         with TemporaryDirectory() as tmp:
@@ -417,8 +473,27 @@ class TestHostAndScopeSections(unittest.TestCase):
             render.write_text('{"present": true, "folders": ["123"]}')
             out = self._render(base, {"KUBEAGENTS_SCOPE_FILE": str(render),
                                       "GCP_PROJECT_ID": "kube-agents-demo"})
-        self.assertIn("- GCP projects in scope (partial: ", out)
-        self.assertNotRegex(out, r"GCP projects in scope \(\d+\)")
+        scope_section = out.split(agent_roster.SCOPE_HEADING)[1]
+        self.assertIn(f"- GCP projects in scope (partial: {agent_roster.SCOPE_PARTIAL_PENDING}): ", scope_section)
+        self.assertNotRegex(scope_section, r"GCP projects in scope \(\d+\)")
+        for jargon in ("sweep", "swept", "render", "snapshot", "management project"):
+            self.assertNotIn(jargon, scope_section)
+
+    def test_numeric_management_project_render_uses_front_door_partial_reason(self):
+        with TemporaryDirectory() as tmp:
+            base = self._fleet(tmp)
+            render = Path(tmp) / "scope.json"
+            render.write_text('{"present": true, "projects": ["a"]}')
+            out = self._render(base, {"KUBEAGENTS_SCOPE_FILE": str(render),
+                                      "GCP_PROJECT_ID": "123456789012"})
+        scope_section = out.split(agent_roster.SCOPE_HEADING)[1]
+        self.assertIn(
+            f"- GCP projects in scope (partial: {agent_roster.SCOPE_PARTIAL_NUMERIC_HOST}): a (unresolved)",
+            scope_section,
+        )
+        self.assertNotIn("123456789012", scope_section)
+        for jargon in ("sweep", "swept", "render", "snapshot", "management project"):
+            self.assertNotIn(jargon, scope_section)
 
     def test_an_unreadable_render_says_so(self):
         with TemporaryDirectory() as tmp:
@@ -468,7 +543,7 @@ class TestRouterEnvCarriesTheRosterInputs(unittest.TestCase):
         config = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
         env = config["mcp_servers"]["router"]["env"]
         needed = {agent_roster.HOST_CLUSTER_ENV, agent_roster.HOST_LOCATION_ENV,
-                  *agent_roster.HOST_PROJECT_ENVS}
+                  agent_roster.HOST_PROJECT_ENV}
         reader = agent_roster._scope_reader()
         self.assertIsNotNone(reader)
         needed |= {reader.SCOPE_FILE_ENV, *reader.MANAGEMENT_PROJECT_ENVS}

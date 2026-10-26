@@ -164,6 +164,18 @@ class InjectionTest(unittest.TestCase):
         # No host env, no host section, so no sentence pointing at one.
         self.assertNotIn("Host Cluster `assignee`", context)
 
+    def test_host_heading_in_profile_description_does_not_trigger_host_footer(self):
+        # Keying the host footer on free-text substring search would attach it
+        # whenever a specialist's CAPABILITIES.md quoted the heading, even on a
+        # kind install with no host section rendered.
+        self._profile("default")
+        self._profile(
+            "platform",
+            'Explains Host Cluster Identity ("this cluster" / "this host cluster"): see docs.',
+        )
+        context = plugin.handle_pre_llm_call()["context"]
+        self.assertNotIn("Host Cluster `assignee`", context)
+
     def test_injects_host_and_fleet_scope_identity(self):
         self._profile("default")
         self._profile("platform", "Fleet work.")

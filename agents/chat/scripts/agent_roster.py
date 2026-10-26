@@ -53,7 +53,9 @@ NO_DESCRIPTION = "(no description provided)"
 PROFILE_CONFIG = "config.yaml"
 IDENTITY_BLOCK = "cluster_identity:"
 IDENTITY_NAME_KEY = "cluster"
-IDENTITY_PLACE_KEYS = ("project", "location")
+IDENTITY_PROJECT_KEY = "project"
+IDENTITY_LOCATION_KEY = "location"
+IDENTITY_PLACE_KEYS = (IDENTITY_PROJECT_KEY, IDENTITY_LOCATION_KEY)
 IDENTITY_KEYS = (IDENTITY_NAME_KEY, *IDENTITY_PLACE_KEYS)
 IDENTITY_INDENT = "  "
 YAML_QUOTES = "'\""
@@ -66,17 +68,15 @@ IDENTITY_PLACE = "{key} {value}"
 
 # The cluster this pod runs on. The operator sets these on the agent container
 # outside kind (platformagent_manifests.go); the router MCP child gets them
-# through its `env:` block in agents/chat/config.yaml. GCP_PROJECT_ID is the
-# management project, which is the host project when GKE_PROJECT_ID is unset.
+# through its `env:` block in agents/chat/config.yaml.
 HOST_CLUSTER_ENV = "GKE_CLUSTER_NAME"
-HOST_PROJECT_ENVS = ("GKE_PROJECT_ID", "GCP_PROJECT_ID")
+HOST_PROJECT_ENV = "GKE_PROJECT_ID"
 HOST_LOCATION_ENV = "GKE_LOCATION"
+HOST_ASSIGNEE_KEY = "assignee"
+HOST_DISPLAY_KEYS = (*IDENTITY_KEYS, HOST_ASSIGNEE_KEY)
 # Hermes hands a stdio MCP server the literal placeholder when the variable it
 # names is unset (gke_endpoint.py reads it the same way); that is not a value.
 UNEXPANDED_PLACEHOLDER_PREFIX = "${"
-# The host section's heading. The plugin keys its "route this cluster to the
-# host" footer sentence on it, so the sentence never points at a section that
-# was not rendered.
 HOST_IDENTITY_HEADING = 'Host Cluster Identity ("this cluster" / "this host cluster"):'
 # Cluster Agent profile names, as cluster_agent_profile.profile_name derives
 # them. Mirrored rather than imported: that module imports the sandbox and
@@ -97,9 +97,17 @@ SCOPE_PARTIAL_LINE = (
     "- GCP projects in scope (partial: {reason}): {projects}. Say the list is "
     "partial when you answer."
 )
+SCOPE_PARTIAL_PENDING = (
+    "scope discovery has not completed yet; only the host and explicitly "
+    "declared projects can be listed"
+)
+SCOPE_PARTIAL_NUMERIC_HOST = (
+    "scope discovery has not completed yet and the host project is configured "
+    "by number, so only explicitly declared projects can be listed"
+)
 SCOPE_PARTIAL_UNRESOLVED = (
     "the declaration names folders, organisations or selectors whose members "
-    "the reconcile has not resolved yet"
+    "discovery has not resolved yet"
 )
 SCOPE_NONE_LISTED = "none read yet"
 SCOPE_UNDECLARED = (
@@ -183,7 +191,7 @@ def _cluster_identity(home: Path) -> dict[str, str]:
         value = value.strip().strip(YAML_QUOTES)
         if sep and key in IDENTITY_KEYS and value:
             identity[key] = value
-    return identity if identity.get("cluster") else {}
+    return identity if identity.get(IDENTITY_NAME_KEY) else {}
 
 
 def discover(base: Path | None = None) -> list[dict[str, str]] | None:
@@ -310,23 +318,31 @@ def read_host_identity(agents: list[dict[str, str]] | None) -> dict[str, str] | 
     """The cluster this pod runs on, and its Cluster Agent when one exists.
 
     No cluster name, no host: a project or location alone cannot say which
-    cluster "this cluster" is. The assignee is set only from a discovered
-    profile whose stamped identity matches all three values, or whose name is
-    the one the scaffold derives from them; a name that is not a profile is
-    never advertised, because a card filed to it is never dispatched.
+    cluster "this cluster" is. The operator lets spec.harness.projectId be a
+    project number while the reconcile scaffolds every profile on the resolved
+    project ID, so an all-digit GKE_PROJECT_ID is never printed as the project
+    and matches the host profile on cluster and location instead (adopting its
+    stamped project ID when unambiguous). An assignee that is not a discovered
+    profile is never advertised, because a card filed to it is never dispatched.
     """
     cluster = _host_env(HOST_CLUSTER_ENV)
     if not cluster:
         return None
-    project = next((v for v in (_host_env(n) for n in HOST_PROJECT_ENVS) if v), "")
+    raw_project = _host_env(HOST_PROJECT_ENV)
+    numeric_project = raw_project.isdigit()
+    project = "" if numeric_project else raw_project
     location = _host_env(HOST_LOCATION_ENV)
-    host = {"cluster": cluster}
+    host = {IDENTITY_NAME_KEY: cluster}
     if project:
-        host["project"] = project
+        host[IDENTITY_PROJECT_KEY] = project
     if location:
-        host["location"] = location
+        host[IDENTITY_LOCATION_KEY] = location
     if project and location:
-        wanted = {IDENTITY_NAME_KEY: cluster, "project": project, "location": location}
+        wanted = {
+            IDENTITY_NAME_KEY: cluster,
+            IDENTITY_PROJECT_KEY: project,
+            IDENTITY_LOCATION_KEY: location,
+        }
         names = {a["name"] for a in agents or []}
         match = next(
             (
@@ -339,14 +355,26 @@ def read_host_identity(agents: list[dict[str, str]] | None) -> dict[str, str] | 
         derived = _profile_name(project, cluster, location)
         assignee = match or (derived if derived in names else "")
         if assignee:
-            host["assignee"] = assignee
+            host[HOST_ASSIGNEE_KEY] = assignee
+    elif numeric_project and location:
+        wanted = {IDENTITY_NAME_KEY: cluster, IDENTITY_LOCATION_KEY: location}
+        matches = [
+            a
+            for a in agents or []
+            if all(a.get(IDENTITY_FIELD_PREFIX + k) == v for k, v in wanted.items())
+        ]
+        if len(matches) == 1:
+            stamped = matches[0].get(IDENTITY_FIELD_PREFIX + IDENTITY_PROJECT_KEY, "")
+            if stamped and not stamped.isdigit():
+                host[IDENTITY_PROJECT_KEY] = stamped
+            host[HOST_ASSIGNEE_KEY] = matches[0]["name"]
     return host
 
 
 def _format_host(host: dict[str, str] | None) -> str:
     if not host:
         return ""
-    parts = [f"{k}={host[k]}" for k in ("cluster", "project", "location", "assignee") if host.get(k)]
+    parts = [f"{k}={host[k]}" for k in HOST_DISPLAY_KEYS if host.get(k)]
     return f"{HOST_IDENTITY_HEADING}\n- {', '.join(parts)}"
 
 
@@ -390,9 +418,16 @@ def _format_scope(base: Path | None = None) -> str:
     unresolved_row = getattr(reader, "UNRESOLVED_SCOPE_ROW", None)
     listed = list(targets.projects)
     listed += [f"{p} ({outcome})" for p, outcome in targets.unread if p != unresolved_row]
-    reason = targets.note or (
-        SCOPE_PARTIAL_UNRESOLVED if any(p == unresolved_row for p, _ in targets.unread) else ""
-    )
+    if targets.note:
+        note_reasons = {
+            getattr(reader, "RENDER_NOTE", None): SCOPE_PARTIAL_PENDING,
+            getattr(reader, "RENDER_NUMERIC_HOST_NOTE", None): SCOPE_PARTIAL_NUMERIC_HOST,
+        }
+        reason = note_reasons.get(targets.note, SCOPE_PARTIAL_PENDING)
+    elif any(p == unresolved_row for p, _ in targets.unread):
+        reason = SCOPE_PARTIAL_UNRESOLVED
+    else:
+        reason = ""
     projects = ", ".join(listed) or SCOPE_NONE_LISTED
     if reason:
         return f"{SCOPE_HEADING}\n{SCOPE_PARTIAL_LINE.format(reason=reason, projects=projects)}"
