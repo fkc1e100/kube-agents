@@ -3113,6 +3113,7 @@ class TestIncidentTriagePullRequestOptIn(unittest.TestCase):
         self.assertIn("**submit-suggestion**", body)
         self.assertIn("Implement ONLY that recommended option", body)
         self.assertIn("changing only the file(s) that option calls for", body)
+        self.assertIn("edit only the synced workload manifest(s)", body)
         self.assertIn("never bundle any non-recommended option", body)
         self.assertIn(
             "never touch unrelated manifests or infrastructure definitions that the recommended option does not target",

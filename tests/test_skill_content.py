@@ -146,10 +146,12 @@ class SubmitSuggestionHandsEditsToTheirAuthoringSkillTest(unittest.TestCase):
     def test_step_two_scopes_multi_option_reports_to_chosen_option_only(self):
         content = (REPO_ROOT / "agents/platform/skills/submit-suggestion/SKILL.md").read_text(encoding="utf-8")
         step2 = content[content.index("### Step 2: Make the Changes"):content.index("### Deleting a resource")]
-        self.assertIn("**Implement only the chosen option.**", step2)
-        self.assertIn("edit only the file(s) that option calls for", step2)
-        self.assertIn("Never bundle unchosen options\nor optional hardening into the same pull request", step2)
-        self.assertIn("never touch unrelated\nmanifests or infrastructure definitions", step2)
+        flat = " ".join(step2.split())
+        self.assertIn("**Implement only the chosen option.**", flat)
+        self.assertIn("edit only the file(s) that option calls for", flat)
+        self.assertIn("edit only the synced workload manifest(s)", flat)
+        self.assertIn("Never bundle unchosen options or optional hardening into the same pull request", flat)
+        self.assertIn("never touch unrelated manifests or infrastructure definitions", flat)
 
 if __name__ == "__main__":
     unittest.main()

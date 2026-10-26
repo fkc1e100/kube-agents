@@ -136,6 +136,7 @@ resource "null_resource" "incident" {
       tostring(var.replicas),
       tostring(var.crash_seconds),
       var.wait_for,
+      tostring(var.start_settle_seconds),
       var.host_cluster_name,
     ]))
   }
@@ -500,6 +501,10 @@ resource "null_resource" "incident" {
         if [ "$elapsed" -lt 1500 ]; then
           echo "k8s-event-watcher sent the quiet follow-up for ${local.ns} after $${elapsed}s."
         fi
+      fi
+      if [ "${var.start_settle_seconds}" -gt 0 ]; then
+        echo "Waiting ${var.start_settle_seconds}s for the incident turn to file its cards."
+        sleep "${var.start_settle_seconds}"
       fi
 
       # After a `fire` line the card is filed within seconds and then takes

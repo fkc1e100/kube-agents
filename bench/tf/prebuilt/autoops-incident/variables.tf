@@ -59,7 +59,7 @@ variable "agent_deployment" {
 }
 
 variable "agent_container" {
-  type        = string
+  type = string
   # k8s-event-watcher is not a container of its own: it runs inside the
   # agent-api-auth sidecar of the gateway pod (buildAgentAPIAuthSidecar in
   # k8s-operator/internal/controller/platformagent_manifests.go). It used to
@@ -173,6 +173,18 @@ variable "wait_for" {
     condition     = contains(["incident", "followup"], var.wait_for)
     error_message = "wait_for must be incident or followup."
   }
+}
+
+# Seconds to sleep after `fire` so the asynchronous `k8s-evt-*` front-door turn
+# has time to emit its `kanban_create` call(s) before the eval prompt's
+# non-blocking `kanban_list` search begins (same settle pattern as
+# bench/tf/prebuilt/triage-start-burst). Defaults to 0 so single-card cases keep
+# their existing timing; multi-card cases (`INCIDENT_TRIAGE_OPEN_PULL_REQUEST`)
+# set 40s because filing two cards takes ~20s after `fire`.
+variable "start_settle_seconds" {
+  type        = number
+  description = "Seconds to wait after k8s-event-watcher logs fire so the incident turn can file its kanban cards."
+  default     = 0
 }
 
 # Identify the CI run that planted this, so a janitor can find what a run killed

@@ -97,6 +97,7 @@ _INTERPOLATIONS = {
     # The OOM shape and the incident wait: what the incumbent case plants.
     "var.crash_seconds": "0",
     "var.wait_for": "incident",
+    "var.start_settle_seconds": "0",
 }
 
 #: The label step 1 writes, and the value step 0b requires before it will

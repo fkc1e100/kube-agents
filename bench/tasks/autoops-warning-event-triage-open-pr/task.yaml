@@ -32,6 +32,7 @@ infrastructure:
     workload_name: "eval-open-pr-workload"
     memory_limit_mib: 64
     allocate_mib: 96
+    start_settle_seconds: 180
 
 validated: false
 
@@ -48,13 +49,16 @@ prompt: |
   Retrieve both cards from the kanban board and report them. Do not diagnose
   anything yourself and do not open a second Pull Request:
 
-  1. Call `kanban_list` separately for status 'todo', 'running', 'done' and
-     'blocked' to find the most recent triage card and its follow-up
-     'Open GitOps PR' card concerning the 'eval-autoops-open-pr' namespace
-     (if either card has not appeared on the board yet, retry `kanban_list`
-     up to 5 times with a short pause until both cards are present).
-  2. Wait with `kanban_show` until both the triage card and its follow-up Pull
-     Request card reach 'done', 'blocked' or 'archived'.
+  1. Call `kanban_list` separately for status 'todo', 'ready', 'running', 'done'
+     and 'blocked' (never without a status filter) to find the most recent
+     triage card and its follow-up 'Open GitOps PR' card concerning the
+     'eval-autoops-open-pr' namespace. The incident turn takes up to a minute
+     after the event fires to file both cards, so keep re-checking `kanban_list`
+     until both cards appear rather than stopping early.
+  2. Call `kanban_show` on both card IDs and keep re-checking until both the
+     triage card and its follow-up Pull Request card reach 'done', 'blocked' or
+     'archived'. This normally takes several minutes; keep waiting rather than
+     answering while either card is still in 'todo', 'ready' or 'running'.
   3. Reproduce the triage card's full report verbatim, followed by the
      follow-up Pull Request card's result (including the Pull Request URL).
 
