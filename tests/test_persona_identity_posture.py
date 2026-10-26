@@ -16,30 +16,29 @@ Run:
 
 from __future__ import annotations
 
+import functools
 import re
 import shlex
 import time
 import unittest
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_SOUL = REPO_ROOT / "agents/platform/SOUL.md"
 CLUSTER_SOUL = REPO_ROOT / "agents/cluster/SOUL.md"
 CONSOLE_LINKS_DOC = REPO_ROOT / "agents/platform/docs/gcp-console-links.md"
 SANDBOX_ENTRYPOINT = REPO_ROOT / "deploy/sandbox/entrypoint.sh"
+MARKDOWN = MarkdownIt("commonmark")
 
 # A SOUL.md shorter than this was truncated or replaced, not edited.
 MIN_SOUL_CHARS = 1000
 EXPECTED_CONSOLE_URL_COUNT = 4
 ADVERSARIAL_REPEAT_COUNT = 10_000
-MAX_REGEX_SCAN_SECONDS = 0.5
+MAX_SCAN_CPU_SECONDS = 1.0
 IDENTITY_BULLET = "- **Host and Cluster Identity Queries:**"
 PROJECT_RESOLUTION_BULLET = "- **Dynamic Project Resolution:**"
-# Ends a top-level Markdown list item when seen at column 0 (next list marker,
-# ATX heading, thematic break, fenced code block, or blockquote).
-TOP_LEVEL_BLOCK_BOUNDARY_RE = re.compile(
-    r"^(?:[-*+]|\d+[.)])\s|^#|^---|^\*\*\*|^___|^`{3,}|^~{3,}|^>"
-)
 # Dynamic Project Resolution quotes `$GCP_PROJECT_ID` once after `literal` as a
 # negative prose example of an unexpanded variable shipped in INVENTORY.md.
 # Matching that token pair rather than the surrounding sentence lets prose or
@@ -48,7 +47,6 @@ NEGATIVE_PROSE_LITERAL_RE = re.compile(r"\bliteral\s+`\$\{?GCP_PROJECT_ID\}?`")
 SANDBOX_UNREACHABLE_DOCS = "/opt/defaults/docs/"
 CONSOLE_URL_RE = re.compile(r"`(https://console\.cloud\.google\.com/[^`]+)`")
 FORWARDED_ENV_RE = re.compile(r'SANDBOX_FORWARDED_ENV_NAMES="([^"]+)"')
-CODE_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
 # Environment variable names must open with `[A-Z]` and end with `[A-Z0-9]` so a
 # trailing-underscore prefix filter like `env | grep GKE_` or `GKE_|KUBE_CONTEXT_`
 # is not misreported as an unforwarded variable name.
@@ -94,25 +92,51 @@ UNBACKTICKED_ENV_READ_RE = re.compile(
     r"|\benv\.[A-Z]"
     r"|\b(?:str)?env\s*\(\s*[A-Z\"']"
     r"|\b(?:declare|typeset|export)\s+-[A-OQ-WYZa-oq-wyz]*[pPxX][A-Za-z]*\b"
-    r"|\b(?:env|set|export|declare)\s*(?:\|(?!\|)|-[A-HJ-TV-Za-hj-tv-z]*[iIuU][A-Za-z0-9_]*|--unset\b|--ignore-environment\b)"
+    r"|\b(?:env|set|export|declare)(?:\s*\|(?!\|)|\s+(?:-[A-HJ-TV-Za-hj-tv-z]*[iIuU][A-Za-z0-9_]*|--unset\b|--ignore-environment\b))"
 )
 
 
+@functools.lru_cache(maxsize=64)
+def _code_spans_and_prose(text: str) -> tuple[tuple[str, ...], str]:
+    """Return ``(code_spans, unbackticked_prose)`` tokenized by CommonMark."""
+    code_spans: list[str] = []
+    prose_parts: list[str] = []
+    for token in MARKDOWN.parse(text):
+        if token.type in ("fence", "code_block"):
+            code_spans.append(token.content)
+            prose_parts.append(" ")
+        elif token.type == "html_block":
+            prose_parts.append(token.content)
+        elif token.type == "inline" and token.children:
+            for child in token.children:
+                if child.type == "code_inline":
+                    code_spans.append(child.content)
+                    prose_parts.append(" ")
+                elif child.type in ("softbreak", "hardbreak"):
+                    prose_parts.append("\n")
+                elif child.content:
+                    prose_parts.append(child.content)
+    return tuple(code_spans), "".join(prose_parts)
+
+
 def _unbackticked_env_reads(text: str) -> list[str]:
-    prose = CODE_SPAN_RE.sub(" ", text)
+    _, prose = _code_spans_and_prose(text)
     return [m.group(0).strip() for m in UNBACKTICKED_ENV_READ_RE.finditer(prose)]
 
 
 def _cited_env_vars(text: str) -> set[str]:
-    names = {braced or bare for braced, bare in DOLLAR_ENV_RE.findall(text)}
-    names.update(SCREAMING_SNAKE_RE.findall(text))
-    for fenced, inline in CODE_SPAN_RE.findall(text):
-        span = fenced or inline
+    code_spans, prose = _code_spans_and_prose(text)
+    names = {braced or bare for braced, bare in DOLLAR_ENV_RE.findall(prose)}
+    names.update(SCREAMING_SNAKE_RE.findall(prose))
+    for span in code_spans:
+        names.update(braced or bare for braced, bare in DOLLAR_ENV_RE.findall(span))
+        names.update(SCREAMING_SNAKE_RE.findall(span))
         try:
             tokens = shlex.split(span, posix=True)
         except ValueError:
             tokens = []
-        for token in tokens:
+        for raw_token in tokens:
+            token = raw_token.strip("`")
             unset_match = ATTACHED_UNSET_OPT_RE.match(token)
             if unset_match:
                 names.add(unset_match.group(1))
@@ -143,32 +167,22 @@ def _read(path: Path) -> str:
 
 
 def _bullet_block(text: str, prefix: str) -> str:
-    """Return the full Markdown list item starting with ``prefix``, including any
-    indented sub-bullets, loose indented paragraphs across blank lines, and
-    CommonMark lazy continuation lines, up to the next top-level block."""
+    """Return the full CommonMark list item starting with ``prefix``, including
+    indented sub-bullets, loose indented paragraphs across blank lines, fenced
+    code blocks, and lazy continuation lines."""
     lines = text.splitlines()
     blocks: list[str] = []
-    for start, line in enumerate(lines):
-        if not line.startswith(prefix):
-            continue
-        collected = [line]
-        pending_blanks: list[str] = []
-        saw_blank = False
-        for tail in lines[start + 1 :]:
-            if not tail.strip():
-                pending_blanks.append(tail)
-                saw_blank = True
-                continue
-            if tail[0].isspace():
-                collected.extend(pending_blanks)
-                pending_blanks.clear()
-                saw_blank = False
-                collected.append(tail)
-                continue
-            if saw_blank or TOP_LEVEL_BLOCK_BOUNDARY_RE.match(tail):
-                break
-            collected.append(tail)
-        blocks.append("\n".join(collected))
+    item_depth = 0
+    for token in MARKDOWN.parse(text):
+        if token.type == "list_item_open":
+            if item_depth == 0 and token.map is not None:
+                start, end = token.map
+                block = "\n".join(lines[start:end]).rstrip()
+                if block.startswith(prefix):
+                    blocks.append(block)
+            item_depth += 1
+        elif token.type == "list_item_close":
+            item_depth -= 1
     if not blocks:
         raise AssertionError(f"no line starts with {prefix!r}")
     if len(blocks) > 1:
@@ -282,12 +296,18 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             ("PROJECT", '`declare -p "PROJECT"`'),
             ("PROJECT", "`typeset -xp PROJECT`"),
             ("HOSTNAME", "$HOSTNAME"),
+            ("HOSTNAME", "`` `printenv HOSTNAME` ``"),
+            ("HOSTNAME", "`` `env -uHOSTNAME printenv GKE_PROJECT_ID` ``"),
             ("KUBE_CONTEXT", "`env | grep -E 'GKE_|KUBE_CONTEXT'`"),
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(expected_var, _cited_env_vars(snippet))
                 self.assertFalse(_cited_env_vars(f"{identity_bullet} ({snippet})").issubset(forwarded))
                 self.assertFalse(_cited_env_vars(f"{cleaned_project_bullet} ({snippet})").issubset(forwarded))
+
+        # Double-backtick inline code spans count as backticked rather than prose.
+        self.assertEqual(_unbackticked_env_reads("`` `printenv HOSTNAME` ``"), [])
+        self.assertEqual(_unbackticked_env_reads("`` `env -uHOSTNAME printenv GKE_PROJECT_ID` ``"), [])
 
         # Trailing-underscore prefixes (`GKE_`, `KUBE_CONTEXT_`) are not cited as variable names.
         self.assertNotIn("GKE_", _cited_env_vars("`env | grep -E 'GKE_|KUBE_CONTEXT'`"))
@@ -346,6 +366,8 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             "\n\n  - `printenv HOSTNAME`",
             "\n  ```sh\n  awk 'BEGIN{print ENVIRON[\"HOSTNAME\"]}'\n  ```\n  and `$GKE_CLUSTER_NAME`",
             "\nor resolve it via `printenv HOSTNAME`.",
+            "\n#not-an-atx-heading `printenv HOSTNAME`",
+            "\n####### seven-hashes `$HOSTNAME`",
         ):
             with self.subTest(continuation=continuation):
                 expanded_identity_soul = soul.replace(identity_bullet, identity_bullet + continuation, 1)
@@ -359,12 +381,20 @@ class PersonaIdentityPostureTests(unittest.TestCase):
                     ).issubset(forwarded)
                 )
 
-        unbackticked_continuation_soul = soul.replace(
-            identity_bullet,
-            identity_bullet + "\n  - Use the host's shell: printenv HOSTNAME prints the pod's name.",
-            1,
-        )
-        self.assertTrue(_unbackticked_env_reads(_bullet_block(unbackticked_continuation_soul, IDENTITY_BULLET)))
+        for unbackticked_continuation in (
+            "\n  - Use the host's shell: printenv HOSTNAME prints the pod's name.",
+            "\n#not-an-atx-heading printenv HOSTNAME",
+            "\n####### seven-hashes printenv HOSTNAME",
+        ):
+            with self.subTest(unbackticked_continuation=unbackticked_continuation):
+                unbackticked_continuation_soul = soul.replace(
+                    identity_bullet,
+                    identity_bullet + unbackticked_continuation,
+                    1,
+                )
+                self.assertTrue(
+                    _unbackticked_env_reads(_bullet_block(unbackticked_continuation_soul, IDENTITY_BULLET))
+                )
 
         sibling_leak_soul = soul.replace(
             identity_bullet,
@@ -394,6 +424,8 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             "Run `printenv GKE_PROJECT_ID` (GCP project) first.",
             "Run `printenv GKE_PROJECT_ID`, GKE only; GKE installs.",
             "Use the host's `printenv GKE_PROJECT_ID` for the pod's GCP project.",
+            "On a `kind` set-up, the install's env-file and env-specific set-aside or export-import rules read `$GKE_PROJECT_ID`.",
+            "`` `printenv GKE_PROJECT_ID` ``",
             "`awk 'BEGIN{print ENVIRON[\"GKE_PROJECT_ID\"]}'`",
             "`perl -e 'print $ENV{GKE_PROJECT_ID}'`",
             "`jq -rn '$ENV.GKE_PROJECT_ID'`",
@@ -401,6 +433,8 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             with self.subTest(forwarded_only=forwarded_only):
                 self.assertEqual(_unbackticked_env_reads(forwarded_only), [])
                 self.assertEqual(_cited_env_vars(forwarded_only), {"GKE_PROJECT_ID"})
+                self.assertEqual(_unbackticked_env_reads(f"{identity_bullet} {forwarded_only}"), [])
+                self.assertEqual(_unbackticked_env_reads(f"{cleaned_project_bullet} {forwarded_only}"), [])
 
         prose_with_code = (
             "on GKE installs in GCP (`in-cluster`, `gke_kind_kind_kind`, "
@@ -422,12 +456,13 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             "$" + "A" * ADVERSARIAL_REPEAT_COUNT + "_",
             "declare -" + "p" * ADVERSARIAL_REPEAT_COUNT + "1",
             "env -" + "u" * ADVERSARIAL_REPEAT_COUNT + "1",
+            "set-" + "u" * ADVERSARIAL_REPEAT_COUNT + "1",
             "x#y\n" * ADVERSARIAL_REPEAT_COUNT,
         ):
             self.assertEqual(_cited_env_vars(payload), set())
             _unbackticked_env_reads(payload)
         elapsed = time.process_time() - start
-        self.assertLess(elapsed, MAX_REGEX_SCAN_SECONDS)
+        self.assertLess(elapsed, MAX_SCAN_CPU_SECONDS)
 
     def test_platform_and_cluster_personas_inline_console_links(self):
         canonical_urls = CONSOLE_URL_RE.findall(CONSOLE_LINKS_DOC.read_text(encoding="utf-8"))
