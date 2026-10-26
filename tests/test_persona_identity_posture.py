@@ -52,32 +52,112 @@ CODE_SPAN_RE = re.compile(r"```[^\n`]*\n(.*?)```|`([^`]+)`", re.DOTALL)
 ENV_IDENT_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # Closed code-span scan: cites every uppercase identifier token inside a
 # backticked span (excluding `/`-prefixed path segments, `-[A-Z]` CLI flags,
-# `%XX` URL escapes, and uppercase filenames like `INVENTORY.md`), so no quoted,
-# piped, awk/grep, or other command spelling in a SOUL code span can hide an
-# unforwarded variable name behind an unenumerated verb.
+# `%XX` URL escapes / `%ENV`, `BEGIN{`/`END{` awk blocks, `ENVIRON[...]`/`in
+# ENVIRON)` table names, `ENV{...}`/`ENV[...]`/`ENV.<method>` table names, and
+# uppercase filenames like `INVENTORY.md`), so no quoted, piped, awk/perl/grep,
+# or other command spelling in a SOUL code span can hide an unforwarded variable
+# name behind an unenumerated verb.
 CODE_SPAN_ENV_RE = re.compile(
-    r"(?<![/%-])\b([A-Z][A-Z0-9_]*)\b(?!\.(?:md|yaml|yml|json|py|sh|txt|toml)\b)"
+    r"(?<![/%-])\b(?!(?:BEGIN|END)\s*\{)(?!ENVIRON\s*[\[\)])"
+    r"(?!ENV(?:\s*[\{\[]|\.[A-Za-z_]))"
+    r"([A-Z][A-Z0-9_]*)\b(?!\.(?:md|yaml|yml|json|py|sh|txt|toml)\b)"
 )
 # Matches `$VAR`, `${VAR}`, `${!VAR}`, `${#VAR}`, and `${VAR:-...}` expansions
-# anywhere in prose or code spans, plus bare SCREAMING_SNAKE_CASE identifiers.
+# anywhere in prose or code spans (excluding `$ENV{...}` / `$ENV.VAR` table
+# prefixes), plus bare SCREAMING_SNAKE_CASE identifiers.
 # `[^A-Z0-9_}]` keeps the identifier and operator suffix disjoint on unclosed `${...`.
 DOLLAR_ENV_RE = re.compile(
-    r"\$(?:\{[!#]?([A-Z][A-Z0-9_]*)(?:[^A-Z0-9_}][^}]*)?\}|([A-Z][A-Z0-9_]*)\b)"
+    r"\$(?:\{[!#]?([A-Z][A-Z0-9_]*)(?:[^A-Z0-9_}][^}]*)?\}|"
+    r"(?!ENV(?:\s*\{|\.[A-Za-z_]))([A-Z][A-Z0-9_]*)\b)"
 )
 SCREAMING_SNAKE_RE = re.compile(r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b")
-# Unbackticked fallbacks for plain-prose shell or Python env reads written
-# without code fences (including quoted variable names and piped grep dumps).
-QUOTED_OR_BARE_ENV_TOKEN_RE = re.compile(r"[\"']?([A-Z][A-Z0-9_]*)[\"']?")
-EXEC_ENV_ARGS_RE = re.compile(
-    r"\b(?:(?:printenv(?:\s+(?:-0|--null))*|(?:declare|typeset)(?:\s+-[A-Za-z]+)*|"
-    r"export(?:\s+-[A-Za-z]+)+)\s+(?:--\s+)?|env\s+(?:-u\s+|--unset(?:=|\s+)))"
-    r"([\"']?[A-Z][A-Z0-9_]*[\"']?(?:\s+[\"']?[A-Z][A-Z0-9_]*[\"']?)*)"
+# Flat, disjoint token stream for unbackticked prose/shell clauses: scans
+# arguments and arbitrary multi-stage pipelines opened by an env-read command or
+# env-table expression without enumerating pipeline stages or CLI flags.
+UNBACKTICKED_TOKEN_RE = re.compile(
+    r"'[^']*'"
+    r'|"(?:[^"\\]|\\.)*"'
+    r"|\n"
+    r"|\|"
+    r"|[^\s|\"']+"
 )
-DUMP_PIPE_GREP_RE = re.compile(
-    r"\b(?:printenv|env|set|export|declare|typeset)\b[^.|\n]{0,200}\|\s*(?:e?grep|fgrep|rg)\b"
-    r"\s+(?:(?:-[A-Za-z0-9-]+|\d+)\s+)*[\"'^(]*([A-Z][A-Z0-9_]*)"
+INLINE_ENV_CUE_RE = re.compile(
+    r"\b(?:environ|getenv|ENVIRON)\b"
+    r"|(?:\$|%|@)ENV\b"
+    r"|\bENV(?:\s*[\[\{]|\.[A-Za-z_])"
+    r"|\b(?:process|Deno|Bun)\.env\b"
+    r"|\b(?:str)?env\s*\("
+    r"|\benv\.[A-Z]"
 )
-PY_ENV_LOOKUP_RE = re.compile(r"\b(?:environ(?:\.get)?\s*[\[(]|getenv\s*\()\s*['\"]([A-Z][A-Z0-9_]*)['\"]")
+UNSET_FLAG_VAR_RE = re.compile(r"^(?:-[A-Za-z]*u|--unset=)[\"']?([A-Z][A-Z0-9_]*)[\"']?$")
+PROSE_LOWER_WORD_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def _unbackticked_env_read_vars(unbackticked: str) -> set[str]:
+    names: set[str] = set()
+    tokens = UNBACKTICKED_TOKEN_RE.findall(unbackticked)
+    scanning = False
+    clause_saw_env_cue = False
+    after_pipe = False
+    for idx, tok in enumerate(tokens):
+        if tok == "\n":
+            scanning = False
+            clause_saw_env_cue = False
+            after_pipe = False
+            continue
+        if tok == "|":
+            prev = tokens[idx - 1].strip("(),;") if idx > 0 else ""
+            if scanning or clause_saw_env_cue or prev == "set" or (
+                "/proc/" in prev and prev.endswith("/environ")
+            ):
+                scanning = True
+                clause_saw_env_cue = True
+                after_pipe = True
+            continue
+        if tok[0] in ("'", '"'):
+            if scanning or INLINE_ENV_CUE_RE.search(tok):
+                names.update(CODE_SPAN_ENV_RE.findall(tok))
+                if INLINE_ENV_CUE_RE.search(tok):
+                    clause_saw_env_cue = True
+            continue
+        ends_sentence = tok.endswith(".") and not tok.endswith("..")
+        clean = tok.strip("(),;.")
+        next_tok = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+        if (
+            clean in {"printenv", "typeset"}
+            or ("/proc/" in clean and clean.endswith("/environ"))
+            or (
+                clean in {"declare", "export"}
+                and (next_tok == "|" or next_tok.startswith("-") or "=" in next_tok)
+            )
+            or (clean == "env" and (next_tok == "|" or next_tok.startswith("-") or "=" in next_tok))
+        ):
+            scanning = True
+            clause_saw_env_cue = True
+            after_pipe = False
+        elif INLINE_ENV_CUE_RE.search(tok):
+            scanning = True
+            clause_saw_env_cue = True
+            after_pipe = False
+            names.update(CODE_SPAN_ENV_RE.findall(tok))
+        elif scanning:
+            if after_pipe:
+                after_pipe = False
+            elif clean.startswith("-"):
+                unset_match = UNSET_FLAG_VAR_RE.match(clean)
+                if unset_match:
+                    names.add(unset_match.group(1))
+            elif not clean or clean.isdigit():
+                pass
+            elif PROSE_LOWER_WORD_RE.fullmatch(clean):
+                scanning = False
+            else:
+                names.update(CODE_SPAN_ENV_RE.findall(tok))
+        if ends_sentence:
+            scanning = False
+            clause_saw_env_cue = False
+            after_pipe = False
+    return names
 
 
 def _cited_env_vars(text: str) -> set[str]:
@@ -94,10 +174,7 @@ def _cited_env_vars(text: str) -> set[str]:
             if ENV_IDENT_RE.fullmatch(candidate):
                 names.add(candidate)
         names.update(CODE_SPAN_ENV_RE.findall(span))
-    for arg_group in EXEC_ENV_ARGS_RE.findall(text):
-        names.update(QUOTED_OR_BARE_ENV_TOKEN_RE.findall(arg_group))
-    names.update(DUMP_PIPE_GREP_RE.findall(text))
-    names.update(PY_ENV_LOOKUP_RE.findall(text))
+    names.update(_unbackticked_env_read_vars(CODE_SPAN_RE.sub(" ", text)))
     return names
 
 
@@ -226,11 +303,27 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             ("HOSTNAME", "env | grep HOSTNAME"),
             ("HOSTNAME", "`printenv | grep -w HOSTNAME`"),
             ("HOSTNAME", "printenv | grep -w HOSTNAME"),
+            ("HOSTNAME", "printenv | sort | grep HOSTNAME"),
+            ("HOSTNAME", "printenv | sort -u | tr -s ' ' | grep --color=auto HOSTNAME"),
+            ("HOSTNAME", "env | grep --color=auto HOSTNAME"),
+            ("HOSTNAME", "env -uHOSTNAME printenv GKE_PROJECT_ID"),
+            ("HOSTNAME", "env --unset=HOSTNAME printenv GKE_PROJECT_ID"),
+            ("HOSTNAME", "set | sort | grep HOSTNAME"),
+            ("HOSTNAME", "cat /proc/self/environ | tr '\\0' '\\n' | grep HOSTNAME"),
             ("HOSTNAME", "`env | grep '^HOSTNAME='`"),
             ("HOSTNAME", "`awk 'BEGIN{print ENVIRON[\"HOSTNAME\"]}'`"),
+            ("HOSTNAME", "awk 'BEGIN{print ENVIRON[\"HOSTNAME\"]}'"),
+            ("HOSTNAME", "perl -e 'print \"$ENV{HOSTNAME}\\n\"'"),
+            ("HOSTNAME", "`perl -e 'print $ENV{HOSTNAME}'`"),
+            ("HOSTNAME", "python3 -c 'import os; print(os.environ[\"HOSTNAME\"])'"),
+            ("HOSTNAME", "os.environ.get('HOSTNAME')"),
+            ("HOSTNAME", "jq -rn 'env.HOSTNAME'"),
+            ("HOSTNAME", "yq -n 'strenv(HOSTNAME)'"),
             ("HOSTNAME", "read `HOSTNAME` from the environment"),
             ("HOSTNAME", "${!HOSTNAME}"),
             ("HOSTNAME", "`${!HOSTNAME}`"),
+            ("ENV", "`printenv ENV`"),
+            ("ENV", "$ENV"),
             ("PROJECT", "declare -p PROJECT"),
             ("PROJECT", 'declare -p "PROJECT"'),
             ("PROJECT", "typeset -xp PROJECT"),
@@ -286,6 +379,18 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "NEGATIVE_PROSE_LITERAL_RE"):
             _cleaned_project_resolution_bullet(raw_project_bullet.replace("literal `$GCP_PROJECT_ID`", "example"))
 
+        for forwarded_only in (
+            "On GKE, resolve the GCP project ID via printenv | sort | grep GKE_PROJECT_ID on GCP.",
+            "Resolve it via printenv GKE_PROJECT_ID on GKE installs.",
+            "awk 'BEGIN{print ENVIRON[\"GKE_PROJECT_ID\"]}'",
+            "`awk 'BEGIN{print ENVIRON[\"GKE_PROJECT_ID\"]}'`",
+            "perl -e 'print $ENV{GKE_PROJECT_ID}'",
+            "`perl -e 'print $ENV{GKE_PROJECT_ID}'`",
+            "`jq -rn '$ENV.GKE_PROJECT_ID'`",
+        ):
+            with self.subTest(forwarded_only=forwarded_only):
+                self.assertEqual(_cited_env_vars(forwarded_only), {"GKE_PROJECT_ID"})
+
         self.assertEqual(
             _cited_env_vars(
                 "on GKE installs in GCP (`in-cluster`, `gke_kind_kind_kind`, "
@@ -300,10 +405,12 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         for payload in (
             "env | grep" + "   0" * ADVERSARIAL_REPEAT_COUNT + "!",
             "printenv | grep" + " -w" * ADVERSARIAL_REPEAT_COUNT + "!",
+            "printenv" + " | sort" * ADVERSARIAL_REPEAT_COUNT + "!",
             "env " * ADVERSARIAL_REPEAT_COUNT + "!",
             "${" + "A" * ADVERSARIAL_REPEAT_COUNT,
             "printenv" + " -0" * ADVERSARIAL_REPEAT_COUNT + "!",
             "declare" + " -p" * ADVERSARIAL_REPEAT_COUNT + "!",
+            "x#y\n" * ADVERSARIAL_REPEAT_COUNT,
         ):
             self.assertEqual(_cited_env_vars(payload), set())
         elapsed = time.monotonic() - start
