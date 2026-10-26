@@ -32,10 +32,12 @@
 # one unchained command. For a card the front door filed, worker_commands reads
 # Hermes's one-line card-log rendering (summarize_shell_command), which
 # collapses a `;`, `&&` or `||` chain to `<first command> + N command(s)` and
-# hides what followed; the forbidden-route check therefore also rejects a
-# collapsed chain (`\s\+\s\d+\s+commands?$`). A worker that reads os.environ
-# through execute_code leaves no card-log row for it and fails the env-read
-# check.
+# joins newline-separated lines with spaces and no suffix; the forbidden-route
+# check therefore rejects collapsed chains (`\s\+\s\d+\s+commands?$`) and
+# carries quote- and `#`-comment-aware text patterns alongside `forbidden_runs`
+# so a second-line `kubectl config` or `gcloud container clusters list` joined
+# onto the env-read row still fails. A worker that reads os.environ through
+# execute_code leaves no card-log row for it and fails the env-read check.
 #
 # Domain: chat and routing. Isolation class: read-only. Eligible tier: nightly.
 id: platform-host-identity-from-env
@@ -168,10 +170,16 @@ verification_spec:
       # Enforces the single-call contract (`max_commands: 1` plus Hermes's
       # collapsed-chain suffix ` + N command(s)`) and forbids the routes the
       # live and red-on-main runs took: `kubectl config` subcommands and
-      # `gcloud container clusters list` on argv (`forbidden_runs`, with no
-      # duplicate text pattern that would match comments or grep patterns), any
-      # `find` rooted under `/`, and filesystem searches for console-link
-      # helpers.
+      # `gcloud container clusters list` on argv (`forbidden_runs`) and on
+      # newline-joined card-log rows (`summarize_shell_command` turns `\n` into
+      # a space with no `+ N command(s)` suffix, so quote- and `#`-comment-aware
+      # text patterns catch a second-line `kubectl config` or `gcloud container
+      # clusters list` without matching quoted grep arguments, comments, or
+      # non-config verbs such as `kubectl get configmap config`), any `find`
+      # rooted under `/`, and filesystem searches for console-link helpers
+      # (`console.cloud.google.com` bound to an unquoted search verb so an
+      # `echo` composing a Cloud Console link from the forwarded variables still
+      # passes).
       type: worker_commands
       max_commands: 1
       forbidden_runs:
@@ -184,9 +192,11 @@ verification_spec:
         - script: gcloud
           subcommands: ["alpha", "container", "clusters", "list"]
       forbidden_patterns:
-        - 'gcp-console-links|console\.cloud\.google\.com|\*console\*'
+        - 'gcp-console-links|\*console\*|^(?:[^\x27\\\x22#]|(?<=\S)#|#[^\n]*(?=\n)|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:^|[\s;|&(])(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\x27\x22])(?:(?:(?!\1).)*?[\s;|&(])?)?(?:(?:/usr)?(?:/local)?/bin/)?(?:find|e?grep|fgrep|rg|ls|locate)\b[^|;&]*console\.cloud\.google\.com'
         - '\bfind\s+/'
         - '\s\+\s\d+\s+commands?$'
+        - '^(?:[^\x27\\\x22#]|(?<=\S)#|#[^\n]*(?=\n)|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:^|[\s;|&(])(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\x27\x22])(?:(?:(?!\1).)*?[\s;|&(])?)?(?:(?:/usr)?(?:/local)?/bin/)?kubectl(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!config\b)(?!-)\S+))?))*\s+(?:--\s+)?config\b'
+        - '^(?:[^\x27\\\x22#]|(?<=\S)#|#[^\n]*(?=\n)|\\.|[\x27][^\x27]*[\x27]|\x22(?:[^\x22\\]|\\.)*\x22)*(?:^|[\s;|&(])(?:(?:(?:/usr)?(?:/local)?/bin/)?(?:ba|da|z|k|a)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\s+([\x27\x22])(?:(?:(?!\1).)*?[\s;|&(])?)?(?:(?:/usr)?(?:/local)?/bin/)?gcloud(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*(?:\s+(?:alpha|beta)\b(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*)?\s+container\b(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*\s+clusters\b(?:\s+(?:--[A-Za-z0-9-]+=\S+|(?:--[A-Za-z0-9-]+|-(?!-)\S+)(?:\s+(?:\x27[^\x27]*\x27|\x22(?:[^\x22\\]|\\.)*\x22|(?!container\b|clusters\b|list\b|alpha\b|beta\b)(?!-)\S+))?))*\s+list\b'
   # The delegation boundary, as in chat-routing-fleet-question: the front door
   # files the card and never works it.
   - name: front-door-stays-out-of-the-worker-verbs

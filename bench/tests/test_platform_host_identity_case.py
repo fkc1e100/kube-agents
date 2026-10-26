@@ -230,6 +230,7 @@ CLEAN_ENV_COMMANDS = [
     'python3 <<EOF\nimport os\nprint(os.getenv("KUBE_CONTEXT_NAME"))\nEOF',
     'python3 - <<\'EOF\'\nimport os\nprint(os.environ["GKE_CLUSTER_NAME"])\nEOF',
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
+    'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
 ]
 
 NON_ENV_READ_COMMANDS = [
@@ -294,6 +295,9 @@ ALLOWED_NO_HUNT_COMMANDS = [
     "gcloud container clusters describe list --zone us-central1-a",
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
     'grep -r "kubectl config" /opt/defaults/skills',
+    'grep -r "gcloud container clusters list" /opt/defaults/skills',
+    'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
+    'echo "Cluster: $GKE_CLUSTER_NAME ($GKE_LOCATION) — find details at https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
 ]
 
 FORBIDDEN_WORKER_COMMANDS = [
@@ -315,6 +319,15 @@ FORBIDDEN_WORKER_COMMANDS = [
     "find /",
     "cat /opt/defaults/docs/gcp-console-links.md",
     "grep -rn console.cloud.google.com /opt/defaults",
+    # Newline-separated multi-command terminal calls as Hermes's
+    # summarize_shell_command joins them onto one suffix-less card-log row.
+    "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
+    "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME gcloud container clusters list",
+    'echo "$GKE_CLUSTER_NAME" kubectl config get-contexts',
+    'echo "$GKE_CLUSTER_NAME" kubectl -nkube-system config view',
+    "printenv GKE_CLUSTER_NAME gcloud --trace-log beta container clusters list",
+    "echo \"$GKE_CLUSTER_NAME\" bash -c 'kubectl config current-context'",
+    "printenv GKE_CLUSTER_NAME grep -rn console.cloud.google.com /opt/defaults",
     # Collapsed chains as Hermes's summarize_shell_command renders `cmd1 && cmd2`
     # or `cmd1 ; cmd2` on a front-filed card's worker log.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION + 1 command",
@@ -522,10 +535,14 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
     entries = _spec_entries()
     agent = VerifierAgent()
 
-    def score_run(report: str, logged_commands: list[str]) -> tuple[dict[str, str], float]:
+    def score_run(
+        report: str,
+        logged_commands: list[str],
+        typed_calls: list[str] | None = None,
+    ) -> tuple[dict[str, str], float]:
         transcript.set(
             report,
-            _router_trajectory(logged_commands),
+            _router_trajectory(typed_calls if typed_calls is not None else logged_commands),
             worker_commands=[{"task": "t_host01", "command": c} for c in logged_commands],
         )
         try:
@@ -583,3 +600,31 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
         assert sub_statuses[ENV_READ] == "pass", embedded_hunt
         assert sub_statuses[NO_HUNT] == "fail", embedded_hunt
         assert sub_correctness == 0.75, embedded_hunt
+
+    # Two newline-separated commands in one terminal call (joined onto one suffix-less card-log row) -> 0.75.
+    for typed_call, joined_row in (
+        (
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME\nkubectl config current-context",
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
+        ),
+        (
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME\ngcloud container clusters list",
+            "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME gcloud container clusters list",
+        ),
+        (
+            'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION"\nkubectl config get-contexts',
+            'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION" kubectl config get-contexts',
+        ),
+    ):
+        nl_statuses, nl_correctness = score_run(VALID_REPORTS[1], [joined_row], typed_calls=[typed_call])
+        assert nl_statuses[ENV_READ] == "pass", joined_row
+        assert nl_statuses[NO_HUNT] == "fail", joined_row
+        assert nl_correctness == 0.75, joined_row
+
+    # Single command composing a Cloud Console link from the forwarded variables -> 1.0.
+    console_echo = (
+        'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION '
+        'https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"'
+    )
+    url_statuses, url_correctness = score_run(VALID_REPORTS[1], [console_echo])
+    assert url_correctness == 1.0, url_statuses
