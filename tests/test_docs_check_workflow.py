@@ -30,14 +30,17 @@ _JOB_ID = "docs-check"
 _MAKEFILE_DB_RULE_RE = re.compile(r"^docs-check:(?:\s+(?P<rest>.*))?$")
 _TARGET_VAR_MODIFIERS = frozenset({"export", "unexport", "override", "private", "undefine"})
 _EXACT_MAKE_STEP_RE = re.compile(r"^make (?P<target>docs-check-[a-z0-9-]+)$")
+_PINNED_CHECKOUT_RE = re.compile(r"^actions/checkout@[0-9a-f]{40}$")
 
-_MAKEFLAGS_VARIABLES = ("MAKEFLAGS", "GNUMAKEFLAGS")
+_MAKE_ENV_VARIABLES = ("MAKEFLAGS", "GNUMAKEFLAGS", "MAKEFILES", "MFLAGS")
 _FAIL_FAST_SHELLS = (None, "bash", "sh")
 _REPOSITORY_ROOT_DIRECTORIES = (None, ".", "./")
 _REQUIRED_PR_TYPES = frozenset({"opened", "synchronize", "reopened"})
+_ALLOWED_WORKFLOW_KEYS = frozenset({"name", "on", True, "concurrency", "permissions", "jobs"})
 _ALLOWED_JOB_KEYS = frozenset({"name", "runs-on", "timeout-minutes", "permissions", "steps"})
 _ALLOWED_RUN_STEP_KEYS = frozenset({"name", "run"})
 _ALLOWED_CHECKOUT_STEP_KEYS = frozenset({"name", "uses", "with"})
+_ALLOWED_CHECKOUT_WITH_KEYS = frozenset({"fetch-depth", "persist-credentials"})
 
 
 def _is_target_specific_variable(before_comment: str) -> bool:
@@ -75,9 +78,9 @@ def makefile_docs_check_prereqs(database_text: str | None = None) -> list[str]:
     return prereqs
 
 
-def _has_makeflags(env_block: object) -> bool:
+def _has_make_env_override(env_block: object) -> bool:
     return isinstance(env_block, dict) and any(
-        variable in env_block for variable in _MAKEFLAGS_VARIABLES
+        variable in env_block for variable in _MAKE_ENV_VARIABLES
     )
 
 
@@ -100,9 +103,11 @@ def _check_defaults_block(defaults_block: object, scope_label: str) -> None:
 def validate_docs_check_workflow(
     workflow_text: str,
     prereqs: list[str],
-    pending: frozenset[str] = PENDING_WORKFLOW_TARGETS,
+    pending: frozenset[str] | None = None,
 ) -> list[str]:
     """Validate `docs-check.yml` against `Makefile` `docs-check:` prerequisites."""
+    active_pending = PENDING_WORKFLOW_TARGETS if pending is None else pending
+
     doc = yaml.safe_load(workflow_text)
     if not isinstance(doc, dict):
         raise ValueError("docs-check.yml must parse to a YAML mapping")
@@ -133,14 +138,26 @@ def validate_docs_check_workflow(
                 f"docs-check.yml pull_request trigger carries unexpected filter keys: {extra_pr_keys}"
             )
 
-    if _has_makeflags(doc.get("env")):
-        raise ValueError("docs-check.yml must not set workflow-level MAKEFLAGS or GNUMAKEFLAGS")
+    if _has_make_env_override(doc.get("env")):
+        raise ValueError(
+            "docs-check.yml must not set workflow-level MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS"
+        )
     _check_defaults_block(doc.get("defaults"), "docs-check.yml")
+    extra_workflow_keys = sorted(
+        [str(key) for key in doc if key not in _ALLOWED_WORKFLOW_KEYS]
+    )
+    if extra_workflow_keys:
+        raise ValueError(
+            f"docs-check.yml carries unexpected top-level keys: {extra_workflow_keys}"
+        )
 
     jobs = doc.get("jobs")
     job = jobs.get(_JOB_ID) if isinstance(jobs, dict) else None
     if not isinstance(job, dict):
         raise ValueError(f"docs-check.yml declares no `{_JOB_ID}` job")
+    extra_jobs = sorted(set(jobs) - {_JOB_ID})
+    if extra_jobs:
+        raise ValueError(f"docs-check.yml declares unexpected extra jobs: {extra_jobs}")
     if "if" in job:
         raise ValueError(f"`{_JOB_ID}` job must not carry an `if:` condition")
     if "needs" in job:
@@ -149,8 +166,10 @@ def validate_docs_check_workflow(
         )
     if job.get("continue-on-error") is not None:
         raise ValueError(f"`{_JOB_ID}` job must not set `continue-on-error`")
-    if _has_makeflags(job.get("env")):
-        raise ValueError(f"`{_JOB_ID}` job must not set MAKEFLAGS or GNUMAKEFLAGS")
+    if _has_make_env_override(job.get("env")):
+        raise ValueError(
+            f"`{_JOB_ID}` job must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS"
+        )
     _check_defaults_block(job.get("defaults"), f"`{_JOB_ID}` job")
     extra_job_keys = sorted(set(job) - _ALLOWED_JOB_KEYS)
     if extra_job_keys:
@@ -168,16 +187,30 @@ def validate_docs_check_workflow(
             raise ValueError(f"step #{index} in `{_JOB_ID}` must be a mapping")
         step_label = step.get("name", f"step #{index}")
         if "run" not in step:
-            uses_target = step.get("uses")
-            if not isinstance(uses_target, str) or not uses_target.startswith("actions/checkout@"):
+            if index != 0:
                 raise ValueError(
-                    f"non-run step {step_label!r} in `{_JOB_ID}` must be `actions/checkout@<sha>`"
+                    f"non-run step {step_label!r} is only permitted as step #0 in `{_JOB_ID}`"
+                )
+            uses_target = step.get("uses")
+            if not isinstance(uses_target, str) or not _PINNED_CHECKOUT_RE.match(uses_target):
+                raise ValueError(
+                    f"non-run step {step_label!r} in `{_JOB_ID}` must be `actions/checkout@<40-hex-sha>`"
                 )
             extra_checkout_keys = sorted(set(step) - _ALLOWED_CHECKOUT_STEP_KEYS)
             if extra_checkout_keys:
                 raise ValueError(
                     f"checkout step {step_label!r} carries unexpected keys: {extra_checkout_keys}"
                 )
+            if "with" in step:
+                checkout_with = step["with"]
+                if not isinstance(checkout_with, dict):
+                    raise ValueError(f"checkout step {step_label!r} `with` must be a mapping")
+                extra_with_keys = sorted(set(checkout_with) - _ALLOWED_CHECKOUT_WITH_KEYS)
+                if extra_with_keys:
+                    raise ValueError(
+                        f"checkout step {step_label!r} `with` carries disallowed keys "
+                        f"(such as ref/repository/path/sparse-checkout): {extra_with_keys}"
+                    )
             continue
 
         if "if" in step:
@@ -190,8 +223,10 @@ def validate_docs_check_workflow(
             raise ValueError(
                 f"run step {step_label!r} must not override `shell` with a non-fail-fast template"
             )
-        if _has_makeflags(step.get("env")):
-            raise ValueError(f"run step {step_label!r} must not set MAKEFLAGS or GNUMAKEFLAGS")
+        if _has_make_env_override(step.get("env")):
+            raise ValueError(
+                f"run step {step_label!r} must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS"
+            )
         extra_step_keys = sorted(set(step) - _ALLOWED_RUN_STEP_KEYS)
         if extra_step_keys:
             raise ValueError(
@@ -215,18 +250,18 @@ def validate_docs_check_workflow(
             )
         workflow_targets.append(match.group("target"))
 
-    stale_pending = sorted(pending - set(prereqs))
+    stale_pending = sorted(active_pending - set(prereqs))
     if stale_pending:
         raise ValueError(
             f"PENDING_WORKFLOW_TARGETS names targets absent from Makefile docs-check: {stale_pending}"
         )
-    already_wired = sorted(pending & set(workflow_targets))
+    already_wired = sorted(active_pending & set(workflow_targets))
     if already_wired:
         raise ValueError(
             f"PENDING_WORKFLOW_TARGETS still lists targets already wired in docs-check.yml: {already_wired}"
         )
 
-    expected_targets = [target for target in prereqs if target not in pending]
+    expected_targets = [target for target in prereqs if target not in active_pending]
     if workflow_targets != expected_targets:
         raise ValueError(
             f"docs-check.yml steps {workflow_targets} do not match Makefile docs-check prerequisites {expected_targets}"
@@ -263,7 +298,6 @@ class DocsCheckWorkflowTest(unittest.TestCase):
         targets = validate_docs_check_workflow(
             _WORKFLOW_PATH.read_text(encoding="utf-8"),
             prereqs,
-            pending=PENDING_WORKFLOW_TARGETS,
         )
         self.assertEqual(
             targets,
@@ -291,19 +325,22 @@ class DocsCheckWorkflowTest(unittest.TestCase):
 
     def test_pending_allowlist_supports_two_step_handoff_and_rejects_stale_entries(self) -> None:
         real_prereqs = makefile_docs_check_prereqs()
+        module = __import__(__name__, fromlist=["PENDING_WORKFLOW_TARGETS"])
         with (
             mock.patch.object(
-                __import__(__name__, fromlist=["PENDING_WORKFLOW_TARGETS"]),
+                module,
                 "PENDING_WORKFLOW_TARGETS",
                 frozenset({"docs-check-future"}),
             ),
             mock.patch.object(
-                __import__(__name__, fromlist=["makefile_docs_check_prereqs"]),
+                module,
                 "makefile_docs_check_prereqs",
                 return_value=[*real_prereqs, "docs-check-future"],
             ),
         ):
             self.test_committed_workflow_matches_makefile_docs_check_prerequisites()
+            self.test_dropping_prose_step_from_committed_workflow_fails()
+            self.test_rejects_softened_conditional_or_filtered_gates()
 
         prereqs_with_new = [*_SAMPLE_PREREQS, "docs-check-future"]
         self.assertEqual(
@@ -362,12 +399,22 @@ class DocsCheckWorkflowTest(unittest.TestCase):
             (
                 "workflow MAKEFLAGS",
                 "env:\n  MAKEFLAGS: -n\n" + _VALID_WORKFLOW,
-                "workflow-level MAKEFLAGS or GNUMAKEFLAGS",
+                "workflow-level MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
             ),
             (
                 "workflow GNUMAKEFLAGS",
                 "env:\n  GNUMAKEFLAGS: -n\n" + _VALID_WORKFLOW,
-                "workflow-level MAKEFLAGS or GNUMAKEFLAGS",
+                "workflow-level MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
+            ),
+            (
+                "workflow MAKEFILES",
+                "env:\n  MAKEFILES: hack/soft.mk\n" + _VALID_WORKFLOW,
+                "workflow-level MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
+            ),
+            (
+                "workflow unexpected env key",
+                "env:\n  OTHER: 1\n" + _VALID_WORKFLOW,
+                "unexpected top-level keys",
             ),
             (
                 "workflow working-directory",
@@ -383,6 +430,11 @@ class DocsCheckWorkflowTest(unittest.TestCase):
                 "missing docs-check job",
                 _VALID_WORKFLOW.replace("  docs-check:", "  other-job:"),
                 "declares no `docs-check` job",
+            ),
+            (
+                "extra sibling job",
+                _VALID_WORKFLOW + "  decoy:\n    runs-on: ubuntu-latest\n    steps: []\n",
+                "unexpected extra jobs",
             ),
             (
                 "job if condition",
@@ -411,7 +463,7 @@ class DocsCheckWorkflowTest(unittest.TestCase):
                     "    runs-on: ubuntu-latest",
                     "    env:\n      MAKEFLAGS: -i\n    runs-on: ubuntu-latest",
                 ),
-                "job must not set MAKEFLAGS or GNUMAKEFLAGS",
+                "job must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
             ),
             (
                 "job GNUMAKEFLAGS",
@@ -419,7 +471,15 @@ class DocsCheckWorkflowTest(unittest.TestCase):
                     "    runs-on: ubuntu-latest",
                     "    env:\n      GNUMAKEFLAGS: -n\n    runs-on: ubuntu-latest",
                 ),
-                "job must not set MAKEFLAGS or GNUMAKEFLAGS",
+                "job must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
+            ),
+            (
+                "job MAKEFILES",
+                _VALID_WORKFLOW.replace(
+                    "    runs-on: ubuntu-latest",
+                    "    env:\n      MAKEFILES: hack/soft.mk\n    runs-on: ubuntu-latest",
+                ),
+                "job must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
             ),
             (
                 "job working-directory",
@@ -456,7 +516,32 @@ class DocsCheckWorkflowTest(unittest.TestCase):
                     "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
                     "        uses: actions/github-script@3d3c42e5aac5ba805825da76410c181273ba90b1",
                 ),
-                "must be `actions/checkout@<sha>`",
+                "must be `actions/checkout@<40-hex-sha>`",
+            ),
+            (
+                "checkout with ref main",
+                _VALID_WORKFLOW.replace(
+                    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                    "        with:\n          ref: main",
+                ),
+                "disallowed keys",
+            ),
+            (
+                "checkout with repository override",
+                _VALID_WORKFLOW.replace(
+                    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                    "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"
+                    "        with:\n          repository: other/repo",
+                ),
+                "disallowed keys",
+            ),
+            (
+                "second checkout step mid-job",
+                _VALID_WORKFLOW
+                + "      - name: Reset tree\n"
+                + "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+                "only permitted as step #0",
             ),
             (
                 "step if condition",
@@ -496,7 +581,7 @@ class DocsCheckWorkflowTest(unittest.TestCase):
                     "        run: make docs-check-prose",
                     "        env:\n          MAKEFLAGS: -n\n        run: make docs-check-prose",
                 ),
-                "must not set MAKEFLAGS or GNUMAKEFLAGS",
+                "must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
             ),
             (
                 "step GNUMAKEFLAGS",
@@ -504,7 +589,15 @@ class DocsCheckWorkflowTest(unittest.TestCase):
                     "        run: make docs-check-prose",
                     "        env:\n          GNUMAKEFLAGS: -n\n        run: make docs-check-prose",
                 ),
-                "must not set MAKEFLAGS or GNUMAKEFLAGS",
+                "must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
+            ),
+            (
+                "step MAKEFILES",
+                _VALID_WORKFLOW.replace(
+                    "        run: make docs-check-prose",
+                    "        env:\n          MAKEFILES: hack/soft.mk\n        run: make docs-check-prose",
+                ),
+                "must not set MAKEFLAGS, GNUMAKEFLAGS, MAKEFILES, or MFLAGS",
             ),
             (
                 "step unexpected key",
@@ -539,7 +632,11 @@ class DocsCheckWorkflowTest(unittest.TestCase):
         for label, mutated_yaml, expected_pattern in mutations:
             with self.subTest(label=label):
                 with self.assertRaisesRegex(ValueError, expected_pattern):
-                    validate_docs_check_workflow(mutated_yaml, _SAMPLE_PREREQS)
+                    validate_docs_check_workflow(
+                        mutated_yaml,
+                        _SAMPLE_PREREQS,
+                        pending=frozenset(),
+                    )
 
     def test_makefile_database_parser_ignores_variables_and_order_only_prereqs(self) -> None:
         sample_db = (
