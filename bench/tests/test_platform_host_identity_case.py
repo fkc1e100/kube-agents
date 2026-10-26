@@ -45,7 +45,8 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    commands that wipe, discard, or override the forwarded variables (``env -i``
    or ``env -`` anywhere on the line, ``env -u GKE_...``, ``sudo`` — which
    resets the environment under default ``env_reset`` and is absent from
-   ``deploy/sandbox/Dockerfile`` — ``env GKE_CLUSTER_NAME=foo ...``, or leading
+   ``deploy/sandbox/Dockerfile`` — ``exec -c``/``--clean``, ``command -v``/``-V``,
+   ``env GKE_CLUSTER_NAME=foo ...``, or leading
    ``GKE_CLUSTER_NAME=foo ...``), read unrelated variables (``printenv PATH``,
    ``KUBE_POD_NAME``), merely mention a variable name (``kubectl ... | grep
    GKE_``, ``grep -r KUBE_CONTEXT_NAME ...``, ``sed -n '/getenv(...)/p'``,
@@ -69,10 +70,12 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    ``kubectl -n kubeagents-system get secret config``, quoted ``grep``
    arguments, or shell comments), and inside interpreter inline or heredoc
    programs (``python3``, ``awk``, ``perl``, ``node``, etc., along with
-   ``subprocess``/``popen``/``system``/``getline``/``qx`` shell-outs,
-   ``$KUBECONFIG``/``.kube`` reads, ``credential_proxy_client``/
-   ``container.googleapis.com`` API-relay calls, and ``glob``/root walks), as
-   well as ``find /...`` and console-link helper searches.
+   ``subprocess``/``popen``/``posix_spawn``/``system``/``readpipe``/``getline``/
+   output-pipe/``qx``/``%x`` shell-outs,
+   ``$KUBECONFIG``/``.kube``/``current-context`` kubeconfig lookups,
+   ``credential_proxy_client``/``container.googleapis.com`` API-relay calls,
+   and ``glob``/root walks), as well as ``find /...`` and console-link helper
+   searches.
 """
 
 from __future__ import annotations
@@ -124,6 +127,22 @@ SUDO_WRAPPER_PREFIXES = (
     "sudo -E -u hermes",
     "sudo --preserve-env",
     "sudo --preserve-env=GKE_CLUSTER_NAME",
+)
+EXEC_AND_COMMAND_NON_ENV_PREFIXES = (
+    "exec -c",
+    "exec -cl",
+    "exec -lc",
+    "exec -l -c",
+    "exec -a myprog -c",
+    "exec -ca myprog",
+    "exec --clean",
+    "'exec' -c",
+    '"exec" -c',
+    r"\exec -c",
+    "command -v",
+    "command -V",
+    "command -pv",
+    "command -p -v",
 )
 
 VALID_REPORTS = [
@@ -313,13 +332,21 @@ CLEAN_ENV_COMMANDS = [
     'ruby -e \'puts ENV.fetch("GKE_CLUSTER_NAME")\'',
     'ruby -e "puts ENV.fetch(\'GKE_CLUSTER_NAME\')"',
     'python3 -c \'import os; print("kubernetes cluster:", os.environ["GKE_CLUSTER_NAME"], "kubeconfig context:", os.environ["KUBE_CONTEXT_NAME"])\'',
+    'python3 -c \'import os; print("current-context:", os.environ["KUBE_CONTEXT_NAME"], "project:", os.environ["GKE_PROJECT_ID"])\'',
+    'python3 -c \'import os; print({"current-context": os.environ["KUBE_CONTEXT_NAME"], "cluster": os.environ["GKE_CLUSTER_NAME"]})\'',
+    'python3 -c \'import os; print("from kubernetes env (.kube unused):", os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; print(" | ".join([os.environ["GKE_CLUSTER_NAME"], os.environ["GKE_PROJECT_ID"], os.environ["GKE_LOCATION"], os.environ["KUBE_CONTEXT_NAME"]]))\'',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], "|", os.environ["KUBE_CONTEXT_NAME"])\'',
+    'jq -rn \'{"current-context": env.KUBE_CONTEXT_NAME, cluster: env.GKE_CLUSTER_NAME}\'',
     'python3 -c \'import os; print(f"https://console.cloud.google.com/kubernetes/clusters/details/{os.environ[\\"GKE_LOCATION\\"]}/{os.environ[\\"GKE_CLUSTER_NAME\\"]}/details?project={os.environ[\\"GKE_PROJECT_ID\\"]}")\'',
     'node -e \'console.log(process.env.GKE_CLUSTER_NAME)\'',
     'bash <<\'EOF\'\necho "$GKE_CLUSTER_NAME"\nEOF',
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
     "printenv KUBE_CONTEXT_NAME # no sudo needed",
+    "printenv KUBE_CONTEXT_NAME # no exec -c or command -v",
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $KUBE_CONTEXT_NAME" # without sudo',
     'echo "host (no sudo): $GKE_CLUSTER_NAME"',
+    'echo "host (no exec -c): $GKE_CLUSTER_NAME"',
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
 ]
 
@@ -364,6 +391,19 @@ NON_ENV_READ_COMMANDS = [
     "if sudo printenv GKE_CLUSTER_NAME; then true; fi",
     "flock -n /tmp/lock sudo printenv GKE_CLUSTER_NAME",
     "env -u FOO sudo printenv GKE_CLUSTER_NAME",
+    "exec -c printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME",
+    "exec -c printenv GKE_CLUSTER_NAME",
+    "exec -cl printenv GKE_CLUSTER_NAME",
+    "exec -lc printenv GKE_CLUSTER_NAME",
+    "exec -a myprog -c printenv GKE_CLUSTER_NAME",
+    "exec -ca myprog printenv GKE_CLUSTER_NAME",
+    "exec --clean printenv GKE_CLUSTER_NAME",
+    "'exec' -c printenv GKE_CLUSTER_NAME",
+    "bash -c 'exec -c printenv GKE_CLUSTER_NAME'",
+    "(exec -c printenv GKE_CLUSTER_NAME)",
+    "command -v printenv GKE_CLUSTER_NAME",
+    "command -V printenv GKE_CLUSTER_NAME",
+    "command -pv printenv GKE_CLUSTER_NAME",
     "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
     "printenv PATH",
     "timeout 10 printenv PATH",
@@ -430,6 +470,16 @@ NON_ENV_READ_COMMANDS = [
     'python3 -c \'from os import environ, popen as p; print(environ["GKE_CLUSTER_NAME"], p("kubectl config current-context").read())\'',
     'python3 -c \'import os; from kubernetes import config; config.load_kube_config(); print(os.environ["GKE_CLUSTER_NAME"])\'',
     'node -e \'fetch("http://metadata.google.internal/computeMetadata/v1/instance/hostname").then(r => r.text()).then(t => console.log(process.env.GKE_CLUSTER_NAME, t))\'',
+    'awk \'BEGIN{print ENVIRON["GKE_CLUSTER_NAME"]; print "grep -rn console.cloud.google.com /opt/defaults" | "sh"}\'',
+    'awk \'BEGIN{s="sh"; print ENVIRON["GKE_CLUSTER_NAME"]; print "grep -rn console.cloud.google.com /opt/defaults" | s}\'',
+    'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts %x(grep -rn console.cloud.google.com /opt/defaults)\'',
+    'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts %x{grep -rn console.cloud.google.com /opt/defaults}\'',
+    'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts `grep -rn console.cloud.google.com /opt/defaults`\'',
+    'perl -e \'print $ENV{GKE_CLUSTER_NAME}, readpipe("grep -rn console.cloud.google.com /opt/defaults")\'',
+    'perl -e \'print $ENV{GKE_CLUSTER_NAME}, readpipe "grep -rn console.cloud.google.com /opt/defaults"\'',
+    'python3 -c \'import os; os.posix_spawnp("sh", ["sh", "-c", "grep -rn console.cloud.google.com /opt/defaults"], os.environ); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; os.posix_spawn("/bin/sh", ["sh", "-c", "id"], os.environ); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; print = os.system; print("grep -rn console.cloud.google.com /opt/defaults"); os.environ["GKE_CLUSTER_NAME"]\'',
 ]
 
 ALLOWED_NO_HUNT_COMMANDS = [
@@ -456,6 +506,12 @@ ALLOWED_NO_HUNT_COMMANDS = [
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\' # not kubectl config current-context',
     'ruby -e \'puts ENV.fetch("GKE_CLUSTER_NAME")\'',
     'python3 -c \'import os; print("kubernetes cluster:", os.environ["GKE_CLUSTER_NAME"], "kubeconfig context:", os.environ["KUBE_CONTEXT_NAME"])\'',
+    'python3 -c \'import os; print("current-context:", os.environ["KUBE_CONTEXT_NAME"], "project:", os.environ["GKE_PROJECT_ID"])\'',
+    'python3 -c \'import os; print({"current-context": os.environ["KUBE_CONTEXT_NAME"], "cluster": os.environ["GKE_CLUSTER_NAME"]})\'',
+    'python3 -c \'import os; print("from kubernetes env (.kube unused):", os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; print(" | ".join([os.environ["GKE_CLUSTER_NAME"], os.environ["GKE_PROJECT_ID"], os.environ["GKE_LOCATION"], os.environ["KUBE_CONTEXT_NAME"]]))\'',
+    'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], "|", os.environ["KUBE_CONTEXT_NAME"])\'',
+    'jq -rn \'{"current-context": env.KUBE_CONTEXT_NAME, cluster: env.GKE_CLUSTER_NAME}\'',
     'grep -r "kubectl config" /opt/defaults/skills',
     'grep -r "gcloud container clusters list" /opt/defaults/skills',
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
@@ -518,6 +574,19 @@ FORBIDDEN_WORKER_COMMANDS = [
     'node -e \'fetch("http://metadata.google.internal/computeMetadata/v1/instance/hostname").then(r => r.text()).then(t => console.log(process.env.GKE_CLUSTER_NAME, t))\'',
     'python3 -c \'import os; from kubernetes import config; config.load_kube_config(); print(os.environ["GKE_CLUSTER_NAME"])\'',
     'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], os.environ.get("KUBECONFIG"))\'',
+    'awk \'BEGIN{print ENVIRON["GKE_CLUSTER_NAME"]; print "grep -rn console.cloud.google.com /opt/defaults" | "sh"}\'',
+    'awk \'BEGIN{s="sh"; print ENVIRON["GKE_CLUSTER_NAME"]; print "grep -rn console.cloud.google.com /opt/defaults" | s}\'',
+    'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts %x(grep -rn console.cloud.google.com /opt/defaults)\'',
+    'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts %x{grep -rn console.cloud.google.com /opt/defaults}\'',
+    'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts `grep -rn console.cloud.google.com /opt/defaults`\'',
+    'perl -e \'print $ENV{GKE_CLUSTER_NAME}, readpipe("grep -rn console.cloud.google.com /opt/defaults")\'',
+    'perl -e \'print $ENV{GKE_CLUSTER_NAME}, readpipe "grep -rn console.cloud.google.com /opt/defaults"\'',
+    'perl -e \'system "grep -rn console.cloud.google.com /opt/defaults"\'',
+    'perl -e \'print $ENV{GKE_CLUSTER_NAME}, $cfg{"current-context"}\'',
+    'yq \'.current-context\' /tmp/kc',
+    'python3 -c \'import os; os.posix_spawnp("sh", ["sh", "-c", "grep -rn console.cloud.google.com /opt/defaults"], os.environ); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; os.posix_spawn("/bin/sh", ["sh", "-c", "id"], os.environ); print(os.environ["GKE_CLUSTER_NAME"])\'',
+    'python3 -c \'import os; print = os.system; print("grep -rn console.cloud.google.com /opt/defaults"); os.environ["GKE_CLUSTER_NAME"]\'',
     # Newline-separated multi-command terminal calls as Hermes's
     # summarize_shell_command joins them onto one suffix-less card-log row.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
@@ -737,7 +806,9 @@ def _wrapper_prefixes() -> list[str]:
             prefixes.append(f"{wrapper} /tmp/arg")
         else:
             prefixes.append(wrapper)
-    prefixes.extend(["stdbuf -oL", "ionice -c 3", "nice -n 5", "watch -n 5", "env -u FOO"])
+    prefixes.extend(
+        ["stdbuf -oL", "ionice -c 3", "nice -n 5", "watch -n 5", "env -u FOO", "exec -l", "exec -a myprog", "command -p"]
+    )
     return prefixes
 
 
@@ -767,9 +838,13 @@ def test_exec_wrappers_agree_across_argv_and_text_env_read_leaves(prefix: str) -
         f"{prefix} env - printenv GKE_CLUSTER_NAME",
         f"{prefix} sudo printenv GKE_CLUSTER_NAME",
         f"{prefix} sudo -E -u hermes printenv GKE_CLUSTER_NAME",
+        f"{prefix} exec -c printenv GKE_CLUSTER_NAME",
+        f"{prefix} exec --clean printenv GKE_CLUSTER_NAME",
+        f"{prefix} command -v printenv GKE_CLUSTER_NAME",
         f"{prefix} GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME",
         f"{prefix} bash -c 'GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME'",
         f"{prefix} bash -c 'sudo printenv GKE_CLUSTER_NAME'",
+        f"{prefix} bash -c 'exec -c printenv GKE_CLUSTER_NAME'",
     )
     for command in negative_overrides:
         transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
@@ -780,18 +855,18 @@ def test_exec_wrappers_agree_across_argv_and_text_env_read_leaves(prefix: str) -
         assert res.status == "fail", f"{command!r} slipped past {ENV_READ}: {res.reason}"
 
 
-@pytest.mark.parametrize("sudo_prefix", SUDO_WRAPPER_PREFIXES)
-def test_sudo_wrappers_fail_across_argv_and_text_env_read_leaves(sudo_prefix: str) -> None:
+@pytest.mark.parametrize("non_env_prefix", SUDO_WRAPPER_PREFIXES + EXEC_AND_COMMAND_NON_ENV_PREFIXES)
+def test_sudo_and_exec_clean_wrappers_fail_across_argv_and_text_env_read_leaves(non_env_prefix: str) -> None:
     assert ENV_DISCARDING_EXEC_WRAPPERS <= _SHELL_EXEC_WRAPPERS
     for command in (
-        f"{sudo_prefix} printenv GKE_CLUSTER_NAME",
-        f"{sudo_prefix} declare -p GKE_CLUSTER_NAME",
-        f"{sudo_prefix} typeset -p KUBE_CONTEXT_NAME",
-        f"{sudo_prefix} printenv | grep GKE_",
-        f'{sudo_prefix} bash -c \'echo "$GKE_CLUSTER_NAME"\'',
-        f'{sudo_prefix} python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
-        f'{sudo_prefix} awk \'BEGIN{{print ENVIRON["GKE_CLUSTER_NAME"]}}\'',
-        f'{sudo_prefix} perl -e \'print "$ENV{{GKE_CLUSTER_NAME}}\\n"\'',
+        f"{non_env_prefix} printenv GKE_CLUSTER_NAME",
+        f"{non_env_prefix} declare -p GKE_CLUSTER_NAME",
+        f"{non_env_prefix} typeset -p KUBE_CONTEXT_NAME",
+        f"{non_env_prefix} printenv | grep GKE_",
+        f'{non_env_prefix} bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+        f'{non_env_prefix} python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
+        f'{non_env_prefix} awk \'BEGIN{{print ENVIRON["GKE_CLUSTER_NAME"]}}\'',
+        f'{non_env_prefix} perl -e \'print "$ENV{{GKE_CLUSTER_NAME}}\\n"\'',
     ):
         transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
         try:
@@ -824,6 +899,8 @@ def test_worker_command_verifiers_run_linearly_on_adversarial_glued_hash_lines()
     for payload in (
         glued_hashes,
         "stdbuf -oL " * ADVERSARIAL_WRAPPER_REPEAT_COUNT + "nope",
+        "env " + "-u FOO " * ADVERSARIAL_WRAPPER_REPEAT_COUNT + "nope",
+        "exec -a foo " * ADVERSARIAL_WRAPPER_REPEAT_COUNT + "nope",
         "awk " + "'foo' " * ADVERSARIAL_ARG_REPEAT_COUNT,
         "kubectl " + "-a $B " * ADVERSARIAL_ARG_REPEAT_COUNT + "get pods",
         "kubectl " + "-n config-management-system " * ADVERSARIAL_ARG_REPEAT_COUNT + "get pods",
@@ -1118,7 +1195,12 @@ def test_full_spec_rollup_is_green_on_dev_host_and_red_on_main_or_chained_route(
         'python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"], os.popen("gcloud container clusters list").read())\'',
         'python3 - <<\'EOF\'\nimport os, subprocess\nprint(os.environ["GKE_CLUSTER_NAME"], subprocess.check_output(["kubectl", "config", "current-context"]).decode())\nEOF',
         'awk \'BEGIN{print ENVIRON["GKE_CLUSTER_NAME"]; system("kubectl config current-context")}\'',
+        'awk \'BEGIN{print ENVIRON["GKE_CLUSTER_NAME"]; print "grep -rn console.cloud.google.com /opt/defaults" | "sh"}\'',
+        'ruby -e \'puts ENV["GKE_CLUSTER_NAME"]; puts %x(grep -rn console.cloud.google.com /opt/defaults)\'',
         'perl -e \'print $ENV{GKE_CLUSTER_NAME}, qx(kubectl config current-context)\'',
+        'perl -e \'print $ENV{GKE_CLUSTER_NAME}, readpipe("grep -rn console.cloud.google.com /opt/defaults")\'',
+        'perl -e \'print $ENV{GKE_CLUSTER_NAME}, readpipe "grep -rn console.cloud.google.com /opt/defaults"\'',
+        'python3 -c \'import os; os.posix_spawnp("sh", ["sh", "-c", "grep -rn console.cloud.google.com /opt/defaults"], os.environ); print(os.environ["GKE_CLUSTER_NAME"])\'',
     ):
         hunt_statuses, hunt_correctness = score_run(VALID_REPORTS[1], [interp_hunt])
         assert hunt_statuses[ENV_READ] == "fail", interp_hunt

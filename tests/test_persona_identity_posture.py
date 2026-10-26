@@ -88,12 +88,13 @@ UNBACKTICKED_ENV_READ_RE = re.compile(
     r"|/proc/(?:self|\d+)/environ\b"
     r"|\bENVIRON\s*\["
     r"|\bin\s+ENVIRON\b"
-    r"|(?:[%@]ENV\b|\$ENV(?:\s*\{|\.[A-Za-z_])|\bENV\s*[\[\{])"
+    r"|(?:[%@]ENV\b|\$ENV(?:\s*\{|\.[A-Za-z_])|\bENV\s*(?:[\[\{]|\.[A-Za-z_]))"
     r"|\b(?:process|Deno|Bun)\.env\b"
     r"|\benv\.[A-Z]"
     r"|\b(?:str)?env\s*\(\s*[A-Z\"']"
     r"|\b(?:declare|typeset|export)\s+-[A-OQ-WYZa-oq-wyz]*[pPxX][A-Za-z]*\b"
-    r"|\b(?:env|set|export|declare)(?:\s*\|(?!\|)|\s+(?:-[A-HJ-TV-Za-hj-tv-z]*[iIuU][A-Za-z0-9_]*|--unset\b|--ignore-environment\b))"
+    r"|\b(?:env|set|export|declare|typeset)(?:\s+(?:-[^\s|]+|\d*[<>&]+(?:(?![<>&\s|])[^\s|]*|\s+(?![|\s-])[^\s|]+)))*\s*\|(?!\|)"
+    r"|\b(?:env|set|export|declare)\s+(?:-[A-HJ-TV-Za-hj-tv-z]*[iIuU][A-Za-z0-9_]*|--unset\b|--ignore-environment\b)"
 )
 
 
@@ -105,9 +106,12 @@ def _code_spans_and_prose(text: str) -> tuple[tuple[str, ...], str]:
     for token in MARKDOWN.parse(text):
         if token.type in ("fence", "code_block"):
             code_spans.append(token.content)
-            prose_parts.append(" ")
+            prose_parts.append("\n")
         elif token.type == "html_block":
             prose_parts.append(token.content)
+            prose_parts.append("\n")
+        elif token.type.endswith("_close") or token.type == "hr":
+            prose_parts.append("\n")
         elif token.type == "inline" and token.children:
             for child in token.children:
                 if child.type == "code_inline":
@@ -157,7 +161,7 @@ def _bullet_block(text: str, prefix: str) -> str:
     """Return the full CommonMark list item starting with ``prefix``, including
     indented sub-bullets, loose indented paragraphs across blank lines, fenced
     code blocks, and lazy continuation lines."""
-    lines = text.splitlines()
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     blocks: list[str] = []
     item_depth = 0
     for token in MARKDOWN.parse(text):
@@ -321,6 +325,11 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             'printenv "HOSTNAME"',
             "printenv -- HOSTNAME",
             "env | grep HOSTNAME",
+            "Dump them with env -0 | tr '\\0' '\\n' | grep HOSTNAME.",
+            "env 2>/dev/null | grep HOSTNAME",
+            "env 2> /dev/null | grep HOSTNAME",
+            "env -0|grep HOSTNAME",
+            "typeset | grep HOSTNAME",
             "printenv | sort | grep --color=auto HOSTNAME",
             "env -uHOSTNAME printenv GKE_PROJECT_ID",
             "env --unset=HOSTNAME printenv GKE_PROJECT_ID",
@@ -332,6 +341,7 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             "export -p | grep HOSTNAME",
             "awk 'BEGIN{print ENVIRON[\"HOSTNAME\"]}'",
             "perl -e 'print \"$ENV{HOSTNAME}\\n\"'",
+            "ruby -e 'puts ENV.fetch(\"HOSTNAME\")'",
             "python3 -c 'import os; print(os.environ[\"HOSTNAME\"])'",
             "os.environ.get('HOSTNAME')",
             "os.getenv('HOSTNAME')",
@@ -382,6 +392,50 @@ class PersonaIdentityPostureTests(unittest.TestCase):
                 self.assertTrue(
                     _unbackticked_env_reads(_bullet_block(unbackticked_continuation_soul, IDENTITY_BULLET))
                 )
+
+        # Multi-block items whose opening paragraph ends in a word character preserve block
+        # boundaries rather than gluing into the first word of a nested sub-bullet.
+        word_end_unforwarded_soul = soul.replace(
+            identity_bullet,
+            f"{IDENTITY_BULLET} Read `$GKE_CLUSTER_NAME` and these variables\n  - GCP_PROJECT_ID for the project",
+            1,
+        )
+        self.assertIn(
+            "GCP_PROJECT_ID",
+            _cited_env_vars(_bullet_block(word_end_unforwarded_soul, IDENTITY_BULLET)),
+        )
+        word_end_unbackticked_soul = soul.replace(
+            identity_bullet,
+            f"{IDENTITY_BULLET} Read `$GKE_CLUSTER_NAME` via run\n  - printenv HOSTNAME prints it",
+            1,
+        )
+        self.assertEqual(
+            _unbackticked_env_reads(_bullet_block(word_end_unbackticked_soul, IDENTITY_BULLET)),
+            ["printenv"],
+        )
+        tight_forwarded_subbullets_soul = soul.replace(
+            identity_bullet,
+            f"{IDENTITY_BULLET} Read:\n  - the project in GKE_PROJECT_ID\n  - GKE_LOCATION for the region",
+            1,
+        )
+        self.assertEqual(
+            _cited_env_vars(_bullet_block(tight_forwarded_subbullets_soul, IDENTITY_BULLET)),
+            {"GKE_PROJECT_ID", "GKE_LOCATION"},
+        )
+
+        # Non-`\n` Unicode line separators (`\u2028`) either earlier in SOUL.md or inside a
+        # guarded bullet keep `_bullet_block` aligned with `MARKDOWN.parse` `token.map`.
+        earlier_ls_soul = "\u2028" + soul
+        self.assertEqual(_bullet_block(earlier_ls_soul, IDENTITY_BULLET), identity_bullet)
+        inline_ls_soul = soul.replace(
+            identity_bullet,
+            identity_bullet + "\u2028`$HOSTNAME`",
+            1,
+        )
+        self.assertIn(
+            "HOSTNAME",
+            _cited_env_vars(_bullet_block(inline_ls_soul, IDENTITY_BULLET)),
+        )
 
         sibling_leak_soul = soul.replace(
             identity_bullet,
@@ -438,6 +492,8 @@ class PersonaIdentityPostureTests(unittest.TestCase):
             "printenv | grep" + " -w" * ADVERSARIAL_REPEAT_COUNT + "!",
             "printenv" + " | sort" * ADVERSARIAL_REPEAT_COUNT + "!",
             "env " * ADVERSARIAL_REPEAT_COUNT + "!",
+            "env" + " -0" * ADVERSARIAL_REPEAT_COUNT + "!",
+            "env" + " 2>/dev/null" * ADVERSARIAL_REPEAT_COUNT + "!",
             "${" + "A" * ADVERSARIAL_REPEAT_COUNT,
             "`" + "A" * ADVERSARIAL_REPEAT_COUNT + "_`",
             "`env -" + "u" * ADVERSARIAL_REPEAT_COUNT + "1`",
