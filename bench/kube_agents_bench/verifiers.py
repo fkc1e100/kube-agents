@@ -5158,11 +5158,12 @@ class PullRequestOpenedVerifier(BaseVerifier):
             if len(files) < _PR_FILES_PAGE_SIZE:
                 break
         else:
-            return [], (
-                f"{owner}/{repo}#{number} filled all {_PR_FILES_MAX_PAGES} pages of "
-                f"{_PR_FILES_PAGE_SIZE} files ({cap}-file listing cap), so path checks "
-                "could not inspect the full diff"
-            )
+            if changed != cap or len(entries) < cap:
+                return [], (
+                    f"{owner}/{repo}#{number} filled all {_PR_FILES_MAX_PAGES} pages of "
+                    f"{_PR_FILES_PAGE_SIZE} files ({cap}-file listing cap), so path checks "
+                    "could not inspect the full diff"
+                )
         return entries, None
 
     def _changed_paths(

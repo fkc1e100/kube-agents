@@ -4794,6 +4794,32 @@ def test_changed_paths_only_refuses_empty_list_and_unreadable_or_truncated_files
     assert "3000-file listing cap" in res.reason
 
 
+def test_file_entries_grades_exact_3000_file_cap_and_rejects_uncounted_30_page_fill(token, github):
+    pulls = _pr_api("pulls")
+    for page in range(1, 31):
+        github.routes[f"{pulls}/files?per_page=100&page={page}"] = (
+            200,
+            [
+                {"filename": f"manifests/apps/allowed/f{page}_{idx}.yaml", "status": "modified"}
+                for idx in range(100)
+            ],
+        )
+
+    _stash_pr_report()
+    github.routes[_pr_api()] = (200, _pr_payload())
+    _pr_head_routes(github, changed_files=3000)
+    res = _pr_check(changed_paths_only=["manifests/apps/allowed/*.yaml"]).verify(5.0)
+    assert res.status == "pass", res.reason
+
+    for reported_changed in (None, 5):
+        _stash_pr_report()
+        github.routes[_pr_api()] = (200, _pr_payload())
+        _pr_head_routes(github, changed_files=reported_changed)
+        res = _pr_check(changed_paths_only=["manifests/apps/allowed/*.yaml"]).verify(5.0)
+        assert res.status == "error"
+        assert "filled all 30 pages" in res.reason
+
+
 # ---- removed_paths: a delete is the removal of the declaring manifest
 
 _NS_DIR = "clusters/gitops-target-1/namespaces/gitops-owned-scratch"
