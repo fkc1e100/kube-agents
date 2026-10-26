@@ -28,22 +28,24 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    digits), echo unresolved placeholders, or mention unrelated ``gke-*`` nouns.
 2. ``the-worker-read-the-forwarded-identity`` accepts genuine single-command
    environment reads of the forwarded variables (``printenv <VAR>`` and
-   ``declare -p``/``typeset -p <VAR>`` including ``--`` and every exec wrapper
-   in ``_SHELL_EXEC_WRAPPERS``; bare or piped ``printenv``, ``env``, ``set``,
-   ``export [-p]``, ``declare -p``, and ``/proc/self/environ`` dumps; ``for``
-   loops over the forwarded names using indirect expansion or ``printenv``;
-   unescaped non-single-quoted shell ``$VAR``/``${VAR}`` expansions in both the
-   outer shell and ``sh -c``/``bash -c``; and ``python3`` via ``-c`` or heredoc
-   reading ``os.environ``/``os.getenv``, including ``GKE_``/``KUBE_`` prefix
-   filters), with parity pinned across all ``_SHELL_EXEC_WRAPPERS`` (including
-   ``setsid``, ``ionice``, ``sudo``, ``time``, ``watch``, ``exec``, ``xargs``,
+   ``declare -p``/``typeset -p <VAR>`` including ``--`` and every
+   environment-preserving exec wrapper in ``_SHELL_EXEC_WRAPPERS``; bare or
+   piped ``printenv``, ``env``, ``set``, ``export [-p]``, ``declare -p``, and
+   ``/proc/self/environ`` dumps; ``for`` loops over the forwarded names using
+   indirect expansion or ``printenv``; unescaped non-single-quoted shell
+   ``$VAR``/``${VAR}`` expansions in both the outer shell and ``sh -c``/``bash
+   -c``; and ``python3`` via ``-c`` or heredoc reading
+   ``os.environ``/``os.getenv``, including ``GKE_``/``KUBE_`` prefix filters),
+   with parity pinned across all environment-preserving ``_SHELL_EXEC_WRAPPERS``
+   (including ``setsid``, ``ionice``, ``time``, ``watch``, ``exec``, ``xargs``,
    ``chroot``, ``timeout infinity``, and ``timeout $T``), while rejecting
-   commands that wipe or override the forwarded variables (``env -i`` or
-   ``env -`` anywhere on the line, ``env -u GKE_...``,
-   ``env GKE_CLUSTER_NAME=foo ...``, or leading ``GKE_CLUSTER_NAME=foo ...``),
-   read unrelated variables (``printenv PATH``, ``KUBE_POD_NAME``), merely
-   mention a variable name (``kubectl ... | grep GKE_``, ``grep -r
-   KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``for v
+   commands that wipe, discard, or override the forwarded variables (``env -i``
+   or ``env -`` anywhere on the line, ``env -u GKE_...``, ``sudo`` — which
+   resets the environment under default ``env_reset`` and is absent from
+   ``deploy/sandbox/Dockerfile`` — ``env GKE_CLUSTER_NAME=foo ...``, or leading
+   ``GKE_CLUSTER_NAME=foo ...``), read unrelated variables (``printenv PATH``,
+   ``KUBE_POD_NAME``), merely mention a variable name (``kubectl ... | grep
+   GKE_``, ``grep -r KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``for v
    in GKE_CLUSTER_NAME; do echo "$v"; done``), or use ``env`` as a
    command-execution prefix (``env KUBECONFIG=...``,
    ``env GKE_CLUSTER_NAME=foo kubectl ...``).
@@ -89,6 +91,23 @@ HOST_CONTEXT = "the-answer-names-the-host-context"
 ENV_READ = "the-worker-read-the-forwarded-identity"
 NO_HUNT = "the-worker-did-not-hunt-for-the-host"
 SAFEGUARD = "front-door-stays-out-of-the-worker-verbs"
+# `_SHELL_EXEC_WRAPPERS` retains `sudo` so `forbidden_runs` catches `sudo kubectl
+# config ...`, while `the-worker-read-the-forwarded-identity` rejects `sudo`
+# because default `env_reset` strips `GKE_*`/`KUBE_CONTEXT_NAME` and
+# `deploy/sandbox/Dockerfile` installs no `sudo` binary.
+ENV_DISCARDING_EXEC_WRAPPERS = frozenset({"sudo"})
+SUDO_WRAPPER_PREFIXES = (
+    "sudo",
+    "/usr/bin/sudo",
+    "'sudo'",
+    '"sudo"',
+    r"\sudo",
+    "sudo -u root",
+    "sudo -E",
+    "sudo -E -u hermes",
+    "sudo --preserve-env",
+    "sudo --preserve-env=GKE_CLUSTER_NAME",
+)
 
 VALID_REPORTS = [
     # CI default host cluster (platform-agent-host), single-paragraph delivery.
@@ -260,6 +279,9 @@ CLEAN_ENV_COMMANDS = [
     'python3 - <<\'EOF\'\nimport os\nprint(os.environ["GKE_CLUSTER_NAME"])\nEOF',
     'python3 - <<\'EOF\'\nimport os\nprint({k: v for k, v in os.environ.items() if k.startswith(("GKE_", "KUBE_CONTEXT"))})\nEOF',
     "printenv KUBE_CONTEXT_NAME # not kubectl config current-context or gcloud container clusters list",
+    "printenv KUBE_CONTEXT_NAME # no sudo needed",
+    'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION $KUBE_CONTEXT_NAME" # without sudo',
+    'echo "host (no sudo): $GKE_CLUSTER_NAME"',
     'echo "$GKE_CLUSTER_NAME $GKE_PROJECT_ID $GKE_LOCATION https://console.cloud.google.com/kubernetes/clusters/details/$GKE_LOCATION/$GKE_CLUSTER_NAME/details?project=$GKE_PROJECT_ID"',
 ]
 
@@ -288,6 +310,22 @@ NON_ENV_READ_COMMANDS = [
     "env - FOO=1 printenv GKE_CLUSTER_NAME",
     "bash -c 'env - printenv GKE_CLUSTER_NAME'",
     'env - bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+    "sudo printenv GKE_CLUSTER_NAME",
+    "/usr/bin/sudo printenv GKE_CLUSTER_NAME",
+    "'sudo' printenv GKE_CLUSTER_NAME",
+    '"sudo" printenv GKE_CLUSTER_NAME',
+    r"\sudo printenv GKE_CLUSTER_NAME",
+    "sudo -u root printenv GKE_CLUSTER_NAME",
+    "sudo -E -u hermes printenv GKE_CLUSTER_NAME",
+    "sudo --preserve-env=GKE_CLUSTER_NAME printenv GKE_CLUSTER_NAME",
+    "bash -c 'sudo printenv GKE_CLUSTER_NAME'",
+    "(sudo printenv GKE_CLUSTER_NAME)",
+    'echo "$(sudo printenv GKE_CLUSTER_NAME)"',
+    'echo "`sudo printenv GKE_CLUSTER_NAME`"',
+    "echo `sudo printenv GKE_CLUSTER_NAME`",
+    "if sudo printenv GKE_CLUSTER_NAME; then true; fi",
+    "flock -n /tmp/lock sudo printenv GKE_CLUSTER_NAME",
+    "env -u FOO sudo printenv GKE_CLUSTER_NAME",
     "env GOOGLE_CLOUD_PROJECT=p gcloud container clusters describe foo",
     "printenv PATH",
     "timeout 10 printenv PATH",
@@ -347,6 +385,7 @@ ALLOWED_NO_HUNT_COMMANDS = [
 FORBIDDEN_WORKER_COMMANDS = [
     # Standalone forbidden routes.
     "kubectl config current-context",
+    "sudo kubectl config current-context",
     "kubectl config get-contexts",
     "kubectl config view --minify",
     "kubectl --kubeconfig /tmp/k config get-contexts",
@@ -376,6 +415,7 @@ FORBIDDEN_WORKER_COMMANDS = [
     # Newline-separated multi-command terminal calls as Hermes's
     # summarize_shell_command joins them onto one suffix-less card-log row.
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl config current-context",
+    "printenv GKE_CLUSTER_NAME sudo kubectl config current-context",
     "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME gcloud container clusters list",
     'echo "$GKE_CLUSTER_NAME" kubectl config get-contexts',
     'echo "$GKE_CLUSTER_NAME" kubectl -nkube-system config view',
@@ -577,14 +617,14 @@ def test_multiple_worker_commands_fail_no_hunt_single_call_cap() -> None:
 
 def _wrapper_prefixes() -> list[str]:
     prefixes: list[str] = []
-    for wrapper in sorted(_SHELL_EXEC_WRAPPERS):
+    for wrapper in sorted(_SHELL_EXEC_WRAPPERS - ENV_DISCARDING_EXEC_WRAPPERS):
         if wrapper == "timeout":
             prefixes.extend(["timeout 10", "timeout infinity", 'timeout "$T"', "timeout --foreground -s KILL 30s"])
         elif _SHELL_WRAPPER_POSITIONALS.get(wrapper) == 1:
             prefixes.append(f"{wrapper} /tmp/arg")
         else:
             prefixes.append(wrapper)
-    prefixes.extend(["sudo -E -u hermes", "stdbuf -oL", "ionice -c 3", "nice -n 5", "watch -n 5", "env -u FOO"])
+    prefixes.extend(["stdbuf -oL", "ionice -c 3", "nice -n 5", "watch -n 5", "env -u FOO"])
     return prefixes
 
 
@@ -610,10 +650,32 @@ def test_exec_wrappers_agree_across_argv_and_text_env_read_leaves(prefix: str) -
     negative_overrides = (
         f"{prefix} env -i printenv GKE_CLUSTER_NAME",
         f"{prefix} env - printenv GKE_CLUSTER_NAME",
+        f"{prefix} sudo printenv GKE_CLUSTER_NAME",
+        f"{prefix} sudo -E -u hermes printenv GKE_CLUSTER_NAME",
         f"{prefix} GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME",
         f"{prefix} bash -c 'GKE_CLUSTER_NAME=foo printenv GKE_CLUSTER_NAME'",
+        f"{prefix} bash -c 'sudo printenv GKE_CLUSTER_NAME'",
     )
     for command in negative_overrides:
+        transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
+        try:
+            res = _eval_entry(ENV_READ)
+        finally:
+            transcript.clear()
+        assert res.status == "fail", f"{command!r} slipped past {ENV_READ}: {res.reason}"
+
+
+@pytest.mark.parametrize("sudo_prefix", SUDO_WRAPPER_PREFIXES)
+def test_sudo_wrappers_fail_across_argv_and_text_env_read_leaves(sudo_prefix: str) -> None:
+    assert ENV_DISCARDING_EXEC_WRAPPERS <= _SHELL_EXEC_WRAPPERS
+    for command in (
+        f"{sudo_prefix} printenv GKE_CLUSTER_NAME",
+        f"{sudo_prefix} declare -p GKE_CLUSTER_NAME",
+        f"{sudo_prefix} typeset -p KUBE_CONTEXT_NAME",
+        f"{sudo_prefix} printenv | grep GKE_",
+        f'{sudo_prefix} bash -c \'echo "$GKE_CLUSTER_NAME"\'',
+        f'{sudo_prefix} python3 -c \'import os; print(os.environ["GKE_CLUSTER_NAME"])\'',
+    ):
         transcript.set("ok", [], worker_commands=[{"task": "t_host01", "command": command}])
         try:
             res = _eval_entry(ENV_READ)
