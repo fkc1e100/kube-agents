@@ -27,16 +27,17 @@
 #
 # Red on main rests on the forbidden-route check: main's worker answered too,
 # only slowly, so the context check and the env-read check pass there. The
-# persona dictates a single call (`max_commands: 1`), and
-# `printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME` is
-# one unchained command. For a card the front door filed, worker_commands reads
-# Hermes's one-line card-log rendering (summarize_shell_command), which
-# collapses a `;`, `&&` or `||` chain to `<first command> + N command(s)` and
-# joins newline-separated lines with spaces and no suffix; the forbidden-route
-# check therefore rejects collapsed chains (`\s\+\s\d+\s+commands?$`) and
-# carries quote- and `#`-comment-aware text patterns alongside `forbidden_runs`
-# so a second-line `kubectl config` or `gcloud container clusters list` joined
-# onto the env-read row still fails. A worker that reads os.environ through
+# persona dictates a single tool call, and `max_commands: 1` bounds recorded
+# command entries (card-log rows or tagged calls, not shell segments). For a
+# card the front door filed, worker_commands currently grades Hermes's one-line
+# card-log rendering (summarize_shell_command), which collapses a `;`, `&&` or
+# `||` chain to `<first command> + N command(s)` and joins newline-separated
+# lines with spaces and no suffix; the forbidden-route check therefore rejects
+# collapsed chains (`\s\+\s\d+\s+commands?$`) and carries quote- and
+# `#`-comment-aware text patterns alongside `forbidden_runs` so a second-line
+# `kubectl config` or `gcloud container clusters list` joined onto the env-read
+# row still fails, while splitting a newline-joined call whose second line is
+# off the denylist awaits #3971. A worker that reads os.environ through
 # execute_code leaves no card-log row for it and fails the env-read check.
 #
 # Domain: chat and routing. Isolation class: read-only. Eligible tier: nightly.
@@ -49,13 +50,14 @@ expected_output: >-
   The front door files a kanban task for the platform specialist. The worker
   reads the host cluster's name, GCP project, location and kubectl context name
   from its environment (GKE_CLUSTER_NAME, GKE_PROJECT_ID, GKE_LOCATION and
-  KUBE_CONTEXT_NAME) in a single unchained terminal call, and the answer states
-  whatever host cluster name, GCP project, location and
-  gke_<project>_<location>_<cluster> kubectl context name that install runs on
-  (for example platform-agent-host on the CI eval install, or the host cluster's
-  own name on a dev install). The worker issues at most one command, does not
-  run kubectl config subcommands or gcloud container clusters list, and does not
-  run find /... or search the filesystem for console-link helpers.
+  KUBE_CONTEXT_NAME) in a single terminal call (with no ;, && or || command
+  chain), and the answer states whatever host cluster name, GCP project,
+  location and gke_<project>_<location>_<cluster> kubectl context name that
+  install runs on (for example platform-agent-host on the CI eval install, or
+  the host cluster's own name on a dev install). The worker records at most one
+  terminal call (one card-log row or tagged tool call), does not run kubectl
+  config subcommands or gcloud container clusters list, and does not run find
+  /... or search the filesystem for console-link helpers.
 infrastructure:
   deployer: noop
 validated: false
@@ -167,16 +169,20 @@ verification_spec:
     role: objective
     mode: assert
     check:
-      # Enforces the single-call contract (`max_commands: 1` plus Hermes's
-      # collapsed-chain suffix ` + N command(s)`) and forbids the routes the
-      # live and red-on-main runs took: `kubectl config` subcommands and
-      # `gcloud container clusters list` on argv (`forbidden_runs`) and on
-      # newline-joined card-log rows (`summarize_shell_command` turns `\n` into
-      # a space with no `+ N command(s)` suffix, so quote- and `#`-comment-aware
-      # text patterns catch a second-line `kubectl config` or `gcloud container
-      # clusters list` without matching quoted grep arguments, comments, or
-      # non-config verbs such as `kubectl get configmap config`), any `find`
-      # rooted under `/`, and filesystem searches for console-link helpers
+      # Bounds recorded command entries (`max_commands: 1` counts card-log rows
+      # and tagged tool calls rather than shell segments; Hermes's
+      # collapsed-chain suffix ` + N command(s)` rejects `;`, `&&` and `||`
+      # chains on one row, while splitting a newline-joined multi-command
+      # terminal call whose second line is off the denylist awaits #3971) and
+      # forbids the routes the live and red-on-main runs took: `kubectl config`
+      # subcommands and `gcloud container clusters list` on argv
+      # (`forbidden_runs`) and on newline-joined card-log rows
+      # (`summarize_shell_command` turns `\n` into a space with no `+ N
+      # command(s)` suffix, so quote- and `#`-comment-aware text patterns catch
+      # a second-line `kubectl config` or `gcloud container clusters list`
+      # without matching quoted grep arguments, comments, or non-config verbs
+      # such as `kubectl get configmap config`), any `find` rooted under `/`,
+      # and filesystem searches for console-link helpers
       # (`console.cloud.google.com` bound to an unquoted search verb so an
       # `echo` composing a Cloud Console link from the forwarded variables still
       # passes).

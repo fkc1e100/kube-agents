@@ -41,14 +41,17 @@ Pins three properties of ``bench/tasks/platform-host-identity-from-env/task.yaml
    KUBE_CONTEXT_NAME ...``, ``echo GKE_CLUSTER_NAME``, ``bash -c 'echo
    GKE_CLUSTER_NAME'``), or use ``env`` as a command-execution prefix
    (``env KUBECONFIG=...``, ``env GKE_CLUSTER_NAME=foo kubectl ...``).
-3. ``the-worker-did-not-hunt-for-the-host`` enforces the single-call contract
-   (``max_commands: 1`` plus Hermes's collapsed-chain card-log suffix ``+ N
-   command(s)``) and rejects ``kubectl config`` subcommands and ``gcloud
-   container clusters list`` on argv (including behind attached short options
-   such as ``-nkube-system`` or untabled boolean flags such as ``--trace-log``,
+3. ``the-worker-did-not-hunt-for-the-host`` bounds recorded command entries to
+   one card-log row or tagged tool call (``max_commands: 1`` plus Hermes's
+   collapsed-chain card-log suffix ``+ N command(s)``; splitting a
+   newline-joined multi-command call whose second line is off the denylist is
+   tracked in #3971 and pinned ``xfail`` below) and rejects ``kubectl config``
+   subcommands and ``gcloud container clusters list`` on argv and on
+   newline-joined card-log rows (including behind attached short options such
+   as ``-nkube-system`` or untabled boolean flags such as ``--trace-log``,
    without false-positiving on ``kubectl get configmap config``, ``kubectl -n
-   kubeagents-system get secret config``, or shell comments) as well as
-   ``find /...`` and console-link helper searches.
+   kubeagents-system get secret config``, quoted ``grep`` arguments, or shell
+   comments) as well as ``find /...`` and console-link helper searches.
 """
 
 from __future__ import annotations
@@ -518,6 +521,29 @@ def test_multiple_worker_commands_fail_no_hunt_single_call_cap() -> None:
     finally:
         transcript.clear()
     assert res.status == "fail" and "exceeding max_commands=1" in res.reason
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="#3971: max_commands counts entries, not newline segments",
+)
+def test_two_line_terminal_call_with_off_denylist_second_command_fails_no_hunt_check() -> None:
+    typed_call = "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME\nkubectl get nodes -o wide"
+    joined_row = "printenv GKE_CLUSTER_NAME GKE_PROJECT_ID GKE_LOCATION KUBE_CONTEXT_NAME kubectl get nodes -o wide"
+    transcript.set(
+        VALID_REPORTS[1],
+        _router_trajectory([typed_call]),
+        worker_commands=[{"task": "t_host01", "command": joined_row}],
+    )
+    try:
+        read_res = _eval_entry(ENV_READ)
+        hunt_res = _eval_entry(NO_HUNT)
+    finally:
+        transcript.clear()
+    if read_res.status != "pass" or hunt_res.status == "error":
+        raise RuntimeError(f"unexpected verifier setup failure: env_read={read_res}, no_hunt={hunt_res}")
+    assert hunt_res.status == "fail"
 
 
 def test_worker_checks_fail_closed_when_worker_commands_missing() -> None:

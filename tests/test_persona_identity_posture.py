@@ -31,8 +31,22 @@ MIN_SOUL_CHARS = 1000
 EXPECTED_CONSOLE_URL_COUNT = 4
 IDENTITY_BULLET = "- **Host and Cluster Identity Queries:**"
 PROJECT_RESOLUTION_BULLET = "- **Dynamic Project Resolution:**"
+# Dynamic Project Resolution quotes `$GCP_PROJECT_ID` once as a negative prose
+# example of an unexpanded literal shipped in `/opt/data/INVENTORY.md`.
+PROSE_LITERAL_WARNING_CLAUSE = (
+    "so a literal `$GCP_PROJECT_ID` left in one tells the reader nothing — "
+    "`/opt/data/INVENTORY.md` shipped with exactly that."
+)
 SANDBOX_UNREACHABLE_DOCS = "/opt/defaults/docs/"
 CONSOLE_URL_RE = re.compile(r"`(https://console\.cloud\.google\.com/[^`]+)`")
+FORWARDED_ENV_RE = re.compile(r'SANDBOX_FORWARDED_ENV_NAMES="([^"]+)"')
+# Matches `$VAR` / `${VAR}` expansions (including single-word names) and bare
+# SCREAMING_SNAKE_CASE identifiers such as `printenv GCP_PROJECT_ID`.
+ENV_VAR_NAME_RE = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?|\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b")
+
+
+def _cited_env_vars(text: str) -> set[str]:
+    return {dollar or bare for dollar, bare in ENV_VAR_NAME_RE.findall(text)}
 
 
 def _read(path: Path) -> str:
@@ -74,30 +88,63 @@ class PersonaIdentityPostureTests(unittest.TestCase):
         soul = _read(PLATFORM_SOUL)
         bullet = _line_starting(soul, IDENTITY_BULLET)
         entrypoint = _read(SANDBOX_ENTRYPOINT)
-        match = re.search(r'SANDBOX_FORWARDED_ENV_NAMES="([^"]+)"', entrypoint)
+        match = FORWARDED_ENV_RE.search(entrypoint)
         self.assertIsNotNone(match, "deploy/sandbox/entrypoint.sh must define SANDBOX_FORWARDED_ENV_NAMES")
         forwarded = set(match.group(1).split())
 
-        # Assert every environment variable cited in the identity bullet is forwarded to the sandbox
-        vars_in_bullet = set(re.findall(r"\$\{?([A-Z0-9_]+)\}?", bullet))
+        # Assert every environment variable cited in the identity bullet (`$VAR`, `${VAR}`, or bare
+        # SCREAMING_SNAKE_CASE such as `printenv GCP_PROJECT_ID`) is forwarded to the sandbox.
+        vars_in_bullet = _cited_env_vars(bullet)
         self.assertTrue(vars_in_bullet, "identity bullet must cite at least one forwarded env var")
         self.assertTrue(
             vars_in_bullet.issubset(forwarded),
             f"identity bullet names vars not in SANDBOX_FORWARDED_ENV_NAMES: {vars_in_bullet - forwarded}",
         )
-        self.assertNotIn(
-            "$GCP_PROJECT_ID",
-            bullet,
-            "GCP_PROJECT_ID is not forwarded to the shell sandbox session "
-            "(deploy/sandbox/entrypoint.sh SANDBOX_FORWARDED_ENV_NAMES); name GKE_PROJECT_ID",
+
+        # Apply the same forwarded-subset guard to Dynamic Project Resolution, excluding only
+        # its single negative INVENTORY.md warning against leaving an unexpanded literal in prose.
+        project_bullet = _line_starting(soul, PROJECT_RESOLUTION_BULLET)
+        self.assertLessEqual(
+            project_bullet.count(PROSE_LITERAL_WARNING_CLAUSE),
+            1,
+            "Dynamic Project Resolution must not repeat the INVENTORY.md literal-$GCP_PROJECT_ID prose warning",
         )
-        # That bullet quotes a literal `$GCP_PROJECT_ID` as prose to avoid, so
-        # only the equivalence claim is checked, not every mention.
-        self.assertNotIn(
-            "equivalently `$GCP_PROJECT_ID`",
-            _line_starting(soul, PROJECT_RESOLUTION_BULLET),
-            "Dynamic Project Resolution must not call GCP_PROJECT_ID equivalent: "
-            "the shell sandbox session does not receive it",
+        cleaned_project_bullet = project_bullet.replace(PROSE_LITERAL_WARNING_CLAUSE, "", 1)
+        vars_in_project = _cited_env_vars(cleaned_project_bullet)
+        self.assertTrue(vars_in_project, "Dynamic Project Resolution must cite at least one forwarded env var")
+        self.assertTrue(
+            vars_in_project.issubset(forwarded),
+            f"Dynamic Project Resolution names vars not in SANDBOX_FORWARDED_ENV_NAMES: {vars_in_project - forwarded}",
+        )
+
+    def test_cited_env_vars_catches_dollar_braced_and_bare_unforwarded_spellings(self):
+        soul = _read(PLATFORM_SOUL)
+        identity_bullet = _line_starting(soul, IDENTITY_BULLET)
+        cleaned_project_bullet = _line_starting(soul, PROJECT_RESOLUTION_BULLET).replace(
+            PROSE_LITERAL_WARNING_CLAUSE, "", 1
+        )
+        entrypoint = _read(SANDBOX_ENTRYPOINT)
+        forwarded = set(FORWARDED_ENV_RE.search(entrypoint).group(1).split())
+
+        for snippet in (
+            "$GCP_PROJECT_ID",
+            "${GCP_PROJECT_ID}",
+            "printenv GCP_PROJECT_ID",
+            "also exported as `$GCP_PROJECT_ID`",
+            "`$GKE_PROJECT_ID`, i.e. `${GCP_PROJECT_ID}`",
+            "or `printenv GCP_PROJECT_ID`",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn("GCP_PROJECT_ID", _cited_env_vars(snippet))
+                self.assertFalse(_cited_env_vars(f"{identity_bullet} ({snippet})").issubset(forwarded))
+                self.assertFalse(_cited_env_vars(f"{cleaned_project_bullet} ({snippet})").issubset(forwarded))
+
+        self.assertEqual(
+            _cited_env_vars(
+                "on GKE installs in GCP (`in-cluster`, `gke_kind_kind_kind`, "
+                "`gke_<project>_<location>_<cluster>`, `/opt/data/INVENTORY.md`)"
+            ),
+            set(),
         )
 
     def test_platform_and_cluster_personas_inline_console_links(self):
