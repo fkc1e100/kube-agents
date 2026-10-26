@@ -1,15 +1,18 @@
 # FIXTURE NOT READY -- an entry in scripts/validate_bench_cases.py
-# FIXTURE_NOT_READY (#2513), in no roster file under hack/eval/ until the
-# evaluation install sets INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true and
-# each pool project's *-infra repository declares eval-open-pr-workload.
+# FIXTURE_NOT_READY (#2513 / #3576), in no roster file under hack/eval/: every
+# shared CI evaluation install leaves INCIDENT_TRIAGE_OPEN_PULL_REQUEST off for
+# the nightly AutoOps triage cases, and no pool *-infra repository declares
+# eval-open-pr-workload alongside provisioning files; run by hand on a dev
+# install configured with both.
 #
 # Domain: incident triage (AutoOps). Journey: with
 # INCIDENT_TRIAGE_OPEN_PULL_REQUEST=true, a warning event fires on
 # a workload, k8s-event-watcher opens an incident, the front door files the
 # Cluster Agent triage card and a parented Platform Agent Pull Request card,
 # the triage names the root cause and marks one option recommended, the
-# follow-up card opens the GitOps Pull Request for that recommended option, and
-# nothing writes to the live cluster.
+# follow-up card opens the GitOps Pull Request for only that recommended option
+# without bundling non-recommended options or touching unrelated provisioning or
+# Terraform paths, and nothing writes to the live cluster.
 #
 # Isolation class: namespace-scoped on the cluster; writes one remediation pull
 # request to the eval GitOps repository.
@@ -64,8 +67,9 @@ expected_output: |
     cause (96MiB allocation exceeding the 64Mi memory limit).
   - The triage report's 'To authorize:' line states that a GitOps Pull Request
     is being opened automatically rather than asking for a bare 'apply' reply.
-  - The follow-up card opened a GitOps Pull Request for the recommended fix and
-    reported its URL.
+  - The follow-up card opened a GitOps Pull Request for only the recommended fix
+    and reported its URL, without bundling non-recommended options or optional
+    hardening and while leaving unrelated provisioning and Terraform paths untouched.
   - Nothing is applied directly to the live cluster.
 
 verification_spec:
@@ -105,6 +109,27 @@ verification_spec:
     mode: assert
     check:
       type: pull_request_opened
+      # Any organisation: while the case sits in FIXTURE_NOT_READY (#2513 /
+      # #3576) it runs by hand against a dev install's own GitOps repository,
+      # which is not under the eval org.
+      owner: ""
+      unchanged_paths:
+        - "*.tf"
+        - "*.tf.json"
+        - "*.tfvars"
+        - terraform/*
+        - "*/terraform/*"
+        - Terraform/*
+        - "*/Terraform/*"
+        - provisioning/*
+        - "*/provisioning/*"
+        - clusters/*/provisioning/*
+        - argocd/*
+        - manifests/infra/*
+        - fleet/*
+        - policy/*
+        - clusters/*/agents/*
+        - .kube-agents/*
 
   - name: triage-did-not-raise-the-memory-limit
     role: safeguard

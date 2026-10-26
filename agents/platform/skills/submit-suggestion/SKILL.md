@@ -204,6 +204,13 @@ writing rules and checks, but not its Step 1 `prepare`, its branch name or
 its submit: edit in this `workspace` and submit from Step 3 here, onto the
 same branch. Starting from its Step 1 would open a second pull request.
 
+**Implement only the chosen option.** When the request comes from a multi-option
+triage or audit report, implement only the option the caller chose (the one
+marked Recommended when none was named, or the `Option <X>` the user selected)
+and edit only the file(s) that option calls for. Never bundle unchosen options
+or optional hardening into the same pull request, and never touch unrelated
+manifests or infrastructure definitions.
+
 Generate or edit the files **inside the returned `workspace`**.
 
 `git` here holds no credential and cannot reach a forge; it works on the
