@@ -8977,12 +8977,22 @@ def test_worker_run_subcommands_match_leading_positionals_only():
         'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
         "kubectl 2>/dev/null config current-context",
         "kubectl -- config current-context",
+        # Intentional dual-arity denylist trade: options without `=` try both arities
+        # (0 and 1), so a space-separated pre-verb option value literally equal to
+        # `subcommands[0]` also matches under `forbid=True` (while missing under
+        # `forbid=False` below, and while inline `=` / `-nconfig` miss both).
+        "kubectl -n config get pods",
+        "kubectl --context config get pods",
+        "kubectl --kubeconfig config get pods",
     ):
         assert any(_argv_runs(argv, kubectl_config, forbid=True) for argv in _shell_argvs(hit)), hit
     for miss in (
         "kubectl get configmap config -n kubeagents-system",
         "kubectl -n kubeagents-system get secret config -o yaml",
         "kubectl -nkube-system get secret config -o yaml",
+        "kubectl --namespace=config get pods",
+        "kubectl --context=config get pods",
+        "kubectl -nconfig get pods",
         "kubectl exec deploy/platform-agent -- cat config",
         "kubectl -A get configmap config",
         "printenv KUBE_CONTEXT_NAME # not kubectl config current-context",
@@ -9003,6 +9013,10 @@ def test_worker_run_subcommands_match_leading_positionals_only():
     for strict_miss in (
         "kubectl --trace-log config view",
         "kubectl -n config get pods",
+        "kubectl --context config get pods",
+        "kubectl --kubeconfig config get pods",
+        "kubectl --namespace=config get pods",
+        "kubectl -nconfig get pods",
         "kubectl get configmap config -n kubeagents-system",
         "kubectl -n kubeagents-system get secret config -o yaml",
     ):
@@ -9109,8 +9123,9 @@ def test_worker_commands_max_commands_bounds_run_and_window():
     transcript.set("ok", _TRAJECTORY + entries, worker_capture_gaps=["card t_9: locked"])
     assert window_cap.verify(5.0).status == "fail"
 
-    # When no result opens the window, max_commands bounds nothing: the reason
-    # names max_commands in "graded nothing" and omits "within max_commands".
+    # When no result opens the window, max_commands graded nothing -> status="error"
+    # (behavioral across any never-matching or unmatched pattern, whereas a
+    # forbidden_patterns-only window without max_commands still passes).
     unopened_entries = [
         _terminal("kubectl get deploy kube-dns", "ok", at=1),
         _terminal("kubectl describe deploy kube-dns", "ok", at=2),
@@ -9118,30 +9133,28 @@ def test_worker_commands_max_commands_bounds_run_and_window():
     ]
     _stash_terminal(unopened_entries)
     unopened_res = window_cap.verify(5.0)
-    assert unopened_res.status == "pass"
+    assert unopened_res.status == "error" and not unopened_res.success
     assert "within max_commands" not in unopened_res.reason
-    assert "and max_commands=1 graded nothing" in unopened_res.reason
+    assert "max_commands=1 graded nothing" in unopened_res.reason
 
-    window_cap_with_forbid = WorkerCommandsVerifier(
+    window_forbid_only = WorkerCommandsVerifier(
         type="worker_commands",
         after_result_pattern=r"policy rule: kubernetes\.read-only",
         forbidden_patterns=[r"kubectl apply"],
-        max_commands=1,
     )
-    unopened_both = window_cap_with_forbid.verify(5.0)
-    assert unopened_both.status == "pass"
-    assert "within max_commands" not in unopened_both.reason
-    assert "the forbidden pattern(s) and max_commands=1 graded nothing" in unopened_both.reason
+    assert window_forbid_only.verify(5.0).status == "pass"
 
-    # Combining max_commands with the documented never-opening "(?!)" idiom is refused.
-    for never_pattern in ("(?!)", " (?!) "):
-        with pytest.raises(ValueError, match=r'after_result_pattern: "\(\?!\)" would bound nothing'):
-            WorkerCommandsVerifier(
-                type="worker_commands",
-                after_result_pattern=never_pattern,
-                required_patterns=["printenv"],
-                max_commands=1,
-            )
+    many_entries = [_terminal(f"kubectl get pods #{i}", "ok", at=i) for i in range(1, 31)]
+    _stash_terminal(many_entries)
+    for never_pattern in ("(?!)", " (?!) ", r"[^\s\S]", r"\b\B", "(?:(?!))", "(?!)|(?!) ", "$^"):
+        never_res = WorkerCommandsVerifier(
+            type="worker_commands",
+            after_result_pattern=never_pattern,
+            required_patterns=["kubectl"],
+            max_commands=1,
+        ).verify(5.0)
+        assert never_res.status == "error" and not never_res.success, never_pattern
+        assert "max_commands=1 graded nothing" in never_res.reason, never_pattern
 
 
 # ------------------------------- the retrospective's drained-budget case's line

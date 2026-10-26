@@ -257,14 +257,20 @@ _MARKDOWN_NOISE = str.maketrans({"*": None, "_": None, "`": None, "’": "'"})
 # ``--flag=value`` carries its value inline; under the strict single reading for ``required_runs``,
 # ``--no-*`` and attached short options longer than ``-x`` (``-nkube-system``, ``-v6``) take no
 # following value word while other options before ``--`` take one; under ``forbidden_runs``,
-# options without ``=`` try both arities (0 and 1) so no untabled CLI flag hides a subcommand.
+# options without ``=`` try both arities (0 and 1) so no untabled CLI flag hides a subcommand
+# (intentionally erring toward over-matching when a separate option value equals ``subcommands[0]``,
+# such as ``kubectl -n config get pods``, unlike inline ``--namespace=config`` or ``-nconfig``).
 _FLAG_VALUE_SEPARATOR = "="
 _CLI_NEGATED_FLAG_PREFIX = "--no-"
 _SHORT_FLAG_LEN = 2
-_NEVER_OPENING_WINDOW_PATTERN = "(?!)"
 _UNJOINED_MAX_COMMANDS_REASON = (
     "worker command count cannot be bounded against max_commands={max_commands} because a "
     "card-log row carries no task id to deduplicate against tagged trajectory calls"
+)
+_UNOPENED_MAX_COMMANDS_WINDOW_REASON = (
+    "worker command count cannot be bounded against max_commands={max_commands}: no worker command "
+    "opened the window ({pattern!r} in the result of any command, failed or not), so "
+    "max_commands={max_commands} graded nothing"
 )
 
 
@@ -2763,7 +2769,11 @@ def _subcommands_match(words: list[str], subcommands: list[str], *, forbid: bool
     longer than ``-x`` (``-nkube-system``, ``-v6``) also take no value word and any other option
     before ``--`` takes one. Under ``forbidden_runs`` (``forbid=True``), any option without ``=``
     has unknown arity without the CLI's flag table, so both arities (``0`` and ``1``) are tried and
-    the run matches if either reading places ``subcommands`` at the front."""
+    the run matches if either reading places ``subcommands`` at the front — intentionally erring
+    toward over-matching on the denylist side when an option's separate value word equals
+    ``subcommands[0]`` (e.g. ``kubectl -n config get pods`` or ``kubectl --context config ...``
+    matches ``subcommands=["config"]``, whereas inline ``--namespace=config`` or ``-nconfig`` does
+    not)."""
     if not subcommands:
         return True
     target = len(subcommands)
@@ -2983,8 +2993,8 @@ class WorkerCommandsVerifier(BaseVerifier):
     are absent from the log and are not counted; see Limits below) — the
     workers may issue (across the run, or inside the ``after_result_pattern``
     window when set: setting ``max_commands`` makes the check forbidding and
-    counts only calls after the opener, so an unopened window bounds nothing
-    and ``after_result_pattern: "(?!)"`` is rejected), exempted entries
+    counts only calls after the opener, so a run where no lineage opens a
+    window grades nothing and returns ``status="error"``), exempted entries
     included.
 
     ``after_result_pattern`` makes the forbidden set order-aware, for a
@@ -3042,7 +3052,9 @@ class WorkerCommandsVerifier(BaseVerifier):
     read as its value in ``required_runs`` (``sudo -n ls <script> --readiness``
     is still credited), while ``forbidden_runs`` tries both arities on an
     option without ``=`` ahead of ``subcommands`` so an untabled boolean flag
-    cannot hide a forbidden subcommand;
+    cannot hide a forbidden subcommand (intentionally over-matching when a
+    separate option value equals ``subcommands[0]``, such as ``kubectl -n config
+    get pods``, unlike inline ``--namespace=config`` or ``-nconfig``);
     and a run made through a script file or a shell's standard input
     (``bash run.sh``, ``nohup bash /tmp/run.sh &``, ``echo "<command>" | bash``,
     ``bash -s < run.sh``) is not read as one, since the argv names the file or
@@ -3062,10 +3074,11 @@ class WorkerCommandsVerifier(BaseVerifier):
     untimed call and a gap beside a satisfied required set do not error it,
     and the card log's rows join its typed set, so a command the trajectory
     missed still counts (a case sets ``after_result_pattern: "(?!)"`` to
-    read the required commands as typed and nothing else; ``max_commands``
-    cannot be combined with ``"(?!)"``, because setting a cap makes the check
-    forbidding and counts only calls after the opener, so a window that never
-    opens bounds nothing). Fails closed like its siblings -- a run with no captured
+    read the required commands as typed and nothing else; combining
+    ``max_commands`` with ``after_result_pattern`` makes the check forbidding
+    and counts only calls after the opener, returning ``status="error"`` when
+    no lineage opens a window because the cap graded nothing). Fails closed like
+    its siblings -- a run with no captured
     worker commands is ``status="error"``, not a pass.
     """
 
@@ -3085,19 +3098,6 @@ class WorkerCommandsVerifier(BaseVerifier):
         for pattern in patterns:
             re.compile(pattern)
         return patterns
-
-    @model_validator(mode="after")
-    def _max_commands_cannot_use_never_opening_window(self) -> WorkerCommandsVerifier:
-        if (
-            self.max_commands is not None
-            and self.after_result_pattern is not None
-            and self.after_result_pattern.strip() == _NEVER_OPENING_WINDOW_PATTERN
-        ):
-            raise ValueError(
-                "max_commands counts only commands after after_result_pattern opens a window, "
-                'so after_result_pattern: "(?!)" would bound nothing'
-            )
-        return self
 
     @field_validator("after_result_pattern")
     @classmethod
@@ -3339,6 +3339,16 @@ class WorkerCommandsVerifier(BaseVerifier):
                 elapsed_time=time.monotonic() - start,
                 reason=reason,
             )
+        if self.after_result_pattern is not None and self.max_commands is not None and not opened:
+            return VerificationResult(
+                success=False,
+                status="error",
+                elapsed_time=time.monotonic() - start,
+                reason=_UNOPENED_MAX_COMMANDS_WINDOW_REASON.format(
+                    max_commands=self.max_commands,
+                    pattern=self.after_result_pattern,
+                ),
+            )
         return VerificationResult(
             success=True,
             elapsed_time=time.monotonic() - start,
@@ -3347,11 +3357,7 @@ class WorkerCommandsVerifier(BaseVerifier):
                 f"required pattern(s) matched, all {len(self.required_runs)} required run(s) made, "
                 f"none of {len(self.forbidden_patterns) + len(self.forbidden_result_patterns)} forbidden pattern(s) matched, "
                 f"none of {len(self.forbidden_runs)} forbidden run(s) made"
-                + (
-                    f", within max_commands={self.max_commands}"
-                    if self.max_commands is not None and (self.after_result_pattern is None or bool(opened))
-                    else ""
-                )
+                + (f", within max_commands={self.max_commands}" if self.max_commands is not None else "")
                 + window
             ),
         )

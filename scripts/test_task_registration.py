@@ -1019,26 +1019,19 @@ class TestTheRulesReject(unittest.TestCase):
             ),
         )
 
-    def test_worker_commands_max_commands_beside_never_opening_window_is_rejected(self):
-        self._only(
-            "never opens a window and can never fail the cap",
-            verification_spec=self._entry(
-                check={
-                    "type": "worker_commands",
-                    "after_result_pattern": "(?!)",
-                    "max_commands": 1,
-                }
+    def test_worker_commands_max_commands_counts_as_a_populated_assertion(self):
+        self.assertEqual(
+            self._validate(
+                verification_spec=self._entry(
+                    check={"type": "worker_commands", "max_commands": 1}
+                )
             ),
+            [],
         )
         self._only(
-            "never opens a window and can never fail the cap",
+            "can only pass",
             verification_spec=self._entry(
-                check={
-                    "type": "worker_commands",
-                    "after_result_pattern": "(?!)",
-                    "required_patterns": ["printenv"],
-                    "max_commands": 1,
-                }
+                check={"type": "worker_commands", "exempt_patterns": ["^echo "]}
             ),
         )
 

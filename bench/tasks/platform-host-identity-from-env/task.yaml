@@ -165,7 +165,11 @@ verification_spec:
       # counting `execute_code` calls on a logged card awaits #3971) and
       # forbids the routes the live and red-on-main runs took: `kubectl config`
       # subcommands and `gcloud container clusters list` on argv
-      # (`forbidden_runs`), on newline-joined card-log rows, and inside
+      # (`forbidden_runs`) and on newline-joined card-log rows (both intentionally
+      # erring toward denylist over-matching if a space-separated pre-verb option
+      # value is literally `config`, such as `kubectl -n config get pods`, unlike
+      # inline `--namespace=config`/`-nconfig` or post-verb `get configmap
+      # config`), and inside
       # interpreter inline or heredoc programs (`python3`, `awk`, `perl`, etc.,
       # along with subprocess/popen/system/getline/qx shell-outs, `.kube/config`
       # reads, and root/glob walks), any `find` rooted under `/`, and filesystem

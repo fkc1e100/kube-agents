@@ -409,6 +409,9 @@ ALLOWED_NO_HUNT_COMMANDS = [
     "kubectl get configmap config -n kubeagents-system",
     "kubectl -n kubeagents-system get secret config -o yaml",
     "kubectl -nkube-system get secret config -o yaml",
+    "kubectl --namespace=config get pods",
+    "kubectl --context=config get pods",
+    "kubectl -nconfig get pods",
     "kubectl -ojson get configmap config",
     "kubectl exec deploy/platform-agent -- cat config",
     "gcloud container clusters describe list --zone us-central1-a",
@@ -431,6 +434,11 @@ FORBIDDEN_WORKER_COMMANDS = [
     "kubectl -nkube-system config view",
     "kubectl -v6 config current-context",
     'echo "$GKE_CLUSTER_NAME $(kubectl -nkube-system config current-context)"',
+    # Intentional dual-arity denylist trade on space-separated pre-verb option
+    # values literally equal to `config` (inline `--namespace=config` and
+    # `-nconfig` above stay allowed).
+    "kubectl -n config get pods",
+    "kubectl --context config get pods",
     "gcloud container clusters list --project example-project",
     "gcloud --project example-project container clusters list",
     "gcloud --quiet beta container clusters list",
