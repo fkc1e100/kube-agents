@@ -29,6 +29,7 @@ PENDING_WORKFLOW_TARGETS: frozenset[str] = frozenset()
 _JOB_ID = "docs-check"
 _MAKEFILE_DB_RULE_RE = re.compile(r"^docs-check:(?:\s+(?P<rest>.*))?$")
 _TARGET_VAR_MODIFIERS = frozenset({"export", "unexport", "override", "private", "undefine"})
+_RECIPE_PREFIX_RE = re.compile(r"^\t([@+ \t-]*)")
 _EXACT_MAKE_STEP_RE = re.compile(r"^make (?P<target>docs-check-[a-z0-9-]+)$")
 _PINNED_CHECKOUT_RE = re.compile(r"^actions/checkout@[0-9a-f]{40}$")
 
@@ -51,8 +52,51 @@ def _is_target_specific_variable(before_comment: str) -> bool:
     return bool(tokens and tokens[0] in _TARGET_VAR_MODIFIERS)
 
 
+def _resolved_target_recipe(database_text: str, target: str) -> list[str]:
+    """Return logical recipe lines GNU Make resolved for `target`."""
+    lines = database_text.splitlines()
+    rule_re = re.compile(rf"^{re.escape(target)}:(?:\s+(?P<rest>.*))?$")
+    start: int | None = None
+    for idx, line in enumerate(lines):
+        match = rule_re.match(line)
+        if not match:
+            continue
+        before_comment = (match.group("rest") or "").split("#", 1)[0]
+        if _is_target_specific_variable(before_comment):
+            continue
+        start = idx
+        break
+    if start is None:
+        raise ValueError(f"GNU Make database declares no `{target}:` target")
+
+    physical: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("#"):
+            continue
+        if not line.startswith("\t"):
+            break
+        physical.append(line)
+
+    logical: list[str] = []
+    for line in physical:
+        if logical and logical[-1].rstrip().endswith("\\"):
+            logical[-1] = logical[-1].rstrip()[:-1] + line.lstrip()
+        else:
+            logical.append(line)
+    return logical
+
+
+def _ignored_recipe_lines(logical_lines: list[str]) -> list[str]:
+    """Return recipe lines whose Make prefix cluster includes `-` (ignore-errors)."""
+    return [
+        line
+        for line in logical_lines
+        if (prefix := _RECIPE_PREFIX_RE.match(line)) is not None and "-" in prefix.group(1)
+    ]
+
+
 def makefile_docs_check_prereqs(database_text: str | None = None) -> list[str]:
-    """Return expanded `docs-check:` prerequisites from GNU Make's database."""
+    """Return expanded `docs-check:` prerequisites and verify fail-fast recipes."""
     if database_text is None:
         proc = run_make(["-pn", "--eval=__probe: ;@:", "__probe"], timeout=60)
         if proc.returncode != 0:
@@ -75,6 +119,16 @@ def makefile_docs_check_prereqs(database_text: str | None = None) -> list[str]:
                 prereqs.append(token)
     if not found_rule:
         raise ValueError("GNU Make database declares no docs-check: target")
+
+    for target in prereqs:
+        recipe = _resolved_target_recipe(database_text, target)
+        if not recipe:
+            raise ValueError(f"Makefile prerequisite `{target}` declares an empty recipe")
+        ignored = _ignored_recipe_lines(recipe)
+        if ignored:
+            raise ValueError(
+                f"Makefile prerequisite `{target}` ignores recipe errors via `-` prefix: {ignored}"
+            )
     return prereqs
 
 
@@ -647,6 +701,14 @@ class DocsCheckWorkflowTest(unittest.TestCase):
             "docs-check: undefine BAZ\n"
             "docs-check: docs-check-a docs-check-b | order-only-dep # comment\n"
             "docs-check: docs-check-b docs-check-c\n"
+            "docs-check-a:\n"
+            "\t@python3 scripts/check_a.py\n"
+            "docs-check-b:\n"
+            "# make database comment before recipe\n"
+            "\t@python3 \\\n"
+            "\t  scripts/check_b.py\n"
+            "docs-check-c:\n"
+            "\t+@python3 scripts/check_c.py\n"
         )
         self.assertEqual(
             makefile_docs_check_prereqs(sample_db),
@@ -654,6 +716,14 @@ class DocsCheckWorkflowTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "no docs-check: target"):
             makefile_docs_check_prereqs("docs-check: PYTHONWARNINGS := error\n")
+        with self.assertRaisesRegex(ValueError, "ignores recipe errors via `-` prefix"):
+            makefile_docs_check_prereqs(
+                sample_db.replace("\t@python3 scripts/check_a.py", "\t-@python3 scripts/check_a.py")
+            )
+        with self.assertRaisesRegex(ValueError, "empty recipe"):
+            makefile_docs_check_prereqs(
+                sample_db.replace("\t@python3 scripts/check_a.py\n", "")
+            )
 
 
 if __name__ == "__main__":
