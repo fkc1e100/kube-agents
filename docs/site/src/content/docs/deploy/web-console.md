@@ -17,7 +17,7 @@ The side panel lists the agent's recent sessions by title, including the triage 
 
 ## How it is reached
 
-The console is reachable through `kubectl port-forward` and no other way. The chart renders its Service as `ClusterIP`, and a NetworkPolicy refuses every connection to the console pod from the pod network. The policy takes effect only on a cluster that enforces NetworkPolicy, which clusters the installer creates do; when you adopt an existing cluster, the installer and the Terraform composition require NetworkPolicy enforcement before they will enable the console and refuse `--accept-no-network-policy` (`accept_no_network_policy = true`). A port-forward enters from the node, which NetworkPolicy does not govern. In practice, whoever holds `pods/portforward` on the install namespace can use the console.
+The console is reachable through `kubectl port-forward` and no other way. The chart renders its Service as `ClusterIP`, and a NetworkPolicy refuses every connection to the console pod from the pod network. The policy takes effect only on a cluster that enforces NetworkPolicy, which clusters the installer creates do. When you adopt an existing cluster, the installer and the Terraform composition require NetworkPolicy enforcement before they will enable the console and refuse `--accept-no-network-policy` (`accept_no_network_policy = true`). A port-forward enters from the node, which NetworkPolicy does not govern. In practice, whoever holds `pods/portforward` on the install namespace can use the console.
 
 The console holds the agent's API key, from the same Secret the agent reads, and attaches it to the requests it sends the agent. The key does not reach the browser. There is no login page and no per-user identity: every turn reaches the agent as the console.
 
@@ -31,7 +31,7 @@ Pass `--enable-web-console` to the installer, on a new install or a re-run of an
 ./install.sh --enable-web-console
 ```
 
-On a first install, the installer writes the choice into the `install.env` it creates, as `WEB_CONSOLE_ENABLED=true`, so later runs keep it. Passing `--enable-web-console` on a non-interactive re-run does not rewrite `WEB_CONSOLE_ENABLED` in an existing `install.env`; the flag applies to that run only, and the installer warns you: set `WEB_CONSOLE_ENABLED=true` in `install.env` yourself, or the next `install.sh`, `upgrade.sh` or `--menu` run removes the console again. `--enable-web-console=false` and `WEB_CONSOLE_ENABLED=false` turn it off. If you drive the Terraform composition in `terraform/examples/full-install` directly, set `web_console_enabled = true`.
+On a first install, the installer writes the choice into the `install.env` it creates, as `WEB_CONSOLE_ENABLED=true`, so later runs keep it. Passing `--enable-web-console` on a non-interactive re-run does not rewrite `WEB_CONSOLE_ENABLED` in an existing `install.env`. The flag applies to that run only, and the installer warns you: set `WEB_CONSOLE_ENABLED=true` in `install.env` yourself, or the next `install.sh`, `upgrade.sh` or `--menu` run removes the console again. `--enable-web-console=false` and `WEB_CONSOLE_ENABLED=false` turn it off. If you drive the Terraform composition in `terraform/examples/full-install` directly, set `web_console_enabled = true`.
 
 The console needs the Platform Agent; the chart refuses to render it on an install with `platformAgent.enabled: false`. Its image follows the agent's image tag and the install's image registry, so a mirrored install pulls it from the mirror.
 
