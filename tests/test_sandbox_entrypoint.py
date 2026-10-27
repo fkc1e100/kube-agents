@@ -62,6 +62,15 @@ exit 0
 
 _TREES = ("skills", "scripts", "governance")
 _PREPARE = "--prepare-image-trees"
+_FORWARDED_ENV_RE = re.compile(r'SANDBOX_FORWARDED_ENV_NAMES=["\']([^"\']+)["\']')
+
+
+def sandbox_forwarded_env_names(entrypoint: pathlib.Path = _ENTRYPOINT) -> set[str]:
+    """Return the environment variable names in ``SANDBOX_FORWARDED_ENV_NAMES``."""
+    match = _FORWARDED_ENV_RE.search(entrypoint.read_text(encoding="utf-8"))
+    if match is None:
+        raise AssertionError(f"SANDBOX_FORWARDED_ENV_NAMES definition not found in {entrypoint}")
+    return set(match.group(1).split())
 
 # Drops -o/-g -- the real ones need root -- and keeps the directory creation the
 # loop depends on. Deliberately NOT a passthrough to /usr/bin/install: stubbing
@@ -633,11 +642,7 @@ class SandboxEntrypointReadOnlyMountGateTest(_SandboxEntrypointHarness):
 class SandboxEntrypointForwardedEnvTest(unittest.TestCase):
     def test_forwarded_env_names_include_context_and_gke_variables(self) -> None:
         """KUBE_CONTEXT_NAME and GKE_* variables must be forwarded to ssh sessions."""
-        content = _ENTRYPOINT.read_text()
-        match = re.search(r'SANDBOX_FORWARDED_ENV_NAMES=["\']([^"\']+)["\']', content)
-        self.assertIsNotNone(match, "SANDBOX_FORWARDED_ENV_NAMES definition not found")
-        assert match is not None
-        names = set(match.group(1).split())
+        names = sandbox_forwarded_env_names()
         required = {
             "CREDENTIAL_PROXY_URL",
             "CREDENTIAL_PROXY_TOKEN_FILE",
