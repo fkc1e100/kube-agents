@@ -483,6 +483,11 @@ def _build_teams_adapter_and_sender(
             except Exception:
                 LOGGER.debug("Failed to send typing indicator to Teams", exc_info=True)
 
+        async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+            """Teams channel ids end in ``@thread.<suffix>``; the rest are chats."""
+            chat_type = "channel" if "@thread" in str(chat_id) else "dm"
+            return {"name": str(chat_id), "type": chat_type, "chat_id": str(chat_id)}
+
         async def _process_activity(self, activity: dict[str, Any]) -> None:
             if not isinstance(activity, dict):
                 LOGGER.warning("Ignoring malformed non-object Teams activity")

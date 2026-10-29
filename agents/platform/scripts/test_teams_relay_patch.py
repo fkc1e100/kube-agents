@@ -1,3 +1,4 @@
+import abc
 import dataclasses
 import enum
 import json
@@ -67,7 +68,10 @@ def _register_fake_modules():
         reply_to_text: str | None = None
         timestamp: object = None
 
-    class BasePlatformAdapter:
+    class BasePlatformAdapter(abc.ABC):
+        """The abstract set and call signatures of the upstream base, so an
+        adapter that cannot be instantiated there cannot be instantiated here."""
+
         def __init__(self, config: PlatformConfig, platform: Platform):
             if not isinstance(platform, Platform) or not hasattr(platform, "value"):
                 raise TypeError(f"Expected Platform enum with .value, got {platform!r}")
@@ -76,6 +80,22 @@ def _register_fake_modules():
             self._message_handler = None
             self._running = False
             self._background_tasks = set()
+
+        @abc.abstractmethod
+        async def connect(self, *, is_reconnect=False):
+            ...
+
+        @abc.abstractmethod
+        async def disconnect(self):
+            ...
+
+        @abc.abstractmethod
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            ...
+
+        @abc.abstractmethod
+        async def get_chat_info(self, chat_id):
+            ...
 
         def set_message_handler(self, handler):
             self._message_handler = handler
@@ -513,6 +533,22 @@ class TestTeamsRelayPatch(unittest.IsolatedAsyncioTestCase):
 
             await adapter.send_typing(
                 "conv-123", "https://smba.trafficmanager.net/teams/"
+            )
+            self.assertEqual(
+                await adapter.get_chat_info("19:abc@thread.tacv2"),
+                {
+                    "name": "19:abc@thread.tacv2",
+                    "type": "channel",
+                    "chat_id": "19:abc@thread.tacv2",
+                },
+            )
+            self.assertEqual(
+                await adapter.get_chat_info("a:1-personal-chat"),
+                {
+                    "name": "a:1-personal-chat",
+                    "type": "dm",
+                    "chat_id": "a:1-personal-chat",
+                },
             )
 
     async def test_send_failure_returns_failed_send_result(self):
