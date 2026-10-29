@@ -1560,6 +1560,63 @@ class TestAuditStorage(unittest.TestCase):
         self.assertIn("CLEAN_AUDIT_STOP: NO", ephemeral_out)
         self.assertNotIn("CLEAN_AUDIT_STOP: YES", ephemeral_out)
 
+    def test_naive_timestamp_is_treated_as_utc_and_incomplete_verdict_names_degraded_resources(self):
+        now = datetime(2026, 10, 26, 12, 1, 0, tzinfo=timezone.utc)
+        self.assertEqual(audit_storage.format_age("2026-10-26T12:00:00", now), "1m")
+        self.assertTrue(
+            audit_storage.is_within_grace("2026-10-26T12:00:00", now, audit_storage.ATTACHMENT_IN_PROGRESS_GRACE)
+        )
+        self.assertFalse(
+            audit_storage.is_within_grace("2026-10-26T11:50:00", now, audit_storage.ATTACHMENT_IN_PROGRESS_GRACE)
+        )
+
+        def unread_sc_with_failed_pv_and_naive_pvc_ts(args, env):
+            if "sc" in args:
+                return 1, {"error": "Error from server (Forbidden): storageclasses.storage.k8s.io is forbidden"}
+            if "pvc" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {
+                                "namespace": "prod",
+                                "name": "data-0",
+                                "creationTimestamp": "2026-10-26T12:00:00",
+                            },
+                            "spec": {"storageClassName": "standard-rwo"},
+                            "status": {"phase": "Bound"},
+                        }
+                    ]
+                }
+            if "pv" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"name": "pv-failed"},
+                            "spec": {"capacity": {"storage": "10Gi"}, "storageClassName": "standard-rwo"},
+                            "status": {"phase": "Failed"},
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        buf = io.StringIO()
+        with (
+            mock.patch.object(audit_storage, "run_kubectl_json", side_effect=unread_sc_with_failed_pv_and_naive_pvc_ts),
+            mock.patch.object(audit_storage, "_now_utc", return_value=now),
+            contextlib.redirect_stdout(buf),
+        ):
+            rc = audit_storage.audit_storage()
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "**Storage Audit Verdict: Incomplete** (could not read: scs; degraded among read kinds: 0 PVCs not Bound, 1 Failed/Released PVs, 0 VolumeAttachment errors/stalled).",
+            out,
+        )
+        self.assertIn(
+            "CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy, and inspect degraded storage resources below.",
+            out,
+        )
+
 
 class TestAuditNetworking(unittest.TestCase):
     def test_healthy_networking_emits_clean_stop(self):
@@ -1619,7 +1676,34 @@ class TestAuditNetworking(unittest.TestCase):
             out,
         )
         self.assertIn("Networking Audit Verdict: Clean & Fully Programmed", out)
+        self.assertIn("valid HTTPRoute routing", out)
+        self.assertIn("GRPCRoute/TCPRoute/TLSRoute, Gateway and non-GKE Ingress backend health not read", out)
         self.assertIn("CLEAN_AUDIT_STOP: YES", out)
+
+        def unread_ingress_with_pending_lb(args, env):
+            if "ingress" in args:
+                return 1, {"error": "Error from server (Forbidden): ingresses.networking.k8s.io is forbidden"}
+            if "svc" in args:
+                return 0, {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "prod", "name": "pending-lb"},
+                            "spec": {"type": "LoadBalancer", "clusterIP": "10.0.0.11", "ports": []},
+                            "status": {"loadBalancer": {}},
+                        }
+                    ]
+                }
+            return 0, {"items": []}
+
+        incomplete_out = self._run_networking(unread_ingress_with_pending_lb)
+        self.assertIn(
+            "**Networking Audit Verdict: Incomplete** (could not read: ingresses; degraded among read kinds: 0 unassigned Ingresses, 0 Ingresses with unhealthy backends, 0 unaccepted Gateways, 0 failing HTTPRoutes, 1 pending LoadBalancers).",
+            incomplete_out,
+        )
+        self.assertIn(
+            "CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy, and inspect degraded networking resources below.",
+            incomplete_out,
+        )
 
     def test_degraded_networking_emits_stop_no(self):
         def fake_run_kubectl_json(args, env):

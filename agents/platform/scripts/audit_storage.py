@@ -112,9 +112,11 @@ def format_age(creation_ts: object, now: datetime) -> str:
         return "N/A"
     try:
         created = datetime.fromisoformat(creation_ts.replace("Z", "+00:00"))
-    except ValueError:
+        if created.tzinfo is None or created.tzinfo.utcoffset(created) is None:
+            created = created.replace(tzinfo=timezone.utc)
+        seconds = max(0, int((now - created).total_seconds()))
+    except (ValueError, TypeError):
         return "N/A"
-    seconds = max(0, int((now - created).total_seconds()))
     if seconds < 60:
         return f"{seconds}s"
     if seconds < 3600:
@@ -130,9 +132,11 @@ def is_within_grace(creation_ts: object, now: datetime, grace: timedelta) -> boo
         return False
     try:
         created = datetime.fromisoformat(creation_ts.replace("Z", "+00:00"))
-    except ValueError:
+        if created.tzinfo is None or created.tzinfo.utcoffset(created) is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return (now - created) < grace
+    except (ValueError, TypeError):
         return False
-    return (now - created) < grace
 
 
 def run_kubectl_json(args: list[str], env: dict[str, str]) -> tuple[int, dict]:
@@ -540,8 +544,21 @@ def audit_storage(kubeconfig: str | None = None) -> int:
     # Stop-on-Clean Rule Status
     is_clean = len(pending_pvcs) == 0 and len(unhealthy_pvs) == 0 and len(attachment_errors) == 0
     if unread:
-        print(f"**Storage Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}).")
-        print("CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy.\n")
+        degraded_suffix = (
+            ""
+            if is_clean
+            else (
+                f"; degraded among read kinds: {len(pending_pvcs)} PVCs not Bound, "
+                f"{len(unhealthy_pvs)} Failed/Released PVs, {len(attachment_errors)} VolumeAttachment errors/stalled"
+            )
+        )
+        stop_detail = (
+            "Report the unread kinds below as unread, not healthy."
+            if is_clean
+            else "Report the unread kinds below as unread, not healthy, and inspect degraded storage resources below."
+        )
+        print(f"**Storage Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}{degraded_suffix}).")
+        print(f"CLEAN_AUDIT_STOP: NO — {stop_detail}\n")
         for key, reason in sorted(unread.items()):
             print(f"- `{key}`: {reason}")
         print("")

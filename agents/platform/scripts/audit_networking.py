@@ -66,8 +66,8 @@ DEFAULT_INGRESS_CLASS = "default"
 # Clean-stop line naming the exact signals checked (Gateway and non-GKE Ingress backend health are not read).
 CLEAN_VERDICT_STOP_LINE = (
     "CLEAN_AUDIT_STOP: YES — All Ingresses, Gateways, and LoadBalancers have allocated addresses and valid "
-    "routing, and no GKE Ingress backend reports unhealthy (Gateway and non-GKE Ingress backend health not read); "
-    "call kanban_complete immediately.\n"
+    "HTTPRoute routing, and no GKE Ingress backend reports unhealthy (GRPCRoute/TCPRoute/TLSRoute, Gateway and "
+    "non-GKE Ingress backend health not read); call kanban_complete immediately.\n"
 )
 
 
@@ -446,13 +446,28 @@ def audit_networking(kubeconfig: str | None = None) -> int:
     # Stop-on-Clean Rule Status
     is_clean = not (unassigned_ingresses or unhealthy_ingresses or unaccepted_gateways or pending_lb or degraded_routes)
     if unread:
-        print(f"**Networking Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}).")
-        print("CLEAN_AUDIT_STOP: NO — Report the unread kinds below as unread, not healthy.\n")
+        degraded_suffix = (
+            ""
+            if is_clean
+            else (
+                f"; degraded among read kinds: {len(unassigned_ingresses)} unassigned Ingresses, "
+                f"{len(unhealthy_ingresses)} Ingresses with unhealthy backends, "
+                f"{len(unaccepted_gateways)} unaccepted Gateways, {len(degraded_routes)} failing HTTPRoutes, "
+                f"{len(pending_lb)} pending LoadBalancers"
+            )
+        )
+        stop_detail = (
+            "Report the unread kinds below as unread, not healthy."
+            if is_clean
+            else "Report the unread kinds below as unread, not healthy, and inspect degraded networking resources below."
+        )
+        print(f"**Networking Audit Verdict: Incomplete** (could not read: {', '.join(sorted(unread))}{degraded_suffix}).")
+        print(f"CLEAN_AUDIT_STOP: NO — {stop_detail}\n")
         for key, reason in sorted(unread.items()):
             print(f"- `{key}`: {reason}")
         print("")
     elif is_clean:
-        print("**Networking Audit Verdict: Clean & Fully Programmed** (All Ingresses, Gateways, and LoadBalancers have allocated IPs and valid routing, and no Ingress backend the GKE Ingress controller reports on is unhealthy).")
+        print("**Networking Audit Verdict: Clean & Fully Programmed** (All Ingresses, Gateways, and LoadBalancers have allocated IPs and valid HTTPRoute routing, and no Ingress backend the GKE Ingress controller reports on is unhealthy).")
         print(CLEAN_VERDICT_STOP_LINE)
     else:
         print(f"**Networking Audit Verdict: Routing / VIP Degradation Detected** ({len(unassigned_ingresses)} unassigned Ingresses, {len(unhealthy_ingresses)} Ingresses with unhealthy backends, {len(unaccepted_gateways)} unaccepted Gateways, {len(degraded_routes)} failing HTTPRoutes, {len(pending_lb)} pending LoadBalancers).")

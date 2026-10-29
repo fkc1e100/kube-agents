@@ -98,7 +98,7 @@ verification_spec:
         # `cd /opt/data/scripts || exit 1;`, `SCRIPTS=/opt/data/scripts; python3 $SCRIPTS/...`,
         # `SCRIPT=/opt/...; python3 "$SCRIPT"`, `python3 //opt/...`, `python3 \/opt/...`,
         # `bash -c 'echo "# x"; python3 /opt/...'`, `pushd /opt/data/scripts`) await #3967.
-        - '(?m)^(?:[^#\x27"\\\n]|\\[^\n]|(?<=[^\s<>&|;()])#|\x27[^\x27\n]*\x27|"(?:\\.|[^"\\\n])*")*(?:\x27(?:[^#\x27\n]|(?<=[^\s<>&|;()\x27"])#)*|"(?:\\.|[^#"\\\n]|(?<=[^\s<>&|;()\x27"])#)*)?(?:(?<![^ \t\n\x27"(;|&])(?<!\\[ \t(|;&\x27"])(?<![^ \t\n(;|&\x27"]\x27)(?<![^ \t\n(;|&\x27"]")(?:/opt/data/scripts/audit_storage\.py\b|\\"/opt/data/scripts/audit_storage\.py\\")|\bcd(?:[ \t]|\\\n)+(?:/opt/data/scripts/?|\x27/opt/data/scripts/?\x27|"/opt/data/scripts/?"|\\"/opt/data/scripts/?\\")(?=(?:[ \t]|\\\n)*(?:&&|;|\n|$)|(?:[ \t]|\\\n)+#))'
+        - '(?m)^(?:[^#\x27"\\\n]|\\[^\n]|(?<=[^\s<>&|;()])#|\x27[^\x27\n]*\x27|"(?:\\.|[^"\\\n])*")*(?:\x27(?:[^#\x27\n]|(?<=[^\s<>&|;()\x27"])#)*|"(?:\\.|[^#"\\\n]|(?<=[^\s<>&|;()\x27"])#)*)?(?:(?<![^ \t\n\x27"(;|&])(?<!\\[ \t(|;&\x27"])(?<![^ \t\n(;|&]\x27)(?<![^ \t\n(;|&]")(?:/opt/data/scripts/audit_storage\.py\b|\\"/opt/data/scripts/audit_storage\.py\\")|\bcd(?:[ \t]|\\\n)+(?:/opt/data/scripts/?|\x27/opt/data/scripts/?\x27|"/opt/data/scripts/?"|\\"/opt/data/scripts/?\\")(?=(?:[ \t]|\\\n)*(?:&&|;|\n|$)|(?:[ \t]|\\\n)+#))'
       forbidden_result_patterns:
         - 'audit_storage\.py[''"]?: (?:[Nn]o such file or directory|(?:command )?not found|[Pp]ermission denied)'
         - "can't open file '[^']*audit_storage\\.py'"
