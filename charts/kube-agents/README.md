@@ -294,21 +294,21 @@ with `fallback.reasoningEffort` set to `low`/`medium`/`high`, LiteLLM sets
 (`low`/`medium`/`high`, default empty, meaning none) puts a `reasoning_effort`
 under every primary alias the same way (the fallback alias carries
 `fallback.reasoningEffort`); LiteLLM maps it to `thinkingLevel` on Gemini 3.x
-([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-reasoning-effort)).
+([details](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#setting-the-reasoning-effort)).
 On a Gemini 2.5 or 3.x model the gateway asks for the model's thoughts with a
 `thinking` key under every primary alias, which a `reasoningEffort` value replaces
-([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#geminis-thoughts)).
+([why](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#geminis-thoughts)).
 `litellm.budget.usd` (default `0`, meaning none) with `litellm.budget.period`
 (default `1d`) puts a spend ceiling on the gateway, LiteLLM's provider budget
 for the model's provider split evenly across `litellm.replicaCount`; a replica
 whose share is spent refuses model calls until the window ends, and exports the
 remaining share as `litellm_provider_remaining_budget_metric`
-([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-a-spend-ceiling)).
+([details](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#setting-a-spend-ceiling)).
 On a Claude model the gateway
 drops `temperature`, `top_p` and `top_k` from every request
-([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#setting-the-default-model)),
+([why](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#setting-the-default-model)),
 and only a Claude model gets the prompt-caching breakpoints
-([why](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#prompt-caching)).
+([why](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#prompt-caching)).
 `litellm.fallback` and `litellm.dropParams` (both off
 by default) add a fallback alias at a specified reasoning effort with
 `router_settings.fallbacks` to it and drop parameters the
@@ -394,7 +394,7 @@ service-account key Secret when `litellm.vertex.credentialsSecretRef` is set).
 defaults to `platformAgent.harness.projectId`; `location` defaults to `global`
 rather than the harness location, since a model is only callable from a
 location that serves it. Set a region for a data-residency requirement or a
-Model Garden partner model: [Concepts → Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#vertex-ai-and-model-garden). That GSA, its
+Model Garden partner model: [Concepts → Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#vertex-ai-and-model-garden). That GSA, its
 `roles/aiplatform.user` grant, and its binding to the gateway's KSA are not
 chart resources — see
 [Security & IAM](https://gke-labs.github.io/kube-agents/reference/security-and-iam/).
@@ -417,7 +417,7 @@ the annotated KSA.
 `litellm.vertex.sessionAffinity` (off by default) sends each Gemini
 conversation a Vertex `session_id` so a new conversation's first turn can read
 a prompt another conversation warmed:
-[Concepts → Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#prompt-caching).
+[Concepts → Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#prompt-caching).
 
 To override the Vertex AI endpoint host through `litellm.envFromSecret`
 ([below](#a-credentials-secret-for-the-gateway-litellmenvfromsecret)) with
@@ -452,7 +452,7 @@ non-default `platformAgent.harness.universeDomain` renders `api_base`
 (`VERTEXAI_PROJECT`, `VERTEXAI_LOCATION`, and `GOOGLE_CLOUD_UNIVERSE_DOMAIN`
 when `platformAgent.harness.universeDomain` is non-default) always override
 matching keys in `litellm.envFromSecret`. Full precedence and examples:
-[Concepts → Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#vertex-ai-and-model-garden).
+[Concepts → Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/#vertex-ai-and-model-garden).
 
 #### OpenAI-compatible endpoints (`litellm.modelProvider=openai_compatible`)
 
@@ -536,7 +536,7 @@ in the credentials Secret, or custom environment variables for `vertex_ai`:
   `OPENAI_COMPATIBLE_OAUTH_CLIENT_ID` and `OPENAI_COMPATIBLE_OAUTH_CLIENT_SECRET`
   in the Secret, the chart ships a pre-call hook that fetches the bearer token,
   caches it and renews it before expiry
-  ([details](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/#oauth2-client-credentials)).
+  ([details](https://gke-labs.github.io/kube-agents/concepts/inference-self-hosted/#oauth2-client-credentials)).
 - **Vertex AI custom environment variables (`litellm.modelProvider=vertex_ai`).**
   Set `VERTEXAI_API_BASE` (matching `litellm.vertex.location`) or other custom
   variables in the Secret (`envFrom`, which does not render `api_base` in
@@ -779,7 +779,7 @@ When deploying via GitOps tools like ArgoCD, `helm template` passes the destinat
 `operator.metrics` is the operator's own listener: the manager serves controller-runtime's
 series and every `PlatformAgent`'s `status.usage`, `status.phase` and `status.inference` as gauges
 (`kubeagents_platformagent_usage`, `kubeagents_platformagent_usage_time_seconds`,
-`kubeagents_platformagent_phase`, `kubeagents_platformagent_model`; [Observability](https://gke-labs.github.io/kube-agents/concepts/observability/#prometheus-metrics))
+`kubeagents_platformagent_phase`, `kubeagents_platformagent_model`; [Observability](https://gke-labs.github.io/kube-agents/concepts/observability-exports/#prometheus-metrics))
 on port `8080` (container port `metrics`), plain HTTP on the pod network.
 `operator.metrics.podMonitoring` renders `<release>-operator-monitoring` over the operator's
 pods, the same `null` tri-state as `platformAgent.podMonitoring`, `litellm.podMonitoring`
@@ -797,7 +797,7 @@ a release that predates `operator.metrics` renders with the listener off until t
 `Rules` object in the release namespace with the install's At-Risk and Friction alerts over the
 operator's gauges (plus one over the A2A gateway's Slack connection gauge and one over the scrape
 jobs' `up`), and the recording rules for their ratios; the alerts are listed on
-[Observability](https://gke-labs.github.io/kube-agents/concepts/observability/#health-cohorts-and-alerts).
+[Observability](https://gke-labs.github.io/kube-agents/concepts/observability-exports/#health-cohorts-and-alerts).
 Off by default, and a plain boolean rather than the tri-state above: on means alerts fire,
 into Managed Prometheus's managed Alertmanager, which routes them by the `alertmanager` Secret
 in `gmp-public`; configure that first, since a Cloud Monitoring alerting policy does not read a
@@ -1148,7 +1148,7 @@ chart looks up the installed CRD and fails the upgrade instead.
 container the same way: forwarded to the CR's
 `spec.harness.experimental.shellSandbox.resources` when any key is set and merged
 over the operator's defaults per key, with the
-[`shellSandbox` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-crd/#shellsandbox)
+[`shellSandbox` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/#shellsandbox)
 canonical for the defaults and the refusals. The chart fails the render on the
 same shape faults (a key other than `requests`, `limits` and `claims`, a name
 the container does not declare, a quantity it cannot read) and leaves the
@@ -1180,7 +1180,7 @@ the render, because the operator forwards only literal values. Each apply that c
 that the chart renders replaces the full list on the CR, so entries added to the CR by hand are
 lost. Move them to `platformAgent.deployment.env` first. A re-tag to a chart without the value needs
 `upgrade.sh --drop-undeclared-values`. The
-[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops/#daily-alert-ceiling) gives
+[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#daily-alert-ceiling) gives
 the buckets, the defaults and a sizing method.
 
 `platformAgent.deployment.incidentMaxOpenPullRequests` limits how many triage pull requests are open
@@ -1189,7 +1189,7 @@ or being opened at once when `INCIDENT_TRIAGE_OPEN_PULL_REQUEST` is `"true"` in
 entry in the CR's `spec.deployment.env`; `0`, the default, is no limit and renders no entry. The same
 rules as `alertDailyLimits` apply: an entry with the same name in `platformAgent.deployment.env`
 wins, and a `valueFrom` entry for it fails the render while the key is above `0`. The
-[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops/#limiting-the-open-triage-pull-requests)
+[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#limiting-the-open-triage-pull-requests)
 says what is counted and what a held triage does.
 
 `platformAgent.deployment.evalRunTags` is for eval installs that run the replay proxy in front of
@@ -1222,7 +1222,7 @@ pod restart (at the next pod restart if the agent image is older than the operat
 install, apply the chart's `crds/` first: against a CRD that predates the field, the chart fails the
 upgrade instead of letting the API server prune the rules. A `helm upgrade` that removes the last
 rule also removes an `enabled: false` set on the CR by hand. The
-[`spec.harness.eventWatcher` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-crd/#specharnesseventwatcher)
+[`spec.harness.eventWatcher` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/#specharnesseventwatcher)
 gives the rule parts, how they match, and an example.
 
 `platformAgent.deployment.incidentWorkloadDedupSeconds` is the window in which a broken workload's
@@ -1233,7 +1233,7 @@ renders into the agent container, the same hour. The same precedence rules as th
 an entry of that name in `platformAgent.deployment.env` wins, and a `valueFrom` entry for it fails
 the render while the key is set. A re-tag to a chart that does not declare the key, after it was
 set, needs `upgrade.sh --drop-undeclared-values`. The
-[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops/#one-incident-per-workload)
+[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#one-incident-per-workload)
 has the fold rules.
 
 #### PlatformAgent annotations
@@ -1334,7 +1334,7 @@ These knobs need context beyond the chart:
   `excludeNamespaces`, `minStallAgeMinutes` and `kinds`. The default `{}`
   renders no block, and the watch keeps its own defaults. The operator delivers
   the values in the agent's managed `.env`, so a change rolls the agent pod. The
-  [`spec.harness.stallWatch` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-crd/#specharnessstallwatch)
+  [`spec.harness.stallWatch` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/#specharnessstallwatch)
   is canonical for each field and for the opt-out annotation. If a field is
   set, the chart fails the render against an installed CRD that predates
   `spec.harness.stallWatch`.

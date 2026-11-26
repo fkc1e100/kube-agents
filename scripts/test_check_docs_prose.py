@@ -343,6 +343,22 @@ class StructuralCeilingTest(SiteFixture):
         counts = prose.counts_of(self.findings(body))
         self.assertEqual(counts, {prose.KIND_PARAGRAPH: 1, prose.KIND_SENTENCE: 1})
 
+    def test_page_word_limit_tiers(self):
+        self.assertEqual(prose.page_word_limit("index.mdx"), prose.PAGE_WORD_LIMIT_OVERVIEW)
+        self.assertEqual(prose.page_word_limit("overview/architecture.mdx"), prose.PAGE_WORD_LIMIT_OVERVIEW)
+        self.assertEqual(prose.page_word_limit("install/quickstart-gke.mdx"), prose.PAGE_WORD_LIMIT_GUIDE)
+        self.assertEqual(prose.page_word_limit("concepts/chatops.md"), prose.PAGE_WORD_LIMIT_GUIDE)
+        self.assertEqual(prose.page_word_limit("operator/platformagent-crd.md"), prose.PAGE_WORD_LIMIT_REFERENCE)
+        self.assertEqual(prose.page_word_limit("reference/security-and-iam.md"), prose.PAGE_WORD_LIMIT_REFERENCE)
+
+    def test_overview_page_over_ceiling_fails_long_page(self):
+        # 200 short paragraphs of 10 words = 2000 prose words > 1500 overview ceiling
+        para = " ".join(["word"] * 10) + "."
+        body = "\n\n".join([para] * 200) + "\n"
+        path = self.write_page(body, "overview/too-long.md")
+        findings = prose.page_findings(path, path.read_text(encoding="utf-8"), key="overview/too-long.md")
+        self.assertEqual([f.kind for f in findings], [prose.KIND_PAGE])
+
 
 class RatchetTest(SiteFixture):
     def test_clean_site_with_no_ratchet_file_passes(self):

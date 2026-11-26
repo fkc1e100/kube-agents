@@ -1,16 +1,45 @@
 {
   "concepts/autonomous-watchdogs.md": {
-    "long-sentence": 35
+    "long-sentence": 35,
+    "long-page": 1
+  },
+  "concepts/chatops-a2a-gateway.md": {
+    "long-page": 1
+  },
+  "concepts/chatops-proactive-alerts.md": {
+    "long-page": 1
+  },
+  "concepts/chatops-slack.md": {
+    "long-page": 1
+  },
+  "concepts/chatops.md": {
+    "long-page": 1
   },
   "concepts/cluster-agents.md": {
     "long-paragraph": 4,
     "long-sentence": 10
   },
+  "concepts/declarative-workflow.md": {
+    "long-page": 1
+  },
   "concepts/governance-sops.md": {
     "long-sentence": 16
   },
+  "concepts/inference-litellm.md": {
+    "long-page": 1
+  },
+  "concepts/observability-exports.md": {
+    "long-sentence": 11,
+    "long-page": 1
+  },
   "concepts/observability.md": {
-    "long-sentence": 23
+    "long-sentence": 12
+  },
+  "deploy/docker-images.md": {
+    "long-page": 1
+  },
+  "deploy/fleet-sizing.md": {
+    "long-page": 1
   },
   "deploy/kustomize.md": {
     "long-paragraph": 2,
@@ -23,6 +52,9 @@
   "deploy/release-versioning.md": {
     "long-sentence": 3
   },
+  "deploy/rollback.md": {
+    "long-page": 1
+  },
   "deploy/telemetry.md": {
     "long-paragraph": 4,
     "long-sentence": 10
@@ -31,8 +63,8 @@
     "long-paragraph": 1,
     "long-sentence": 5
   },
-  "index.mdx": {
-    "long-sentence": 2
+  "install/bitbucket.md": {
+    "long-page": 1
   },
   "install/first-prompts.md": {
     "long-paragraph": 1,
@@ -40,15 +72,23 @@
   },
   "install/gitlab.md": {
     "long-paragraph": 2,
-    "long-sentence": 4
+    "long-sentence": 4,
+    "long-page": 1
   },
   "install/manual.md": {
     "long-sentence": 1
   },
+  "install/mcp.md": {
+    "long-page": 1
+  },
   "install/prerequisites.md": {
     "long-paragraph": 3,
     "long-table-cell": 1,
-    "long-sentence": 13
+    "long-sentence": 13,
+    "long-page": 1
+  },
+  "install/quickstart-gke.mdx": {
+    "long-page": 1
   },
   "install/slack-app.md": {
     "long-paragraph": 3,
@@ -58,6 +98,12 @@
     "long-paragraph": 3,
     "long-sentence": 9
   },
+  "install/upgrade-a2a-migration.md": {
+    "long-page": 1
+  },
+  "install/upgrade.md": {
+    "long-page": 1
+  },
   "operator/agentprofile-crd.md": {
     "long-sentence": 2
   },
@@ -66,18 +112,19 @@
     "long-sentence": 9
   },
   "operator/platformagent-crd.md": {
-    "long-sentence": 114
+    "long-sentence": 31,
+    "long-page": 1
   },
-  "overview/architecture.mdx": {
-    "long-paragraph": 2,
-    "long-sentence": 8
+  "operator/platformagent-harness.md": {
+    "long-sentence": 28,
+    "long-page": 1
   },
-  "overview/day-in-the-life.md": {
-    "long-paragraph": 2,
-    "long-sentence": 2
+  "operator/platformagent-profile-config.md": {
+    "long-sentence": 9
   },
-  "overview/what-is-kube-agents.md": {
-    "long-sentence": 1
+  "operator/platformagent-scope-integrations.md": {
+    "long-sentence": 46,
+    "long-page": 1
   },
   "reference/admin-console.md": {
     "long-sentence": 4
@@ -92,5 +139,14 @@
   "reference/resource-labels.md": {
     "long-paragraph": 3,
     "long-sentence": 7
+  },
+  "reference/security-and-iam.md": {
+    "long-page": 1
+  },
+  "reference/security-change-control.md": {
+    "long-page": 1
+  },
+  "reference/security-rbac.md": {
+    "long-page": 1
   }
 }

@@ -150,7 +150,7 @@ reads false — so the watcher process and its supervising subshell never exist,
 apply the change. Unset means enabled. Because the
 container stays Ready either way, the off state is reported in two places: a line in the sidecar log
 and the `EventWatcher` condition on the CR. Full semantics, and what the stop does _not_ do, are on
-[PlatformAgent CRD → `spec.harness.eventWatcher`](../../../docs/site/src/content/docs/operator/platformagent-crd.md#specharnesseventwatcher).
+[PlatformAgent CRD → `spec.harness.eventWatcher`](../../../docs/site/src/content/docs/operator/platformagent-harness.md#specharnesseventwatcher).
 
 ### Running the Binary Directly
 

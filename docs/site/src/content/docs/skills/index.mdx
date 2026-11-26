@@ -7,6 +7,19 @@ Every skill is a `SKILL.md` bundle. The Platform Agent's live in [`agents/platfo
 
 For how skills are structured and invoked, see [Concepts → Skills](/kube-agents/concepts/skills/).
 
+## Capabilities at a glance
+
+The 70+ GKE skills below map to six customer operational areas, backed by 13 blocking exam domains (`devops-bench`) that run on every release:
+
+| Operational area | What `kube-agents` handles | Live demo |
+| :--- | :--- | :--- |
+| **Reliability** | Diagnoses `CrashLoopBackOff`, `ImagePullBackOff`, OOMKills, stalled controllers, and PDB node-drain blockers, then drafts manifest fix PRs. | [Reliability demo](/kube-agents/deploy/web-console/#examples-in-action) |
+| **Security** | Audits default-deny NetworkPolicies, RBAC over-grants, privileged containers, Workload Identity bindings, and expired webhook CA certificates. | [Security demo](/kube-agents/deploy/web-console/#examples-in-action) |
+| **Upgrades** | Runs 25+ upgrade-readiness rules across release channels, deprecated APIs, PDB blockers, and post-upgrade recaps. | [Upgrades demo](/kube-agents/deploy/web-console/#examples-in-action) |
+| **Capacity** | Investigates pending pods, ComputeClass misconfigurations, GPU/TPU obtainability, and cluster autoscaler stockouts. | [Capacity demo](/kube-agents/deploy/web-console/#examples-in-action) |
+| **Cost** | Compares live node CPU/memory utilization against pod requests, flags orphaned disks and idle IPs, and drafts right-sizing PRs. | [Cost demo](/kube-agents/deploy/web-console/#examples-in-action) |
+| **Fleet audits** | Checks Argo CD / GitOps sync drift, peer-cluster kubelet consistency, and cross-project posture on a continuous schedule. | [Fleet audits demo](/kube-agents/deploy/web-console/#examples-in-action) |
+
 ## The catalogue
 
 Generated from the `name` and `description` frontmatter of every `SKILL.md` under `agents/platform/skills/`, `agents/cluster/skills/` and `agents/tse/skills/`.

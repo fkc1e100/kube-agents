@@ -367,7 +367,7 @@ master at once after a sandbox restart; the image's smoke test opens one master 
 64 sessions over it. More sessions mean more shells in the one pod, so the container's
 memory is the counterpart: `spec.harness.experimental.shellSandbox.resources` sizes the
 shell container, and the
-[CRD reference](../site/src/content/docs/operator/platformagent-crd.md#shellsandbox) owns
+[CRD reference](../site/src/content/docs/operator/platformagent-harness.md#shellsandbox) owns
 its defaults, merge rule and refusals.
 
 ### What the credential proxy is for

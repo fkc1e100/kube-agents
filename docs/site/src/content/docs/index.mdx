@@ -1,18 +1,22 @@
 ---
 title: kube-agents
-description: An autonomous agentic harness for Kubernetes. Proactive fleet audits, declarative GitOps remediation, and ChatOps in one place.
+description: An open-source GKE operations teammate. Read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests — backed by Google.
 template: doc
 tableOfContents: false
 hero:
   title: kube-agents
-  tagline: An autonomous agentic harness for Kubernetes. Watchdogs run in the background, remediation lands as pull requests, and Chat notifies you when it does.
+  tagline: An always-on GKE operations teammate. Read-only in your clusters, every fix a reviewed pull request, and your choice of model tokens.
   actions:
     - text: Quick start
       link: /kube-agents/install/quickstart-gke/
       icon: right-arrow
       variant: primary
-    - text: Concepts
-      link: /kube-agents/concepts/platform-agent/
+    - text: Why kube-agents
+      link: /kube-agents/overview/what-is-kube-agents/
+      icon: right-arrow
+      variant: secondary
+    - text: Live demos
+      link: /kube-agents/deploy/web-console/
       icon: right-arrow
       variant: secondary
     - text: GitHub
@@ -21,118 +25,116 @@ hero:
       variant: minimal
 ---
 
-import { Aside, CardGrid, LinkCard } from "@astrojs/starlight/components";
+import { Aside, Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
 import ChatDemo from "../../components/ChatDemo.astro";
 
 <ChatDemo />
 
-## What it is
+## What platform teams are measured on
 
-`kube-agents` runs autonomous agents inside your Kubernetes cluster: a **Planning Agent** front door that listens on Google Chat (and optionally Slack or Microsoft Teams) and turns what you ask for into work, a **Platform Agent** specialist it delegates that work to over a shared kanban board, and read-only per-cluster **Cluster Agents** the Platform Agent creates for the clusters it manages. The Platform Agent executes a growing library of Kubernetes skills on demand, and on its own schedule runs background watchdogs that audit the fleet and propose the mergeable fixes as GitHub pull requests you review.
+Platform owners are measured on three goals, in priority order. `kube-agents` runs continuously inside your GKE environment to give your team more reach on each one while keeping your engineers in control.
 
-It ships as a small set of components:
+<CardGrid>
+  <Card title="Keep production healthy" icon="approve-check-circle">
+    Checks every cluster against 25+ upgrade-readiness rules and watches drift,
+    stalled controllers, crash loops, security posture, and capacity around the
+    clock — flagging blockers before they page anyone.
+  </Card>
+  <Card title="Developer velocity" icon="rocket">
+    Developers ask in Google Chat, Slack, or the Web Console why a pod is
+    failing or how to right-size a service, and get a grounded answer or a pull
+    request to approve instead of waiting in a ticket queue.
+  </Card>
+  <Card title="Team efficiency" icon="setting">
+    Takes on routine upgrade checks, security patches, and repeat triage across
+    your fleet so platform engineers spend their time on hard architecture and
+    incident work.
+  </Card>
+  <Card title="Your team stays in control" icon="shield">
+    Read-only in your clusters, isolated credentials in a broker, and every
+    production change delivered as a pull request your team reviews and merges.
+  </Card>
+</CardGrid>
 
-- A **Kubernetes operator** (`k8s-operator`, Go / Kubebuilder) that reconciles a `PlatformAgent` custom resource.
-- An **agent Deployment** (running the [Hermes runtime](https://github.com/NousResearch/hermes-agent), `nousresearch/hermes-agent`) hosting co-located profiles: the Planning Agent (chat ingress, planning, and delegation), the Platform Agent (an opinionated persona, an MCP-based Kubernetes toolset, and a library of skills), and per-cluster Cluster Agents scaffolded on demand.
-- An **inference gateway** — [LiteLLM](https://litellm.ai) for hosted models (Gemini, Anthropic, OpenAI) or [vLLM](https://vllm.ai) for local models on GPU nodes.
-- The **A2A stack**, which every install puts in front of the agent: a NATS JetStream message bus, the A2A gateway that holds the chat backend, and the [A2A console](/kube-agents/reference/user-interfaces/#a2a-console), a browser page reached through `kubectl port-forward`.
+## Three reasons you can trust it
 
-<Aside type="note">
-  Today's shipping skills, install path, and MCP integrations target GKE. The
-  Platform Agent architecture — the agent Deployment, operator, inference
-  gateway, ChatOps ingress — is not GKE-specific and can extend to other
-  Kubernetes distributions as skills and toolsets are added.
-</Aside>
-
-## Two ways to think about it
+Many platform teams have tried building their own SRE agent; connecting a bot to chat was never the hard part. `kube-agents` is built around three design commitments.
 
 <CardGrid>
   <LinkCard
-    title="Proactive autonomy"
-    description="Scheduled watchdogs (blueprint sync, compliance audit, security patches, cost analysis, capacity orchestration…) run without prompting. Findings become a standing ledger issue on your GitOps repo and PRs you review."
-    href="/kube-agents/overview/proactive-autonomy/"
+    title="Built and tested in the open"
+    description="Apache 2.0 open source, built and maintained by Google engineers. Ships 70+ GKE skills gated by hands-on exams across 13 operational domains on every release."
+    href="/kube-agents/overview/trust-and-autonomy/"
   />
   <LinkCard
-    title="ChatOps interface"
-    description="Ask the agent things in Google Chat, Slack or Microsoft Teams. The Planning Agent works out what your request needs and hands it to the Platform Agent, which runs skills, inspects clusters through the Kubernetes MCP server, and reports back."
-    href="/kube-agents/concepts/chatops/"
+    title="Never acts alone"
+    description="Wire-level read-only Kubernetes access (Secrets redacted), credentialless shell sandbox, short-lived Cloud KMS forge tokens, and GitOps pull requests for every fix."
+    href="/kube-agents/reference/security-and-iam/#what-the-agent-can-and-cannot-do"
+  />
+  <LinkCard
+    title="Models, cost, and BYOT"
+    description="$0 software license, co-exists on any GKE Standard or Autopilot cluster, and brings your own tokens across Gemini, Claude, GPT, SAP AI Core, or self-hosted Gemma."
+    href="/kube-agents/overview/models-and-cost/"
+  />
+  <LinkCard
+    title="See it in action"
+    description="Watch six live Web Console walkthroughs covering reliability, capacity, security, GKE upgrades, cost right-sizing, and Argo CD fleet drift."
+    href="/kube-agents/deploy/web-console/"
   />
 </CardGrid>
 
-## What the agent can do out of the box
-
-The [skill catalog](/kube-agents/skills/) lists every skill the Platform, Cluster and GKE Support Agents ship, grouped by area, with its description and a link to its source.
-
-## Architecture at a glance
+## How it works in six steps
 
 ```mermaid
 flowchart LR
-    subgraph Users
-        GC[Google Chat]
-        SL[Slack]
-        BW[Browser]
-    end
+    U["1. Ask or get alerted<br/>Google Chat · Slack · Teams · Web Console"]
+    R["2. Read your GKE fleet<br/>Read-only K8s & GKE APIs<br/>(Secrets redacted)"]
+    M["3. Reason with your model<br/>LiteLLM gateway<br/>Gemini · Claude · GPT · SAP · Gemma"]
+    P["4. Open a pull request<br/>Short-lived KMS token<br/>GitHub · GHES · GitLab · Bitbucket · Gitea"]
+    H["5. Review and merge<br/>Approved by your team"]
+    G["6. GitOps applies<br/>Argo CD · Flux · Config Sync"]
 
-    subgraph Autonomy
-        CR[cron watchdogs]
-    end
-
-    subgraph Cluster
-        OP[k8s-operator]
-        subgraph A2A["A2A stack"]
-            GW[A2A gateway]
-            BUS[(NATS JetStream bus)]
-            CON[A2A console]
-        end
-        subgraph Pod["Agent pod (k8s-deployment)"]
-            BR[hermes-bridge]
-            CA["Planning Agent<br/>(default profile)"]
-            PA["Platform Agent<br/>(platform profile)"]
-            CL["Cluster Agents<br/>(cluster-* profiles)"]
-        end
-        LM[LiteLLM / vLLM]
-        MT[Minty<br/>GitHub token minter]
-    end
-
-    subgraph External
-        LLM[Gemini / Anthropic / OpenAI / Gemma]
-        GH[GitHub<br/>GitOps repo]
-    end
-
-    GC -->|Pub/Sub| GW
-    SL -->|Socket Mode| GW
-    BW -->|kubectl port-forward| CON
-    CON --> BUS
-    GW -->|task| BUS
-    BUS --> BR
-    BR -->|turn| CA
-    CA -->|kanban card| PA
-    PA -->|kanban card| CL
-    CR -->|scheduled prompts| PA
-    OP -->|reconciles PlatformAgent CR| Pod
-    OP -->|renders| A2A
-    Pod -->|Completions API| LM
-    LM --> LLM
-    PA -->|submit-suggestion skill| MT
-    MT -->|short-lived token| GH
-    PA -->|Kubernetes MCP| K8S[Kubernetes API]
-    GW -.->|proactive alert / relayed progress| GC
-    GW -.->|proactive alert / relayed progress| SL
+    U --> R --> M --> P --> H --> G
 ```
 
-The diagram shows a stock install ([the quick start](/kube-agents/install/quickstart-gke/#verify-the-a2a-stack)). The gateway serves Google Chat and Slack, either or both. Full walkthrough on the [Architecture](/kube-agents/overview/architecture/) page.
+`kube-agents` never mutates a cluster directly. Every diagnostic runs under a read-only identity, and every proposed fix lands as a pull request for your existing GitOps pipeline to apply. See [Architecture](/kube-agents/overview/architecture/) for the full pod topology and component map.
+
+## Explore the documentation
+
+<CardGrid>
+  <LinkCard
+    title="Why kube-agents"
+    description="Platform goals, why home-built SRE agents stall, and how always-on fleet care complements IDE coding agents."
+    href="/kube-agents/overview/what-is-kube-agents/"
+  />
+  <LinkCard
+    title="A day with kube-agents"
+    description="From hour-one fleet scan to day-one audits, team memory, and pull requests across real operational scenarios."
+    href="/kube-agents/overview/day-in-the-life/"
+  />
+  <LinkCard
+    title="Proactive autonomy"
+    description="Ten scheduled watchdogs covering security, upgrades, cost, capacity, stalls, and drift — with reproducible commands on every finding."
+    href="/kube-agents/overview/proactive-autonomy/"
+  />
+  <LinkCard
+    title="Skill catalog"
+    description="70+ GKE skills across reliability, security, upgrades, capacity, cost, and fleet audits, linked directly to source."
+    href="/kube-agents/skills/"
+  />
+</CardGrid>
+
+<Aside type="note">
+  Today's shipping skills, install path, and MCP integrations target GKE. The
+  operator, inference gateway, and ChatOps architecture can extend to other
+  Kubernetes distributions as skills and toolsets are added.
+</Aside>
 
 ## Install
 
-The fastest way to install `kube-agents` is from an official release:
+`kube-agents` is Apache 2.0 open source with no license fee or token markup. It installs into its own isolated `kubeagents-system` namespace on an existing GKE Standard or Autopilot cluster, or can bootstrap a new cluster for you.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSION>/install.sh | bash
-```
-
-_Substitute `<RELEASE_VERSION>` with the desired version tag from [GitHub Releases](https://github.com/gke-labs/kube-agents/releases) (for example, `0.19.0`)._
-
-To install from an unpacked release archive (recommended):
+Install from an unpacked official release archive (recommended):
 
 ```bash
 curl -fsSL https://github.com/gke-labs/kube-agents/releases/download/<RELEASE_VERSION>/kube-agents-<RELEASE_VERSION>.tar.gz | tar -xz
@@ -140,16 +142,16 @@ cd kube-agents-<RELEASE_VERSION>
 ./install.sh
 ```
 
-Alternatively, if you require a Git checkout, clone pinned to an official release tag:
+_Substitute `<RELEASE_VERSION>` with the latest tag from [GitHub Releases](https://github.com/gke-labs/kube-agents/releases) (for example, `0.39.0`)._
+
+Or run the one-liner directly in Google Cloud Shell or your terminal:
 
 ```bash
-git clone --branch <RELEASE_VERSION> https://github.com/gke-labs/kube-agents.git
-cd kube-agents
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSION>/install.sh | bash
 ```
 
-The installer bootstraps a GKE cluster, the operator CRDs, IAM bindings, Google Chat Pub/Sub, Kubernetes secrets, and the Platform Agent itself — one `terraform apply` through `terraform/examples/full-install`. See the [Quick start](/kube-agents/install/quickstart-gke/) for a step-by-step breakdown.
+See the [Quick start (GKE)](/kube-agents/install/quickstart-gke/) for prerequisites, existing-cluster vs. new-cluster options, and non-interactive flags.
 
 ## Disclaimer
 
-This is not an officially supported Google product.
+`kube-agents` is developed in the open on GitHub under the Apache 2.0 license by Google engineers and community contributors. This is not an officially supported Google product.

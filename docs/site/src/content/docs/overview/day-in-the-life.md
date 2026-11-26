@@ -1,9 +1,22 @@
 ---
 title: A day with kube-agents
-description: Three scenarios from trigger to pull request — a scheduled security audit, a crash loop that ends in a GitOps pull request, and a chat question.
+description: How teams adopt kube-agents from hour one to ongoing delegation, plus three end-to-end operational scenarios and live Web Console demos.
 ---
 
-Each scenario follows one trigger to the chat messages, issues and pull requests it produces. The install has a GitOps repository in `managed_repos` and at least one chat platform turned on. The A2A gateway holds Google Chat and Slack, either or both, and posts to the home channel set at install. Names such as `shop`, `checkout`, `redis` and `prod-east` are placeholders.
+## From install to part of the team
+
+At first `kube-agents` talks to you; over time your team talks back and hands it work, the way you onboard a new teammate.
+
+| Stage | What happens |
+| :--- | :--- |
+| **Hour one — It scans and finds something** | Install with one guided command in read-only mode. Its first scan ranks findings across your fleet so the first thing your team sees is a real issue worth fixing. |
+| **Day one — It talks to you** | First-run audits (cost, compliance, capacity, and upgrade history) post a ranked report in chat. If a GitOps repo is connected, fix PRs open automatically for the most severe manifest findings (at most five per run). |
+| **First weeks — You talk back** | Engineers ask follow-ups, approve or close PRs, and tell it what matters. Team decisions go into curated Git memory; formatting preferences stay in private personal memory. |
+| **Over time — You hand it work** | Developers and operators ask directly in chat or the Web Console to scale a service, add a node pool, or explain a failing pod. Every ask comes back as a grounded answer or a pull request to review. |
+
+Want to watch real cluster walkthroughs? See the six live [Web Console demos](/kube-agents/deploy/web-console/) covering reliability, capacity, security, GKE upgrades, cost right-sizing, and Argo CD fleet drift.
+
+Each scenario below follows one trigger to the chat messages, issues, and pull requests it produces. Names such as `shop`, `checkout`, `redis`, and `prod-east` are placeholders.
 
 ## A scheduled audit finds an exposed database
 
@@ -18,29 +31,23 @@ The run publishes to the GitOps repository:
 
 The privileged container gets no pull request. Its fix is `manual`, because dropping privilege can break a workload that needs one capability, so the ledger gives the steps and the owner decides. The harness opens pull requests and never merges them ([what the agent can and cannot do](/kube-agents/reference/security-and-iam/#what-the-agent-can-and-cannot-do)).
 
-Chat gets a short report on every enabled chat platform: a card with the headline "Security & RBAC Posture Audit: 2 critical findings", one row for each critical finding (up to ten), a "Look at the first one" button and a link to the ledger issue ([ChatOps → Proactive alerts](/kube-agents/concepts/chatops/#proactive-alerts-both-channels)). A reply in that thread reaches the Planning Agent with the report attached.
+Chat gets a short report on every enabled platform. The card shows the headline "Security & RBAC Posture Audit: 2 critical findings", lists up to ten critical findings, and links to the ledger issue ([Proactive alerts](/kube-agents/concepts/chatops-proactive-alerts/)). Replying in that thread reaches the Planning Agent with the report attached.
 
-The next morning nothing has changed. The run rewrites the ledger body and posts nothing in chat. After a reviewer merges the pull request and your GitOps tool applies it, the next run no longer finds the Service. It comments on the ledger with **1 resolved**, changes the title to `1 finding (1 critical)`, and the card in chat now reads "1 critical finding". When the Deployment is fixed too, the run comments "`compliance-audit` is now clean — closing", closes the ledger as completed, and closes any remediation pull request still open for the audit.
+The next morning nothing has changed, so the run rewrites the ledger quietly and stays silent in chat. Once a reviewer merges the PR and your GitOps tool applies it, the next run marks **1 resolved** and updates the ledger title. When both findings clear, it closes the ledger as completed.
 
-The ledger card needs `KAGE_SLACK_UX` on (the default) and a ledger on github.com; otherwise the chat gets the text lines. On a new install, this audit runs once after the onboarding scan, without waiting for its schedule ([ChatOps → First-run onboarding](/kube-agents/concepts/chatops/#first-run-onboarding)). The weekly cost audit, `fleet-wide-cost-analysis` (Fleet Waste Audit, Mondays at 07:50 UTC), works the same way. It reports orphaned volumes, unattached disks, idle addresses and over-requested workloads in resource units, never in dollars. [Reference → Cron jobs](/kube-agents/reference/cron-jobs/) lists every schedule.
-
-Without kube-agents, the Service stays exposed until someone reviews Services across every cluster by hand or a separate scanner reports it. Kubernetes reports the Service as healthy, because it does what the manifest asks. The privileged container stays the same way, and both fixes wait for someone to write them.
+On a new install, this audit runs once right after the initial fleet scan without waiting for its schedule. The weekly cost audit (`fleet-wide-cost-analysis`) works the same way, reporting orphaned volumes, unattached disks, idle IPs, and over-requested workloads. See [Reference → Cron jobs](/kube-agents/reference/cron-jobs/) for every schedule.
 
 ## A crash loop becomes a root cause and a pull request
 
-A config change rolls out to the `checkout` Deployment in namespace `shop` on cluster `prod-east`, and the new pods start to crash. Kubelet emits `BackOff` Warning events. The event watcher in the agent pod watches its own cluster and every cluster that has a Cluster Agent. By default, it forwards a pod's `BackOff` event once kubelet has reported it three times and the failure has lasted two minutes; one that clears sooner is not forwarded.
+A config change rolls out to the `checkout` Deployment in namespace `shop` on cluster `prod-east`, and the new pods start crashing. The event watcher forwards persistent `BackOff` warnings once a pod fails three times over two minutes; transient blips are ignored.
 
-kube-agents posts one alert in chat. On Google Chat it reads "🟡 **Warning:** Back off `shop/checkout` — _event message_", followed by "🌱 _Digging down to the root cause..._". On Slack it reads "🚨 **checkout in prod-east keeps crashing.** Looking now." The Planning Agent then files one card for the `prod-east` Cluster Agent.
+`kube-agents` posts a short alert in chat and files a card for the `prod-east` Cluster Agent. The Cluster Agent verifies its `kubeconfig` targets `prod-east` and runs read-only diagnostics (`describe`, logs, events).
 
-The Cluster Agent checks that its kubeconfig selects `prod-east`, then runs only read commands such as describe, logs and events. It completes the card with a report in three sections: "What's wrong", "Why" and "What to do". For example, the report can show that the container's last termination reason is `OOMKilled` against the memory limit in the manifest. When there are two or more fixes, they are lettered options with one marked as recommended. The report ends with the call to action: reply `apply` to open a GitOps pull request with the recommended fix, or `apply Option A` or `apply Option B`. It replaces the alert: the headline is the "What's wrong" sentence, with one button per option. The evidence sits in a folded section on Slack and as text under the headline on Google Chat.
+It returns a structured report with three sections — "What's wrong", "Why", and "What to do" — showing, for example, `OOMKilled` against the manifest's memory limit. When multiple fixes exist, it presents lettered options with one recommended, and asks the engineer to reply `apply` (or `apply Option A`).
 
-An engineer replies `apply` in the thread, or clicks the recommended option. The stored report goes with the reply to the Planning Agent, which sends the change to the Platform Agent. The Platform Agent uses the `submit-suggestion` skill. It edits the Deployment's manifest in the GitOps repository on a `platform-agent/` branch and opens a pull request (a merge request on GitLab). The thread then shows `I opened PR #<n> in <repo>. It's yours to review.` with Open PR and Files changed buttons.
+An engineer replies `apply` or clicks the recommended button. The Platform Agent runs `submit-suggestion`, edits the Deployment manifest on a `platform-agent/` branch, and opens a pull request (or merge request on GitLab). Nothing is written directly to `prod-east`; your team merges and your GitOps controller applies the fix.
 
-Nothing was written to `prod-east`. The pods keep crashing until a person merges the pull request and your GitOps tool applies it. The agent cannot merge, because the version-control broker has no merge operation. If the reviewer wants a change, they comment on the pull request with a comment that begins with `/agent`. The repository watcher runs every ten minutes, reads that comment from anyone with write access, and wakes the Platform Agent to amend the same branch.
-
-The Slack messages in this scenario (the one-sentence alert, the report that replaces it, and the pull request message with buttons) need `KAGE_SLACK_UX` on, the default. With it off, Slack gets the plain alert and report text. These event reasons can raise an alert: `Failed`, `FailedToDrainNode`, `CrashLoopBackOff`, `BackOff`, `ImagePullBackOff`, `ErrImagePull`, `OOMKilled` and `FailedScheduling`. So can the reasons Config Connector records on a managed resource it cannot apply: `UpdateFailed`, `DeleteFailed`, `DependencyNotReady`, `DependencyNotFound`, `DependencyInvalid`, `ManagementConflict`, `Unmanaged`, `PreActuationTransformFailed` and `PostActuationTransformFailed`. The watcher also reads the cluster autoscaler's scale-up decisions, but only to time a `FailedScheduling` alert: it waits while a new node comes up, and when the autoscaler declines to add one, it alerts on the scheduler's next retry without waiting for more repeats. Other reasons make no alert. By default, duplicates are suppressed per object and reason for 24 hours after the last sighting, so three crashing replicas can give three alerts. Across the fleet, chat gets at most 10 Critical and 5 Warning event alerts per UTC day by default, and a kubelet `BackOff` grades as Warning. Past the limit, chat shows nothing, and the weekday 21:00 UTC recap counts the dropped alerts. If both chat platforms are on, the alert goes to Google Chat, and to Slack only if Google Chat does not accept it ([ChatOps → Proactive alerts](/kube-agents/concepts/chatops/#proactive-alerts-both-channels)). The watcher re-reads the list of Cluster Agents every minute, so a cluster onboarded later is watched within about two minutes, with no restart ([watcher README](https://github.com/gke-labs/kube-agents/blob/main/k8s-operator/cmd/k8s-event-watcher/README.md)).
-
-Without kube-agents, the crash loop shows in pod status and events until someone looks or a separate alert rule fires. The person who responds then needs credentials for the cluster, runs the same reads by hand, and writes the manifest change themselves.
+If a reviewer wants changes, they comment `/agent ...` on the pull request and the Platform Agent amends the same branch. For full alert triggers, deduplication, and daily rate limits, see [ChatOps: Proactive alerts](/kube-agents/concepts/chatops-proactive-alerts/).
 
 ## A developer asks why a deployment is stuck
 

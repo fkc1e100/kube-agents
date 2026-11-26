@@ -1,78 +1,51 @@
 ---
-title: What is kube-agents
-description: The concrete artifacts that make up kube-agents — what installs where, and what runs when the operator is done reconciling.
+title: Why kube-agents
+description: What platform teams are measured on, why home-built SRE agents stall, and how always-on fleet care complements coding agents.
 ---
 
-`kube-agents` is a small collection of first-party components you install into a Kubernetes cluster (GKE today) plus a persona-and-skills workspace that tells the resulting agent how to behave.
+Platform teams run more clusters every year with the same headcount. `kube-agents` is an open-source GKE operations teammate that runs inside your environment around the clock, audits your fleet against Google-maintained skills, and proposes every fix as a pull request your team reviews.
 
-## The components
+## Three goals platform teams are measured on
 
-### 1. Kubernetes operator (`k8s-operator/`)
+1. **Keep production healthy.** Reliability, security, and cost problems are often found after they reach users or the bill. `kube-agents` checks every cluster against 25+ upgrade-readiness rules and watches drift, stalled controllers, crash loops, security posture, and capacity continuously.
+2. **Developer velocity.** Developers normally file tickets and wait on the platform team for routine requests. With `kube-agents`, they ask in chat — why a pod is failing, how to scale a service, or how to right-size requests — and get a grounded answer or a pull request to approve. Larger changes, such as a new node pool, come back as Terraform pull requests for the platform team.
+3. **Team efficiency.** Skilled engineers spend hours on entry-level toil: security patches, routine checks, and repeat questions. `kube-agents` takes on the repetitive inspection and PR drafting so each engineer can cover more clusters.
 
-A Go controller built with [Kubebuilder](https://kubebuilder.io) that defines the `PlatformAgent` custom resource and reconciles it into a running Platform Agent Deployment, Service, ServiceAccount, RBAC bindings, and a `ConfigMap` for the persona and skills, and the A2A stack below. Source: [`k8s-operator/`](https://github.com/gke-labs/kube-agents/tree/main/k8s-operator).
+Underneath all three goals is a single foundation: your team stays in control. `kube-agents` is read-only in your clusters, keeps credentials in an isolated broker, and routes every production change through your GitOps review process.
 
-### 2. The agent Deployment (Planning Agent + Platform Agent + Cluster Agents)
+## Why home-built SRE agents stall
 
-The `PlatformAgent` CR reconciles into a Deployment running the [Hermes runtime](https://github.com/NousResearch/hermes-agent). The default image is `ghcr.io/gke-labs/kube-agents/platform-agent`, built on top of `nousresearch/hermes-agent`. One gateway process hosts the co-located Hermes profiles:
+Connecting an LLM to Slack or Google Chat is easy. Keeping an operations agent safe and useful in production is hard for three reasons:
 
-**The Planning Agent** (`agents/chat/`, the `default` profile) — the conversational front door and the only profile that receives chat ingress. Its `agent_roster` plugin injects the current specialists into every turn, so picking one to delegate to costs no tool call below the [roster threshold](/kube-agents/concepts/chatops/). The `router` MCP server ([`agents/chat/scripts/router_server.py`](https://github.com/gke-labs/kube-agents/blob/main/agents/chat/scripts/router_server.py)) exposes the same list as `list_agents` for an on-demand refresh. Both render from [`agents/chat/scripts/agent_roster.py`](https://github.com/gke-labs/kube-agents/blob/main/agents/chat/scripts/agent_roster.py). It delegates work to the specialists as kanban cards and holds no infrastructure tools of its own.
+- **Production safety.** One bad command can take down a cluster, and an automated agent can run it fast. `kube-agents` enforces wire-level read-only Kubernetes access (with Secrets redacted), runs commands in a credentialless shell sandbox, and proposes every fix as a reviewed pull request.
+- **Keeping know-how current.** GKE APIs, release channels, and best practices change constantly. A home-built agent's prompts go stale unless a team maintains and tests them. `kube-agents` ships 70+ GKE skills kept current in the open and gated by hands-on failure exams (`devops-bench`) on every release.
+- **Accountability.** Engineers are accountable for production uptime. `kube-agents` never applies changes behind your back and attaches the exact reproducible read commands to every finding so your team can verify every claim.
 
-**The Platform Agent** (`agents/platform/`, the `platform` profile) — the privileged specialist, scaffolded at pod startup from the workspace template by `profile_scaffold.py`. Inside it:
+## Urgent care vs. preventive fleet care
 
-- **Persona (`SOUL.md`)** — the system prompt. Describes the Platform Agent's role, safety rails, kanban worker protocol, autonomous recovery ladder, and reporting style.
-- **Routing description (`CAPABILITIES.md`)** — the one-liner that describes this profile on the Planning Agent's roster, so it knows what to route here.
-- **Skills** (`agents/platform/skills/*/SKILL.md`) — Claude-style skill bundles the agent loads on demand.
-- **Governance SOPs** (`agents/platform/governance/*.md`) — standard operating procedures the cron watchdogs invoke.
-- **Cron watchdogs** (`agents/platform/cron/jobs.json`) — scheduled autonomous jobs, each pointing at a governance SOP. Ticking is a property of the Planning Agent's gateway, the only running one, so a job on its roster advances this profile's schedule once a minute.
-- **MCP servers** — declared in `agents/platform/config.yaml`. Shipping today: `platform_control` (an in-pod Python MCP server for session and agent-internal tooling) and `gke` (the [remote GKE MCP server](https://container.googleapis.com/mcp) via `mcp-remote`).
-- **Toolsets** — `cli` and `api_server` variants aggregate the MCP servers into what the Hermes CLI and REST API surface, plus a `kanban` toolset for creating and routing delegation cards.
+Teams often ask why an always-on cluster agent matters when engineers already use IDE or CLI coding agents (such as Antigravity or Claude Code). Think of the two as **urgent care** and **preventive care**: they solve different halves of operations and work best together.
 
-**The Cluster Agents** (`agents/cluster/`, per-cluster `cluster-*` profiles) — read-only single-cluster SREs, scaffolded at runtime from the baked template by `cluster_agent_profile.py`, one per managed GKE cluster. Each is pinned to its cluster (scoped `KUBECONFIG`, a `cluster_identity` block in its config), carries only the read-only `gke` and `developer_knowledge` MCP servers plus the runtime-debugging skills in `agents/cluster/skills/`, and returns diagnoses over the kanban board — it never mutates cluster state or opens PRs. See [Cluster Agents](/kube-agents/concepts/cluster-agents/).
+| Dimension | Coding agents (urgent care) | `kube-agents` (preventive fleet care) |
+| :--- | :--- | :--- |
+| **When it runs** | On-demand sessions triggered by an engineer for an incident, ticket, or feature; stops when the session closes. | 24/7 inside your cluster across 10 scheduled watchdogs, 30-minute stall sweeps, and live event triage. |
+| **State and memory** | Scoped to the active branch, pasted logs, and current window. | Longitudinal fleet record: standing audit ledgers, peer-cluster drift baselines, upgrade retros, and curated team decisions in Git. |
+| **Security boundary** | Usually runs with the engineer's workstation shell, local `kubeconfig`, and personal Git tokens. | Isolated read-only Kubernetes proxy (Secrets redacted), credentialless sandbox, short-lived KMS tokens, PR-only writes. |
+| **Primary strength** | Inner-loop code authoring, refactoring, and acute break-fix. | Continuous GKE-certified upkeep across 70+ skills and 13 exam domains. |
 
-### 3. Inference gateway
+**Better together via MCP:** Engineers can keep using their preferred IDE or CLI coding agent and connect it to `kube-agents`'s opt-in read-only A2A MCP endpoint (`A2A_MCP_DOOR=true`, over port-forward with no forge credentials). Local tools can request fleet diagnostics and inspect PRs without standing cluster write access. See [Using kube-agents over MCP](/kube-agents/install/mcp/).
 
-The Platform Agent talks to an LLM through a **Completions API** proxy so provider choice is a config toggle:
+## What installs on your cluster
 
-- **[LiteLLM](https://litellm.ai)** for hosted models — Gemini (default), Vertex AI / Model Garden, Anthropic, OpenAI, or a personal ChatGPT subscription — or for an OpenAI-compatible server you run ([`openai_compatible`](/kube-agents/concepts/inference-gateway/#openai-compatible-endpoints-self-hosted-or-private)), [SAP AI Core](/kube-agents/concepts/inference-gateway/#sap-ai-core) or any other LiteLLM provider. Example manifests: [`examples/litellm-gemini/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-gemini), [`examples/litellm-chatgpt-subscription/`](https://github.com/gke-labs/kube-agents/tree/main/examples/litellm-chatgpt-subscription).
-- **[vLLM](https://vllm.ai)** for local, open models on GPU node pools — [`examples/vllm-gemma/`](https://github.com/gke-labs/kube-agents/tree/main/examples/vllm-gemma) serves Gemma 4 26B-A4B through vLLM's OpenAI-compatible server on two L4 GPUs, with a 128k-token context.
-- An optional **inference-replay proxy** in front of either can cache responses from a `PersistentVolumeClaim` so demos and tests replay deterministically — [`examples/inference-replay/`](https://github.com/gke-labs/kube-agents/tree/main/examples/inference-replay).
+`kube-agents` installs into a single `kubeagents-system` namespace and co-exists safely on an existing GKE Standard or Autopilot cluster (no dedicated cluster required):
 
-### 4. GitHub Token Minter (Minty)
-
-Short-lived GitHub App installation tokens signed via GCP KMS and delivered through Workload Identity. This lets the `submit-suggestion` skill (and the `github-issue-resolver` watchdog) open pull requests against your GitOps repo without a long-lived PAT. Source: [`k8s-operator/config/integrations/github/`](https://github.com/gke-labs/kube-agents/tree/main/k8s-operator/config/integrations/github).
-
-### 5. The A2A stack
-
-The operator renders a message bus and its clients in front of the agent on every install ([the quick start](/kube-agents/install/quickstart-gke/#verify-the-a2a-stack)).
-
-- **The bus** (`<name>-a2a-nats`), a NATS JetStream StatefulSet, with an **auth callout** (`<name>-a2a-callout`, two replicas) that authenticates every bus client and a **capability verifier** (`<name>-a2a-verifier`, two replicas) that checks each submitted task. A provisioning Job creates the streams once.
-- **The A2A gateway** (`<name>-a2a-gateway`), which holds the chat backends: Google Chat and Slack, either or both. It publishes each message as a task on the bus and posts the answer back into the thread. With no chat platform enabled it runs on its console door alone ([Conversations through the A2A gateway](/kube-agents/concepts/chatops/#conversations-through-the-a2a-gateway)).
-- **The Hermes bridge**, a `hermes-bridge` container the operator adds to the agent pod. It takes tasks off the bus and runs each as a Planning Agent turn on the agent's API server.
-- **The A2A console** (`<name>-a2a-console`), a browser page over the bus with a chat pane, reached through `kubectl port-forward` ([User interfaces](/kube-agents/reference/user-interfaces/#a2a-console)).
-- **Session pods**, one per conversation moved onto the `/session` route, started by the gateway and deleted when idle. The [`AgentProfile`](/kube-agents/operator/agentprofile-crd/) resource describes further kinds of agent pod on the bus, dispatched by `<name>-a2a-dispatcher` (`operator.profileDispatcher.enabled: false` switches it off).
-- **The MCP server** (`<name>-a2a-mcp`), a [Model Context Protocol](/kube-agents/reference/a2a-mcp/) door for an external coding agent, rendered by default (`operator.mcpServer.enabled: false` switches it off).
-
-## What actually runs after installation
-
-Once the [installer](/kube-agents/install/quickstart-gke/) finishes, you have:
-
-- A GKE cluster with Workload Identity.
-- The operator controller manager Deployment.
-- One `PlatformAgent` custom resource and the three agent pods it reconciles into: the gateway running Hermes, the shell sandbox and the credential broker ([Credential isolation](/kube-agents/reference/credential-isolation/#pod-anatomy)).
-- The A2A stack: the bus, two auth callout and two verifier replicas, the A2A gateway, the A2A console, the MCP server and the profile dispatcher, with the `hermes-bridge` container added to the gateway pod. [Verify the A2A stack](/kube-agents/install/quickstart-gke/#verify-the-a2a-stack) lists the pods.
-- A LiteLLM Deployment (or vLLM if you opted in).
-- A Minty Deployment plus a GCP KMS keyring and key.
-- A Google Chat Pub/Sub topic + subscription and a Kubernetes `Secret` holding your model provider API key.
-- Optionally: Slack tokens in the credentials `Secret` (only if Slack was enabled at install).
-
-## What is _not_ included
-
-- **No local Kind install** — the installer and the Terraform composition it drives both target GKE, and a deployment needs a real GKE cluster. A kind cluster exists only as a development path for contributors; see [Helm and Kind](/kube-agents/install/helm-and-kind/). (For versioned Helm/Terraform installs on GKE, see [Helm and Kind](/kube-agents/install/helm-and-kind/).)
-- **One browser page by default, and no CLI outside the pod** — chat is the primary user interface. Every install serves the A2A console, reached through `kubectl port-forward`; the web console and the Hermes dashboard are opt-in, and the admin console runs on your own machine. [User interfaces](/kube-agents/reference/user-interfaces/) compares them. The Hermes CLI is reachable with `kubectl exec` into the agent pod; `kubectl port-forward` does not reach the agent pod, because the install defaults to a GKE Sandbox (gVisor) node pool whose loopback listeners it cannot reach. [ChatOps](/kube-agents/concepts/chatops/) is canonical.
-- **No cross-cloud abstractions** — the shipping MCP toolset, IAM assumptions, and install path all target GKE. The runtime and persona are cluster-agnostic; the skill catalog is not.
+- **Kubernetes operator (`k8s-operator/`)** — reconciles `PlatformAgent`, `AgentProfile`, `AgentPlugin`, `AgentSchedule`, and `Tier` custom resources.
+- **Agent runtime** — hosts the **Planning Agent** (chat front door and router), the **Platform Agent** (fleet audits, GitOps PRs, and skills), and per-cluster read-only **Cluster Agents** (single-cluster runtime debugging).
+- **Inference gateway (`LiteLLM`)** — one in-cluster OpenAI-compatible endpoint so you can switch models (Gemini, Claude, GPT, SAP AI Core, or self-hosted Gemma) in config without changing agent code.
+- **Security and A2A stack** — NATS JetStream message bus, A2A chat gateway (Google Chat, Slack, Microsoft Teams, Web Console), `k8s-api-proxy` (read-only enforcement), Envoy credential broker, and Minty (Cloud KMS short-lived GitHub App token minter).
 
 ## Where to go next
 
-- [Proactive autonomy](/kube-agents/overview/proactive-autonomy/) — the background watchdogs and how they close loops.
-- [Architecture](/kube-agents/overview/architecture/) — how requests and cron ticks flow through the components.
-- [Quick start (GKE)](/kube-agents/install/quickstart-gke/) — run the installer end-to-end.
+- [Architecture](/kube-agents/overview/architecture/) — request flows, pod topology, and deployment footprint.
+- [Models, cost, and BYOT](/kube-agents/overview/models-and-cost/) — supported model providers and typical token spend per task.
+- [Trust, security, and autonomy](/kube-agents/overview/trust-and-autonomy/) — read-only boundaries, 13-domain exams, earned autonomy ladder, and two-layer memory.
+- [A day with kube-agents](/kube-agents/overview/day-in-the-life/) — from hour-one scan to day-one audits and pull requests.

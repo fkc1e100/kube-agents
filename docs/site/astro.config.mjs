@@ -23,7 +23,7 @@ export default defineConfig({
     starlight({
       title: 'kube-agents',
       description:
-        'An autonomous agentic harness for Kubernetes. Proactive fleet audits, declarative GitOps remediation, and ChatOps in one place.',
+        'An open-source GKE operations teammate. Read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests — backed by Google.',
       logo: undefined,
       social: [
         {
@@ -96,9 +96,11 @@ export default defineConfig({
           label: 'Overview',
           items: [
             { label: 'Introduction', link: '/' },
-            { label: 'What is kube-agents', link: '/overview/what-is-kube-agents/' },
-            { label: 'Proactive autonomy', link: '/overview/proactive-autonomy/' },
+            { label: 'Why kube-agents', link: '/overview/what-is-kube-agents/' },
+            { label: 'Models, cost, and BYOT', link: '/overview/models-and-cost/' },
+            { label: 'Trust, security, and autonomy', link: '/overview/trust-and-autonomy/' },
             { label: 'A day with kube-agents', link: '/overview/day-in-the-life/' },
+            { label: 'Proactive autonomy', link: '/overview/proactive-autonomy/' },
             { label: 'Architecture', link: '/overview/architecture/' },
           ],
         },
@@ -117,6 +119,8 @@ export default defineConfig({
             { label: 'Bitbucket as the GitOps forge', link: '/install/bitbucket/' },
             { label: 'Gitea as the GitOps forge', link: '/install/gitea/' },
             { label: 'Upgrade', link: '/install/upgrade/' },
+            { label: 'Recovering install.env', link: '/install/upgrade-recovery/' },
+            { label: 'Upgrading to the A2A stack', link: '/install/upgrade-a2a-migration/' },
             { label: 'Uninstall', link: '/install/uninstall/' },
           ],
         },

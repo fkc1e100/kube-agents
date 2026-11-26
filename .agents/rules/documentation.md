@@ -113,3 +113,18 @@ cover the substance and stop: no filler sections, no summary that repeats the se
 boilerplate scaffolding a reader will skip. Anthropic's
 [Opus 5 prompting guide](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5)
 is the upstream source for both rules.
+
+## Where new behavior belongs (tier routing)
+
+`docs/site/src/content/docs/` separates product overview prose from task guides and deep technical
+reference, enforced by `long-page` word ceilings in `scripts/check_docs_prose.py`:
+
+- **Overview (`index.mdx`, `overview/*`, ceiling 1,500 prose words):** For evaluators and platform
+  leaders deciding whether to adopt `kube-agents`. Code PRs that change retry counts, error codes,
+  CRD flags, or internal edge cases must **not** append paragraphs here.
+- **Task guides (`install/*`, `deploy/*`, `concepts/*`, ceiling 3,000 prose words):** Concise,
+  task-oriented explanations and setup steps. When a page approaches its ceiling, split by subtopic
+  into a dedicated sibling page rather than appending.
+- **Technical reference (`operator/*`, `reference/*`, `skills/*`, ceiling 4,500 prose words):**
+  Detailed schemas, enforcement matrices, broker contracts, and troubleshooting tables. Keep
+  machine-generated tables inside `<!-- BEGIN GENERATED: ... -->` regions (`make docs-generate`).

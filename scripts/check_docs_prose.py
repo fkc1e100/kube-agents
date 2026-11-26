@@ -78,10 +78,14 @@ WRITE_RATCHET_FLAG = "--write-ratchet"
 RULE = ".agents/rules/documentation.md"
 
 # Structural ceilings. A paragraph a reader can hold in one go, a cell that
-# still reads as a table entry, and a sentence with one idea in it.
+# still reads as a table entry, a sentence with one idea in it, and a page
+# length matched to its reader tier (Overview vs. Guide vs. Reference).
 PARAGRAPH_WORD_LIMIT = 120
 CELL_WORD_LIMIT = 120
 SENTENCE_WORD_LIMIT = 40
+PAGE_WORD_LIMIT_OVERVIEW = 1500
+PAGE_WORD_LIMIT_GUIDE = 3000
+PAGE_WORD_LIMIT_REFERENCE = 4500
 
 # Fewer pages than this and the run reports an error rather than a clean tree.
 PAGE_COUNT_FLOOR = 1
@@ -92,7 +96,8 @@ KIND_ANTITHESIS = "antithesis"
 KIND_PARAGRAPH = "long-paragraph"
 KIND_CELL = "long-table-cell"
 KIND_SENTENCE = "long-sentence"
-KINDS = (KIND_BANNED_WORD, KIND_ANTITHESIS, KIND_PARAGRAPH, KIND_CELL, KIND_SENTENCE)
+KIND_PAGE = "long-page"
+KINDS = (KIND_BANNED_WORD, KIND_ANTITHESIS, KIND_PARAGRAPH, KIND_CELL, KIND_SENTENCE, KIND_PAGE)
 
 # The words the rule names, and the plain-language equivalents the issue
 # added. Whole words, case-insensitive. `leverage` is handled apart because
@@ -521,7 +526,16 @@ def banned_findings(path: Path, lines: list[str]) -> list[Finding]:
     return findings
 
 
-def page_findings(path: Path, text: str) -> list[Finding]:
+def page_word_limit(key: str) -> int:
+    """Prose word ceiling for a site page based on its reader tier."""
+    if key == "index.mdx" or key.startswith("overview/"):
+        return PAGE_WORD_LIMIT_OVERVIEW
+    if key.startswith(("install/", "deploy/", "concepts/")):
+        return PAGE_WORD_LIMIT_GUIDE
+    return PAGE_WORD_LIMIT_REFERENCE
+
+
+def page_findings(path: Path, text: str, key: str | None = None) -> list[Finding]:
     """Every finding on one page, in line order."""
     lines = prose_lines(text)
     findings = banned_findings(path, lines)
@@ -529,6 +543,11 @@ def page_findings(path: Path, text: str) -> list[Finding]:
         findings.extend(text_findings(path, start, block, KIND_PARAGRAPH, PARAGRAPH_WORD_LIMIT))
     for number, cell in table_cells(lines):
         findings.extend(text_findings(path, number, cell, KIND_CELL, CELL_WORD_LIMIT))
+    if key is not None:
+        total_words = sum(word_count(line) for line in lines)
+        limit = page_word_limit(key)
+        if total_words > limit:
+            findings.append(Finding(path, 1, KIND_PAGE, f"{total_words} words (limit {limit})"))
     findings.sort(key=lambda f: (f.line, KINDS.index(f.kind)))
     return findings
 
@@ -544,7 +563,10 @@ def page_key(page: Path, root: Path) -> str:
 
 def scan(root: Path = SITE_ROOT) -> dict[str, list[Finding]]:
     """Findings per page key, every page present even when clean."""
-    return {page_key(page, root): page_findings(page, page.read_text(encoding="utf-8")) for page in site_pages(root)}
+    return {
+        (k := page_key(page, root)): page_findings(page, page.read_text(encoding="utf-8"), key=k)
+        for page in site_pages(root)
+    }
 
 
 def counts_of(findings: list[Finding]) -> dict[str, int]:

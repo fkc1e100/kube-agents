@@ -169,7 +169,7 @@ it saw must be what is forwarded; the query check is also what keeps a byte`http
    and the exception type where there is one, never its message; the disabled-relay 503
    writes `api disabled request_id=%s rule=%s`. Each of these records also carries the
    `audit` mapping the exec route attaches to its records (the site's
-   [observability page](../site/src/content/docs/concepts/observability.md#cloud-logging)), so
+   [observability page](../site/src/content/docs/concepts/observability-exports.md#cloud-logging)), so
    a relayed read is in the same `tool_execution_audit` trail as a brokered command. The
    `tool` is `gcp-api`, apart from `gcloud` so that a `gcloud` record still means a process
    ran; the `subcommand` is the service word of a host the table names in the install's

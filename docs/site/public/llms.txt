@@ -1,0 +1,51 @@
+# kube-agents Documentation Index for AI Agents & Models
+
+> `kube-agents` is an open-source (Apache 2.0) GKE operations teammate: read-only fleet audits, 25+ upgrade-readiness rules, and reviewed GitOps pull requests across GitHub, GHES, GitLab, Bitbucket, and Gitea.
+
+## Product Overview
+- [Introduction](https://gke-labs.github.io/kube-agents/)
+- [Why kube-agents](https://gke-labs.github.io/kube-agents/overview/what-is-kube-agents/)
+- [Models, cost, and BYOT](https://gke-labs.github.io/kube-agents/overview/models-and-cost/)
+- [Trust, security, and autonomy](https://gke-labs.github.io/kube-agents/overview/trust-and-autonomy/)
+- [A day with kube-agents](https://gke-labs.github.io/kube-agents/overview/day-in-the-life/)
+- [Proactive autonomy](https://gke-labs.github.io/kube-agents/overview/proactive-autonomy/)
+- [Architecture](https://gke-labs.github.io/kube-agents/overview/architecture/)
+
+## Install & Operate
+- [Quick start (GKE)](https://gke-labs.github.io/kube-agents/install/quickstart-gke/)
+- [Prerequisites](https://gke-labs.github.io/kube-agents/install/prerequisites/)
+- [First prompts](https://gke-labs.github.io/kube-agents/install/first-prompts/)
+- [Using kube-agents over MCP](https://gke-labs.github.io/kube-agents/install/mcp/)
+- [Web Console & live demos](https://gke-labs.github.io/kube-agents/deploy/web-console/)
+- [Fleet sizing](https://gke-labs.github.io/kube-agents/deploy/fleet-sizing/)
+- [Upgrade](https://gke-labs.github.io/kube-agents/install/upgrade/)
+
+## Skill Catalog & Concepts
+- [Skill catalog (70+ GKE skills)](https://gke-labs.github.io/kube-agents/skills/)
+- [Platform Agent](https://gke-labs.github.io/kube-agents/concepts/platform-agent/)
+- [Cluster Agents](https://gke-labs.github.io/kube-agents/concepts/cluster-agents/)
+- [Autonomous watchdogs](https://gke-labs.github.io/kube-agents/concepts/autonomous-watchdogs/)
+- [Declarative workflow](https://gke-labs.github.io/kube-agents/concepts/declarative-workflow/)
+- [Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/)
+- [ChatOps](https://gke-labs.github.io/kube-agents/concepts/chatops/)
+- [Observability](https://gke-labs.github.io/kube-agents/concepts/observability/)
+
+## Operator & CRD Reference
+- [Operator overview](https://gke-labs.github.io/kube-agents/operator/)
+- [PlatformAgent CRD](https://gke-labs.github.io/kube-agents/operator/platformagent-crd/)
+- [PlatformAgent fields (generated)](https://gke-labs.github.io/kube-agents/operator/platformagent-fields/)
+- [PlatformAgent harness config](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/)
+- [PlatformAgent scope & integrations](https://gke-labs.github.io/kube-agents/operator/platformagent-scope-integrations/)
+- [AgentProfile CRD](https://gke-labs.github.io/kube-agents/operator/agentprofile-crd/)
+- [AgentPlugin CRD](https://gke-labs.github.io/kube-agents/operator/agentplugin-crd/)
+- [AgentSchedule CRD](https://gke-labs.github.io/kube-agents/operator/agentschedule-crd/)
+- [Tier CRD](https://gke-labs.github.io/kube-agents/operator/tier-crd/)
+
+## Security & Reference Specifications
+- [Security & IAM](https://gke-labs.github.io/kube-agents/reference/security-and-iam/)
+- [Security: Kubernetes RBAC](https://gke-labs.github.io/kube-agents/reference/security-rbac/)
+- [Credential isolation](https://gke-labs.github.io/kube-agents/reference/credential-isolation/)
+- [Cron jobs roster (generated)](https://gke-labs.github.io/kube-agents/reference/cron-jobs/)
+- [Container images (generated)](https://gke-labs.github.io/kube-agents/deploy/docker-images/)
+- [Configuration reference](https://gke-labs.github.io/kube-agents/reference/config/)
+- [A2A MCP reference](https://gke-labs.github.io/kube-agents/reference/a2a-mcp/)

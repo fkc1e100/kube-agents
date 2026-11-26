@@ -81,7 +81,7 @@ an existing install onto this manifest means deleting
 string `none`
 ([`deploy/shared/defaults/config.yaml`](../../../../deploy/shared/defaults/config.yaml))
 until the operator gives them their own caller key
-([which key each caller sends](../../../../docs/site/src/content/docs/concepts/inference-gateway.md#which-key-each-caller-sends)).
+([which key each caller sends](../../../../docs/site/src/content/docs/concepts/inference-litellm.md#which-key-each-caller-sends)).
 Hindsight always sends `none`. The value is a placeholder the OpenAI-compatible client
 insists on, not a credential; the gateway's caller-auth hook admits it as the
 `keyless` class ([`litellm_caller_auth.py`](../litellm/base/litellm_caller_auth.py)). The real provider keys (Gemini, Anthropic, OpenAI)
