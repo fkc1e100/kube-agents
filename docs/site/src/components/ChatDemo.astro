@@ -245,9 +245,9 @@ const agentIcon = `${base}/agent-icon.png`;
   .ka-chat__frame {
     border: 1px solid var(--sl-color-hairline);
     border-radius: 12px;
-    background: #0b1322;
+    background: var(--ka-surface);
     overflow: hidden;
-    box-shadow: 0 18px 40px -24px rgba(0, 0, 0, 0.9);
+    box-shadow: var(--ka-shadow-md);
   }
 
   /* --- window chrome --- */
@@ -256,7 +256,7 @@ const agentIcon = `${base}/agent-icon.png`;
     align-items: center;
     gap: 0.75rem;
     padding: 0.55rem 0.85rem;
-    background: var(--sl-color-bg-nav);
+    background: var(--ka-surface-alt);
     border-bottom: 1px solid var(--sl-color-hairline);
     font-size: 0.8125rem;
   }
@@ -304,7 +304,7 @@ const agentIcon = `${base}/agent-icon.png`;
     overflow-y: auto;
     padding: 1rem 1.1rem 1.25rem;
     scrollbar-width: thin;
-    scrollbar-color: #2090af80 transparent;
+    scrollbar-color: var(--sl-color-gray-4) transparent;
   }
   .ka-chat__scroll::-webkit-scrollbar {
     width: 0.75rem;
@@ -313,13 +313,13 @@ const agentIcon = `${base}/agent-icon.png`;
     background: transparent;
   }
   .ka-chat__scroll::-webkit-scrollbar-thumb {
-    background-color: #2090af80;
+    background-color: var(--sl-color-gray-4);
     border: 4px solid transparent;
     background-clip: content-box;
     border-radius: 10px;
   }
   .ka-chat__scroll::-webkit-scrollbar-thumb:hover {
-    background-color: #2acacacc;
+    background-color: var(--sl-color-gray-3);
   }
 
   .ka-msg {
@@ -384,11 +384,12 @@ const agentIcon = `${base}/agent-icon.png`;
    * markup, so the mention runs straight into the next word. Put the gap
    * back outside the chip, where the tint cannot swallow it. */
   .ka-mention {
-    color: var(--ka-cyan);
-    background: rgba(42, 202, 202, 0.12);
+    color: var(--sl-color-accent);
+    background: var(--ka-accent-soft);
     border-radius: 4px;
-    padding: 0 0.2rem;
+    padding: 0.05rem 0.28rem;
     margin-inline-end: 0.3em;
+    font-weight: 500;
   }
 
   /* Blinking caret while the prompt is being typed. */
@@ -398,7 +399,7 @@ const agentIcon = `${base}/agent-icon.png`;
     height: 1em;
     margin-inline-start: 1px;
     vertical-align: text-bottom;
-    background: var(--ka-cyan);
+    background: var(--sl-color-accent);
     animation: ka-blink 1s steps(2, start) infinite;
   }
   .ka-chat[data-playing] .ka-caret {
@@ -499,7 +500,7 @@ const agentIcon = `${base}/agent-icon.png`;
     font-weight: 700;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--ka-cyan);
+    color: var(--sl-color-accent);
   }
   .ka-report ul {
     margin: 0;
@@ -518,7 +519,7 @@ const agentIcon = `${base}/agent-icon.png`;
     width: 4px;
     height: 4px;
     border-radius: 50%;
-    background: var(--ka-cyan);
+    background: var(--sl-color-accent);
   }
   .ka-report ul.ka-tight li {
     margin-block: 0.2rem;
@@ -527,7 +528,7 @@ const agentIcon = `${base}/agent-icon.png`;
     font-family: var(--sl-font-system-mono);
     font-size: 0.8em;
     background: var(--sl-color-bg-inline-code);
-    color: var(--ka-violet);
+    color: var(--sl-color-purple);
     border-radius: 4px;
     padding: 0.05rem 0.3rem;
     white-space: nowrap;
@@ -545,20 +546,20 @@ const agentIcon = `${base}/agent-icon.png`;
     border-radius: 4px;
   }
   .ka-pill--ok {
-    background: rgba(88, 198, 96, 0.16);
-    color: var(--ka-green-bright);
+    background: var(--ka-green-soft);
+    color: var(--ka-green-text);
   }
 
   .ka-tablewrap {
     overflow-x: auto;
     scrollbar-width: thin;
-    scrollbar-color: #2090af80 transparent;
+    scrollbar-color: var(--sl-color-gray-4) transparent;
   }
   .ka-tablewrap::-webkit-scrollbar {
     height: 0.6rem;
   }
   .ka-tablewrap::-webkit-scrollbar-thumb {
-    background-color: #2090af80;
+    background-color: var(--sl-color-gray-4);
     border: 3px solid transparent;
     background-clip: content-box;
     border-radius: 10px;
@@ -572,8 +573,8 @@ const agentIcon = `${base}/agent-icon.png`;
   .ka-report th {
     text-align: left;
     font-weight: 600;
-    color: var(--ka-cyan-bright);
-    border-bottom: 1px solid var(--ka-cyan);
+    color: var(--sl-color-accent-high);
+    border-bottom: 1px solid var(--sl-color-accent);
     padding: 0.3rem 0.7rem 0.3rem 0;
     white-space: nowrap;
   }
@@ -593,7 +594,7 @@ const agentIcon = `${base}/agent-icon.png`;
     gap: 0.75rem;
     padding: 0.5rem 0.85rem;
     border-top: 1px solid var(--sl-color-hairline);
-    background: var(--sl-color-bg-nav);
+    background: var(--ka-surface-alt);
   }
   .ka-replay {
     display: inline-flex;
