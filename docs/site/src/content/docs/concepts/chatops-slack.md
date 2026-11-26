@@ -36,7 +36,7 @@ Slack ingress is gated by `SLACK_ALLOWED_USERS`, a comma-separated list of Slack
 
 ### Slash commands
 
-The gateway answers no registered slash command; it reads its own two, [`/session`](/kube-agents/concepts/chatops-a2a-gateway/#session) and [`/feedback`](/kube-agents/concepts/chatops-a2a-gateway/#feedback), from the message text ([What the gateway changes on Slack](/kube-agents/concepts/chatops-a2a-gateway/#what-the-gateway-changes-on-slack)).
+The gateway answers no registered slash command; it reads its own two, [`/session`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#session) and [`/feedback`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#feedback), from the message text ([What the gateway changes on Slack](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#what-the-gateway-changes-on-slack)).
 
 Until you do, a typed `/hermes <subcommand>` arrives as an ordinary channel message rather than a command. The `legacy_slash_commands` plugin on the Planning Agent profile unwraps that form before the gateway resolves it, so `/hermes sethome` behaves as `/sethome` either way — registering the slashes adds Slack's autocomplete, not the behaviour. The plugin's [README](https://github.com/gke-labs/kube-agents/blob/main/agents/chat/defaults/plugins/legacy_slash_commands/README.md) is the design of record.
 
@@ -68,7 +68,7 @@ With it unset and `spec.integration.slack.homeChannelPolicy` `auto` (the default
 
 `manual` turns the learn off, so `homeChannel` alone decides. A set `homeChannel` wins over a learned channel; the learned one stays in the record, so clearing the field returns to it. To forget it, delete that ConfigMap: the operator re-creates it empty, the file empties within about a minute, and the next mention learns again. A reply a person types in one of those threads starts a new conversation rather than continuing the investigation that raised the alert.
 
-To move it later, pick another channel on the app's Home tab ([the Slack Home tab](/kube-agents/concepts/chatops-a2a-gateway/#the-slack-home-tab)): the gateway checks the channel as it checks a mention and records it. One line in the new channel names who moved it, one in the old channel says it moved, and both pods follow within about two minutes.
+To move it later, pick another channel on the app's Home tab ([the Slack Home tab](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#the-slack-home-tab)): the gateway checks the channel as it checks a mention and records it. One line in the new channel names who moved it, one in the old channel says it moved, and both pods follow within about two minutes.
 
 A typed `@bot /sethome` or `@bot /hermes sethome` is answered by the Slack adapter with where to move it, the Home tab, and who may; it moves nothing, learns nothing and starts no task. The mention form reaches the agent: a bare `/sethome` is Slack's own slash command, refused by the client when it is not registered and dropped by the gateway when it is ([moving the app](/kube-agents/install/slack-app/#moving-an-app-made-for-the-hermes-listener) removes the block). Google Chat has no picker: its space field, or the space the gateway learned, decides.
 
@@ -218,7 +218,7 @@ On Google Chat, the report shows the same buttons. Google Chat draws every butto
 
 ### Files a card produced
 
-The gateway does not attach a file the card names in its `artifacts` list ([What the gateway changes on Slack](/kube-agents/concepts/chatops-a2a-gateway/#what-the-gateway-changes-on-slack)); the agent still has to declare the file for it to leave the sandbox. Its terminal and file tools run in a separate sandbox pod, so a file it writes is on a volume the gateway cannot read. Only the paths the `artifacts` list names are copied across to the gateway for delivery, and only for as long as the delivery takes.
+The gateway does not attach a file the card names in its `artifacts` list ([What the gateway changes on Slack](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#what-the-gateway-changes-on-slack)); the agent still has to declare the file for it to leave the sandbox. Its terminal and file tools run in a separate sandbox pod, so a file it writes is on a volume the gateway cannot read. Only the paths the `artifacts` list names are copied across to the gateway for delivery, and only for as long as the delivery takes.
 
 Four ceilings apply to that copy: 8 MiB per file, 16 files per card, 16 MiB across the card, and a two-minute deadline for the lot. A file that exceeds one is skipped with a warning in the gateway log while the rest of the card still delivers. Paths under the sandbox's credential and system directories are refused outright. [`agents/platform/scripts/sandbox_artifact_patch.py`](https://github.com/gke-labs/kube-agents/blob/main/agents/platform/scripts/sandbox_artifact_patch.py) holds the limits and the denied prefixes.
 

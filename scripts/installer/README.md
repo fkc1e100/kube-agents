@@ -764,7 +764,7 @@ keys in a new `install.env`, empty included. No flag sets them. `uninstall.sh` b
 value cannot stop a teardown. Only `install.sh`, the Day-2 menu and `upgrade.sh --upgrade-mode=full`
 apply these keys. The operator and harness modes of `upgrade.sh` use the values that the release
 recorded. But each `upgrade.sh` run calls the generator before it selects the mode, so a bad value
-stops the run in every mode. The [chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#daily-alert-ceiling)
+stops the run in every mode. The [chatops page](https://gke-labs.github.io../../docs/designs/internals/chatops-proactive-alerts.md#daily-alert-ceiling)
 gives the buckets, the defaults, and what happens to entries added to the CR by hand.
 
 ### The gateway's spend ceiling

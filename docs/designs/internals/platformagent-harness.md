@@ -1,9 +1,6 @@
----
-title: "PlatformAgent: Harness configuration"
-description: "Detailed reference for spec.harness fields, tuning, memory, and model configuration on PlatformAgent."
----
+# PlatformAgent: Harness configuration
 
-Part of [PlatformAgent CRD](/kube-agents/operator/platformagent-crd/).
+Part of [PlatformAgent CRD](../../site/src/content/docs/operator/platformagent-crd.md).
 
 ## `spec.harness`
 
@@ -29,7 +26,7 @@ Cloud and no other universe. The operator refuses it with `phase: Degraded`
 (`UniverseDomainMismatch`) and a message that says what to set, and `helm upgrade` fails on it.
 Set `googleapis.com` or omit the field.
 
-[PlatformAgent fields → Spec](/kube-agents/operator/platformagent-fields/#spec) lists every `spec.harness` field with its type, default and constraints. The sections below cover what each block does.
+[PlatformAgent fields → Spec](../../site/src/content/docs/operator/platformagent-fields.md#spec) lists every `spec.harness` field with its type, default and constraints. The sections below cover what each block does.
 
 `dashboardEnabled` publishes port `9119` on the agent Service, but nothing answers there: `hermes
 dashboard` binds `127.0.0.1`, so a request arriving over the pod network gets connection refused.
@@ -106,7 +103,7 @@ when the provider is Hindsight-backed (`--memory=hindsight`), and nothing when i
 The `k8s-event-watcher` runs in the gateway pod's `agent-api-auth` sidecar, streams warning events
 from every managed cluster, and posts each surviving incident to the pod-local Session KV server,
 which opens an autonomous triage session for it. `enabled: false` stops it from starting at all.
-Its Prometheus metrics are served on that sidecar's port 9095 and scraped by the chart's `<name>-gateway-monitoring` `PodMonitoring` on every replica; the `chat_metrics` plugin's port 9097 on the `platform-agent` container has its own, `<name>-gateway-chat-monitoring`, which selects the pod carrying the leader label; see [Concepts → Observability](/kube-agents/concepts/observability/).
+Its Prometheus metrics are served on that sidecar's port 9095 and scraped by the chart's `<name>-gateway-monitoring` `PodMonitoring` on every replica; the `chat_metrics` plugin's port 9097 on the `platform-agent` container has its own, `<name>-gateway-chat-monitoring`, which selects the pod carrying the leader label; see [Concepts → Observability](../../site/src/content/docs/concepts/observability.md).
 
 ```bash
 kubectl patch platformagent platform-agent -n kubeagents-system --type merge \
@@ -149,7 +146,7 @@ Three consequences before you press it:
 - **Nothing turns it back on.** An install left with the watcher off has no incident detection at
   all, and the container stays Ready throughout — the readiness probe covers the credential proxy,
   not the watcher. Two things say otherwise: a line in the sidecar log naming the consequence, and
-  the `EventWatcher` condition on the CR ([`status`](/kube-agents/operator/platformagent-crd/#status) below). Set `enabled: true`, or remove
+  the `EventWatcher` condition on the CR ([`status`](../../site/src/content/docs/operator/platformagent-crd.md#status) below). Set `enabled: true`, or remove
   the field, to start watching again.
 
 Unset means enabled. The watcher is how a fleet notices its own incidents, so an install that never
@@ -158,7 +155,7 @@ turns it off.
 
 `alertExclude` is the narrow tool: a list of rules for events that open no incident — no alert, no
 triage card, no share of the daily alert ceiling. Their clusters stay in scope, so the agent still
-reads them when asked; [`spec.scope.exclude`](/kube-agents/operator/platformagent-scope-integrations/#specscope) is what hides a cluster. Each rule sets one
+reads them when asked; [`spec.scope.exclude`](platformagent-scope-integrations.md#specscope) is what hides a cluster. Each rule sets one
 or more of `cluster`, `namespace`, `reason`, `kind` and `name`, and matches an event when every part
 it sets matches. `reason` and `kind` are matched without regard to case, and `reason` also matches
 the family the watcher groups a reason in, so
@@ -219,7 +216,7 @@ default stays off and the installer is what turns it on.
 It is not free either, and what it costs is GCP resources rather than cluster resources. The
 subscription it reads comes with an audit log sink and a Pub/Sub topic, all three from the
 `drift-pubsub` Terraform module, and the sink exports the admin-activity audit records of every GKE
-cluster in the project. On an install with a declared [`spec.scope`](/kube-agents/operator/platformagent-scope-integrations/#specscope), each project the
+cluster in the project. On an install with a declared [`spec.scope`](platformagent-scope-integrations.md#specscope), each project the
 scope lists gets a sink of its own into the same topic, and a change on a cluster there is enriched
 through that cluster's Cluster Agent profile and reported like one on the management cluster.
 
@@ -297,7 +294,7 @@ set by the Terraform module's log sinks, not by the CR.
 The controller stall watch is the `stall-watch` cron job on the Platform Agent's roster. Every 30
 minutes it runs `stall_report.py` over the namespaces of each cluster that has a Cluster Agent
 profile, and raises one alert for each namespace with a new stall
-([autonomous watchdogs](/kube-agents/concepts/autonomous-watchdogs/)). This block tunes what it
+([autonomous watchdogs](../../site/src/content/docs/concepts/autonomous-watchdogs.md)). This block tunes what it
 reads and when it alerts. Absent, the watch skips the system namespaces and annotated namespaces,
 alerts on the first sweep that sees a stall, and scans its default list of kinds.
 
@@ -343,7 +340,7 @@ left out on that cluster.
 The Config Connector wildcard is in the default list because a managed resource that Config
 Connector cannot apply shows it in two places only. The controller does not crash and logs only on
 the object. It records at most a Warning event there, which the event watcher forwards
-([a day in the life](/kube-agents/overview/day-in-the-life/) lists the reasons), and it sets the
+([a day in the life](../../site/src/content/docs/overview/day-in-the-life.md) lists the reasons), and it sets the
 object's own `Ready` condition. The `ConfigConnector` object's status reports the controller's
 health, not the health of the resources it manages. `stall_report.py` reads the `Ready` condition
 as a stale condition once it has been false for longer than the stall threshold, so a `SQLInstance`
@@ -381,7 +378,7 @@ HTTPRoute in front of it. A Cluster Agent that runs the `gke-stall-detection` sk
 reports an exempt object.
 
 The operator delivers the three values through the agent's managed `.env` (see
-[How config reaches each profile](/kube-agents/operator/platformagent-profile-config/)), so a change rolls the agent
+[How config reaches each profile](platformagent-profile-config.md)), so a change rolls the agent
 pod, and the agent cannot override a value from its own `.env`.
 
 The chart sets this block from `platformAgent.harness.stallWatch`. On an install made with
@@ -389,7 +386,7 @@ The chart sets this block from `platformAgent.harness.stallWatch`. On an install
 full-mode `install.sh` or `upgrade.sh` run applies; a `helm upgrade --set` value is dropped by the
 next full-mode run, and the watch then goes back to its defaults. `install.env` holds one such
 line, so if it already has a `platformAgent` key, put `harness={stallWatch={...}}` inside that key
-([Operator settings](/kube-agents/install/quickstart-gke/#operator-settings) says how the line
+([Operator settings](../../site/src/content/docs/install/quickstart-gke.mdx#operator-settings) says how the line
 works):
 
 ```bash
@@ -405,7 +402,7 @@ Execution limits per agent persona, where `<persona>` is one of `default` (the P
 door), `platform` (the Platform Agent), or `cluster` (**every** Cluster Agent), plus the board-wide
 `maxInProgress` and the dispatcher's memory `admission`, the session-pod cap `maxSessions`, the gateway's
 `defaultRoute`, the session pods' idle times `sessionIdleMinutes` and `dmSessionIdleMinutes`, and the AgentProfile knobs under
-`profiles` (the ceiling and its child reserve, `warmReplicas`, and the dispatcher's intervals; see [AgentProfile](./agentprofile-crd.md)). Unset,
+`profiles` (the ceiling and its child reserve, `warmReplicas`, and the dispatcher's intervals; see [AgentProfile](../../site/src/content/docs/operator/agentprofile-crd.md)). Unset,
 `maxSessions` renders `10`, `defaultRoute` renders `platform`, the gateway reaps an idle session pod after 30 minutes (5 for a DM conversation with one message so far), `profiles.ceiling` follows `maxInProgress` (`6` unless set) and `profiles.warmReplicas` `1`.
 
 `defaultRoute` is where the A2A gateway sends a plain conversation's first message: `platform` to the
@@ -427,22 +424,22 @@ The gateway's cap, the session quota and the provision Job's check follow the fi
 plain conversations to `platform`. The cap stays fitted until `TASKS` is widened. On a one-server bus,
 setting `busReplicas` to 3 widens it and keeps its history. On any bus, a new value on the
 `kubeagents.x-k8s.io/bus-reshape` annotation recreates it at the rendered width, keeping its messages
-([Recreating TASKS wider](/kube-agents/operator/platformagent-crd/#recreating-tasks-wider)). On an existing install, until the operator has read the width once, the
+([Recreating TASKS wider](../../site/src/content/docs/operator/platformagent-crd.md#recreating-tasks-wider)). On an existing install, until the operator has read the width once, the
 provision Job waits; a new install starts at `maxSessions`. On `platform` none of this runs.
 
 #### The session pods' cluster view
 
 On the session route, session pods get the read-only cluster view by default: `kubectl` through
 `<name>-kube-proxy` and read-only `gcloud` through the credential broker's `session` role ([Security
-and IAM](/kube-agents/reference/security-rbac/#each-a2a-session-pod-is-its-own-bus-identity)).
+and IAM](security-rbac.md#each-a2a-session-pod-is-its-own-bus-identity)).
 The view follows the route the operator resolved, so an install held on `platform` (no room for a
 session, or a CRD that prunes the cap) gets none. The operator's `A2A_SESSION_CLUSTER_VIEW` overrides
-it, set as [Operator settings](/kube-agents/install/quickstart-gke/#operator-settings) describes:
+it, set as [Operator settings](../../site/src/content/docs/install/quickstart-gke.mdx#operator-settings) describes:
 `"true"` turns the view on on any route, and `"false"` turns it off on the session route too. Unset or empty, it follows the route, and any other value is off. The flag doesn't change the route itself.
 
 Whoever can set `spec.harness.tuning.defaultRoute` on the PlatformAgent turns the view on with it; whoever runs the operator can turn it off for every install with `"false"`. On a `fleet`-tier install, a session
 pod's cluster-wide `kubectl` lists need more than the default session memory limit ([What each pod
-needs](/kube-agents/deploy/fleet-sizing/#what-each-pod-needs)).
+needs](../../site/src/content/docs/deploy/fleet-sizing.md#what-each-pod-needs)).
 
 **The per-run limits are opt-in.** The operator pins nothing of its own there: what a fleet needs
 depends on its model quota and on what its agents actually do, so a deployment doing short
@@ -454,9 +451,9 @@ which is a `hermes chat` process, with the chat CLI's own 500.
 
 The `platform` profile is the exception: the image ships `agent.max_turns: 150` in
 `agents/platform/config.yaml`, the budget its kanban workers run under, and the fleet audits
-([Cron jobs](/kube-agents/reference/cron-jobs/#the-shipping-jobs)) carry their own `max_turns: 250`
+([Cron jobs](../../site/src/content/docs/reference/cron-jobs.md#the-shipping-jobs)) carry their own `max_turns: 250`
 on their roster entries, which the scheduler reads ahead of the profile value;
-[Config reference](/kube-agents/reference/config/#agent) is canonical for why.
+[Config reference](../../site/src/content/docs/reference/config.md#agent) is canonical for why.
 
 Setting `tuning.platform.maxTurns` here still wins over the profile value — the overlay is merged
 after the image force-sync — and a roster entry's own `max_turns` only ever raises its job above
@@ -486,7 +483,7 @@ Effective `memoryBudgetMiB` must be at least `workerRssCapMiB` regardless of `fa
 renders setting `platformAgent.harness.tuning.admission` refuse a smaller budget against the
 `4096` / `1536` defaults, while webhook admission (where enabled) and operator `Degraded`
 (`InvalidKanbanAdmission`) evaluate both `tuning.admission` and `spec.deployment.resources`.
-[PlatformAgent fields](/kube-agents/operator/platformagent-fields/) lists the bounds.
+[PlatformAgent fields](../../site/src/content/docs/operator/platformagent-fields.md) lists the bounds.
 
 ```yaml
 spec:
@@ -746,7 +743,7 @@ Three things change while it is on:
 - The entrypoint stops force-syncing `profiles/platform/config.yaml` from the image and back-fills
   it instead, on the same terms as the `default` profile's own file (except the remote MCP server
   entries and the `plugins.enabled` list, which follow the image), so `/sethome` and `monitoring.install_id` survive a restart — see
-  [How config reaches each profile](/kube-agents/operator/platformagent-profile-config/).
+  [How config reaches each profile](platformagent-profile-config.md).
 
 Setting the field back to `false` reverses all three. The overlay records what it applied, so the
 keys are unapplied rather than left behind, and the force-sync resumes.
@@ -767,7 +764,7 @@ leave the Platform Agent unable to do the work the flag exists to let it do.
   ignored. Those requests now land on the Platform Agent rather than the Planning Agent.
 - The `hermes dashboard` sidecar is deliberately left on the `default` profile, so the dashboard
   shows that profile's sessions while the front door is the platform one.
-- **An [`AgentPlugin`](./agentplugin-crd.md) without a `spec.targetProfile` does not follow the
+- **An [`AgentPlugin`](../../site/src/content/docs/operator/agentplugin-crd.md) without a `spec.targetProfile` does not follow the
   gateway.** The two halves that decide whether it loads at all stay on the `default` profile: the
   image volume is mounted at `$HERMES_HOME/plugins/<name>`, and the name is added to that profile's
   `plugins.enabled`. With the flag on, the gateway is homed at `profiles/platform` and reads
@@ -785,7 +782,7 @@ leave the Platform Agent unable to do the work the flag exists to let it do.
   Those are `cluster-agent-reconcile`, which scaffolds a profile for a newly onboarded cluster and
   prunes one for a deleted cluster; `oobe`, which runs first-run onboarding (the
   `bootstrap-inventory-*` entries ship disabled); and `profile-cron-tick`, the only thing that ticks
-  a **named** profile's own store — so every `cluster-*` roster goes quiet with it, and so do the [idle-install hold](/kube-agents/concepts/autonomous-watchdogs/#idle-installs) on the Platform Agent's model-run jobs and the [catch-up policy](/kube-agents/concepts/autonomous-watchdogs/#catch-ups-after-a-pause) that thins them after a pause, which run inside that job. Nothing errors
+  a **named** profile's own store — so every `cluster-*` roster goes quiet with it, and so do the [idle-install hold](../../site/src/content/docs/concepts/autonomous-watchdogs.md#idle-installs) on the Platform Agent's model-run jobs and the [catch-up policy](../../site/src/content/docs/concepts/autonomous-watchdogs.md#catch-ups-after-a-pause) that thins them after a pause, which run inside that job. Nothing errors
   and nothing is logged: a job that is never ticked stays `scheduled` with a `next_run_at` in the
   past.
 
@@ -828,7 +825,7 @@ leave the Platform Agent unable to do the work the flag exists to let it do.
   `monitoring.install_id` survive — but the same change means a key the running agent writes there
   is not reverted at boot. Keys the image adds still arrive through the back-fill; keys already in
   the file stay as they were last written, except the remote MCP server entries, which follow the
-  image ([below](/kube-agents/operator/platformagent-profile-config/)). Operator-owned settings are unaffected: they
+  image ([below](platformagent-profile-config.md)). Operator-owned settings are unaffected: they
   come from the overlay and the `/etc/hermes` pins, both re-applied every boot.
 - Cluster profiles that already exist are otherwise unaffected — their config, skills and
   scaffolding on disk are unchanged and they keep working. What stops is the scheduled work above,
@@ -838,19 +835,19 @@ leave the Platform Agent unable to do the work the flag exists to let it do.
 #### `shellSandbox`
 
 - `enabled` — the agent's shell runs in a StatefulSet of its own, reached over SSH with the keypair in the agent's credential Secret (`SANDBOX_SSH_PRIVATE_KEY` and its public half in `<name>-shell-authorized-keys`). **This is not a toggle: `false` is refused** with `Degraded`/`ShellSandboxCannotBeDisabled`, which changes nothing about the running workload. Absent or `true` are the same thing. With no keypair the sandbox Pod cannot start at all — the Secret it mounts is not optional — so the operator reports `Degraded`/`ShellSandboxKeysMissing` rather than leaving the Pod in `ContainerCreating` with the reason only in a Pod event. `install.sh`, `upgrade.sh` and the Terraform composition generate the pair; a bare `helm install` that passes none, or a kustomize install (INSTALL.md Method 2) that skipped its Step 2, reaches that state.
-- `image` — overrides the sandbox image. Empty takes the operator's default. A pinned image must be at least as new as the operator. The operator runs the image's entrypoint in an init container that stages the image-shipped trees, and an older image does not have that mode, so the sandbox Pod never starts. A pin also survives every upgrade, and a sandbox older than the agent fails its `kubectl` calls at the credential proxy, so the operator reports the [`ShellSandboxPinned`](/kube-agents/operator/platformagent-crd/#status) condition while the pin differs from its own image.
-- `runtimeClassName` — runs the sandbox Pod under a sandboxed container runtime, `gvisor` being the one GKE offers. Unset by default. Separate from [`spec.deployment.availability.runtimeClassName`](/kube-agents/operator/platformagent-crd/#specdeployment), which governs the agent Pod: that Pod holds SQLite databases whose WAL mode gVisor corrupts on the gofer-backed mount, and setting the agent Pod's field pins Hermes' own databases to the DELETE journal mode (the Session KV store is not covered; see `availability.runtimeClassName` under [`spec.deployment`](/kube-agents/operator/platformagent-crd/#specdeployment)), while the sandbox Pod holds none — so an install can sandbox the untrusted Pod without sandboxing, or slowing, the trusted one.
+- `image` — overrides the sandbox image. Empty takes the operator's default. A pinned image must be at least as new as the operator. The operator runs the image's entrypoint in an init container that stages the image-shipped trees, and an older image does not have that mode, so the sandbox Pod never starts. A pin also survives every upgrade, and a sandbox older than the agent fails its `kubectl` calls at the credential proxy, so the operator reports the [`ShellSandboxPinned`](../../site/src/content/docs/operator/platformagent-crd.md#status) condition while the pin differs from its own image.
+- `runtimeClassName` — runs the sandbox Pod under a sandboxed container runtime, `gvisor` being the one GKE offers. Unset by default. Separate from [`spec.deployment.availability.runtimeClassName`](../../site/src/content/docs/operator/platformagent-crd.md#specdeployment), which governs the agent Pod: that Pod holds SQLite databases whose WAL mode gVisor corrupts on the gofer-backed mount, and setting the agent Pod's field pins Hermes' own databases to the DELETE journal mode (the Session KV store is not covered; see `availability.runtimeClassName` under [`spec.deployment`](../../site/src/content/docs/operator/platformagent-crd.md#specdeployment)), while the sandbox Pod holds none — so an install can sandbox the untrusted Pod without sandboxing, or slowing, the trusted one.
 
   On GKE Standard the cluster needs a node pool created with `--sandbox type=gvisor`; Autopilot ships the RuntimeClass natively. A RuntimeClass the cluster does not have leaves the CR `Degraded` naming it, rather than a Pod sitting `Pending`.
 
-- `resources` — requests and limits for the shell container. Merged per key over the operator's defaults, or over the [`sizingProfile`](/kube-agents/operator/platformagent-crd/#specdeployment) row when one is set, like `credentialProxy.resources` under [`spec.deployment`](/kube-agents/operator/platformagent-crd/#specdeployment): a CR that sets only the memory pair keeps the default 200m CPU request and 2 CPU limit. The defaults are a 512Mi memory request and a 2Gi memory limit. Only `cpu`, `memory` and `ephemeral-storage` are accepted.
+- `resources` — requests and limits for the shell container. Merged per key over the operator's defaults, or over the [`sizingProfile`](../../site/src/content/docs/operator/platformagent-crd.md#specdeployment) row when one is set, like `credentialProxy.resources` under [`spec.deployment`](../../site/src/content/docs/operator/platformagent-crd.md#specdeployment): a CR that sets only the memory pair keeps the default 200m CPU request and 2 CPU limit. The defaults are a 512Mi memory request and a 2Gi memory limit. Only `cpu`, `memory` and `ephemeral-storage` are accepted.
 
   The shell is where every model-authored command runs, so a fleet sweep that fans out many `kubectl` calls at once is bounded by this container's memory. On GKE Autopilot without bursting the limits are set equal to the requests, so there `requests.memory` is the figure that counts, with `limits.memory` to match. A change rolls the shell Pod, as an image change does; the image-trees init container and the gateway's sandbox sidecars keep their own figures.
 
-  The sandbox's memory guard stops the largest command before the container reaches its limit. The sign to raise the limit is a `shell-memory-guard` `killed` line in the shell Pod's log, or a `no-candidate` line when many small commands fill it ([fleet sizing](/kube-agents/deploy/fleet-sizing/)). Where the guard logs itself `disabled`, the sign is an OOMKill.
+  The sandbox's memory guard stops the largest command before the container reaches its limit. The sign to raise the limit is a `shell-memory-guard` `killed` line in the shell Pod's log, or a `no-candidate` line when many small commands fill it ([fleet sizing](../../site/src/content/docs/deploy/fleet-sizing.md)). Where the guard logs itself `disabled`, the sign is an OOMKill.
 
-  The operator refuses a request above its limit, a negative quantity, a zero limit, `claims`, and any other resource name, whether or not the webhook is on. It ignores the override, renders the shell at the profile's row (the operator's defaults under `small`), and reports `Degraded` with reason `InvalidShellSandboxResources` when no higher-ranked `Degraded` cause is present, the agent staying Ready. There is no memory floor. Where the [validating webhook](/kube-agents/operator/#admission-webhooks) is enabled, admission refuses the same override at apply, and warns on the GKE Autopilot memory-per-vCPU band and on a `cpu` or `memory` limit set without the same key under `requests`, for the reasons `credentialProxy.resources` gives.
+  The operator refuses a request above its limit, a negative quantity, a zero limit, `claims`, and any other resource name, whether or not the webhook is on. It ignores the override, renders the shell at the profile's row (the operator's defaults under `small`), and reports `Degraded` with reason `InvalidShellSandboxResources` when no higher-ranked `Degraded` cause is present, the agent staying Ready. There is no memory floor. Where the [validating webhook](../../site/src/content/docs/operator/index.md#admission-webhooks) is enabled, admission refuses the same override at apply, and warns on the GKE Autopilot memory-per-vCPU band and on a `cpu` or `memory` limit set without the same key under `requests`, for the reasons `credentialProxy.resources` gives.
 
 The GitHub-writing skills hand the credential broker file content and a commit message rather than a directory both sides mount, so the agent never holds a `.git`. There is no field for it: the broker keeps the checkout on its own state volume, which closes git's config-driven exec surface — a hook, a pager, a `filter.*.clean`, an `ext::` transport — and an install that could turn that off would be choosing to keep it open.
 
-The credential broker is a Deployment of its own, never a container of this Pod, so a proxied command reaches it over a ClusterIP Service and nothing crosses as a path. A document travels on stdin, a kubeconfig as a GKE context name, a commit as file content. [`spec.security.workloadIdentityFederation`](/kube-agents/operator/platformagent-crd/#specsecurity) is optional hardening on top of that, not what places it.
+The credential broker is a Deployment of its own, never a container of this Pod, so a proxied command reaches it over a ClusterIP Service and nothing crosses as a path. A document travels on stdin, a kubeconfig as a GKE context name, a commit as file content. [`spec.security.workloadIdentityFederation`](../../site/src/content/docs/operator/platformagent-crd.md#specsecurity) is optional hardening on top of that, not what places it.

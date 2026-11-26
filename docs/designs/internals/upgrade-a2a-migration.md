@@ -1,9 +1,6 @@
----
-title: "Upgrading to the A2A stack & troubleshooting"
-description: "Migrating older installs to the A2A stack, gateway ServiceAccount notes, and diagnosing refused upgrades."
----
+# Upgrading to the A2A stack & troubleshooting
 
-Part of [Upgrade](/kube-agents/install/upgrade/).
+Part of [Upgrade](../../site/src/content/docs/install/upgrade.md).
 
 ## Moving to the A2A stack
 
@@ -18,7 +15,7 @@ webhook rewrites `today` to `next` on the next write. The operator patches a sto
 `next` on its first pass, and records an Event with reason `ModeMigrated` on the `PlatformAgent`.
 `PLATFORM_AGENT_MODE` in `install.env` is read and ignored, with one notice; delete the line. There
 is no switch back: the way back is the previous release
-([Rolling back a release](/kube-agents/deploy/rollback/)).
+([Rolling back a release](../../site/src/content/docs/deploy/rollback.md)).
 
 [`docs/designs/spec-mode-switch.md`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/spec-mode-switch.md)
 is the design of record for the stack. This section covers what the move does to an install that
@@ -29,13 +26,13 @@ meets none of it.
 
 An install that ran without the stack has no A2A bus, so the upgrade creates one, and a new bus
 runs three NATS servers on separate nodes, each with a 40Gi JetStream claim
-([Cluster requirements](/kube-agents/install/prerequisites/#cluster-requirements)). On a Standard
+([Cluster requirements](../../site/src/content/docs/install/prerequisites.md#cluster-requirements)). On a Standard
 cluster that cannot grow to three nodes, set the chart value
 `platformAgent.harness.tuning.busReplicas: 1` (through `extra_helm_values`) before the upgrade. Once the
 bus exists, changing the count migrates it, keeping its data
-([Changing the bus's server count](/kube-agents/operator/platformagent-crd/#changing-the-buss-server-count)).
+([Changing the bus's server count](../../site/src/content/docs/operator/platformagent-crd.md#changing-the-buss-server-count)).
 The chart's quota check counts the whole stack
-([Footprint](/kube-agents/install/prerequisites/#footprint)); under a namespace quota sized for the
+([Footprint](../../site/src/content/docs/install/prerequisites.md#footprint)); under a namespace quota sized for the
 previous stack, `helm upgrade` is refused until the quota has room.
 
 With Google Chat or Slack on, a full run prints the chat setup checklist after "Upgrade
@@ -45,7 +42,7 @@ Complete!", so the app steps the gateway needs are on the screen after the move.
 
 With Google Chat enabled, the A2A gateway takes Google Chat. Each top-level
 message you send the app in a DM is then its own conversation, answered in its own thread, as on
-Slack ([ChatOps → Google Chat](/kube-agents/concepts/chatops/#google-chat)). The thing to set for
+Slack ([ChatOps → Google Chat](../../site/src/content/docs/concepts/chatops.md#google-chat)). The thing to set for
 it is the home channel, where alerts and scheduled reports land. The gateway posts them
 to `GOOGLE_CHAT_HOME_CHANNEL` in `install.env` (the `PlatformAgent`'s
 `spec.integration.googleChat.homeChannel`), which must be a space name, `spaces/<id>`, or, with
@@ -58,7 +55,7 @@ the gateway makes the space of the first top-level mention of the agent in a nam
 channel, and the agent posts nothing unprompted until then.
 
 Before the upgrade, set `GOOGLE_CHAT_HOME_CHANNEL` in `install.env`, so the full run applies it
-([ChatOps → Home channel](/kube-agents/concepts/chatops-slack/#home-channel)). After it, check that
+([ChatOps → Home channel](../../site/src/content/docs/concepts/chatops-slack.md#home-channel)). After it, check that
 a scheduled report or an alert reaches that space.
 
 With Slack enabled too, the same gateway takes Slack. The Slack steps below apply as they do
@@ -66,14 +63,14 @@ with Google Chat off.
 
 ### Before the upgrade
 
-1. Check that Slack answers now, as in [Checking the result](/kube-agents/install/upgrade/#slack).
+1. Check that Slack answers now, as in [Checking the result](../../site/src/content/docs/install/upgrade.md#slack).
 2. Check the Slack settings the gateway depends on. A full upgrade refuses a run that
    would hand the gateway a setting it cannot use, and names it
    ([When an upgrade is refused](#when-an-upgrade-is-refused)); `--plan` warns of the same
    ones. Checking first saves a refused run:
    - The bot token is one `xoxb-` token, not a comma-separated list: the A2A gateway takes a
      single workspace's token
-     ([Get the tokens](/kube-agents/install/slack-app/#get-the-tokens)). This counts the
+     ([Get the tokens](../../site/src/content/docs/install/slack-app.md#get-the-tokens)). This counts the
      `xoxb-` tokens in the installer's Secret without printing them, and should print `1`:
 
      ```bash
@@ -85,14 +82,14 @@ with Google Chat off.
      `spec.integration.slack.botTokenSecretRef`, if set, names this Secret and key.
 
    - `SLACK_ALLOWED_USERS` in `install.env` holds member IDs such as `U0123ABCD`, not emails
-     ([Allowed users](/kube-agents/install/slack-app/#allowed-users)).
+     ([Allowed users](../../site/src/content/docs/install/slack-app.md#allowed-users)).
    - `SLACK_HOME_CHANNEL` in `install.env` is the ID of the channel for alerts and scheduled
      reports: `C…`, or `G…` for some private channels. The gateway posts the agent's
      proactive messages to this channel, or, with it empty and `homeChannelPolicy` auto (the
      default), to the channel of the first top-level mention of the agent. A `/sethome` home
      channel does not carry over. A DM ID (`D…`) or a channel name turns off the gateway's
      notify route, and with it the reports of board cards
-     ([Slack app setup → Home channel](/kube-agents/install/slack-app/#home-channel)). With no home
+     ([Slack app setup → Home channel](../../site/src/content/docs/install/slack-app.md#home-channel)). With no home
      channel those posts go to Google Chat's home channel, or are refused when Chat has none either,
      while conversations keep working. The run warns, and the `PlatformAgent` carries
      `HomeChannelUnset`.
@@ -122,7 +119,7 @@ with Google Chat off.
 4. Upgrade when nobody is using the agent, and tell its users that Slack will not answer for a
    while.
 
-Then [run the upgrade](/kube-agents/install/upgrade/#run-the-upgrade) in the default full mode: pass no `--upgrade-mode`. An
+Then [run the upgrade](../../site/src/content/docs/install/upgrade.md#run-the-upgrade) in the default full mode: pass no `--upgrade-mode`. An
 operator run moves the install too, since the operator renders the stack whatever the chart says,
 but only a full run re-renders `install.env`'s Slack and Google Chat settings onto the resource.
 
@@ -164,7 +161,7 @@ done
 It prints `connected` once the gateway has logged `slack connected`. The operator then restarts
 the agent's pod once more, to add the bridge that runs the gateway's tasks, and that can take a few
 minutes if the cluster has to add a node for it. Wait for the `PlatformAgent` to report `Ready`,
-then check Slack as in [Checking the result](/kube-agents/install/upgrade/#slack):
+then check Slack as in [Checking the result](../../site/src/content/docs/install/upgrade.md#slack):
 
 ```bash
 kubectl wait platformagent/platform-agent -n kubeagents-system --for=condition=Ready --timeout=15m
@@ -196,12 +193,12 @@ kubectl get platformagent platform-agent -n kubeagents-system \
 - **The home channel only from `install.env`**, as in step 2 above.
 
 Slash commands, buttons, cards and the other Slack features that do not carry over are listed in
-[ChatOps → What the gateway changes on Slack](/kube-agents/concepts/chatops-a2a-gateway/#what-the-gateway-changes-on-slack).
+[ChatOps → What the gateway changes on Slack](chatops-a2a-gateway.md#what-the-gateway-changes-on-slack).
 
 ### After the upgrade: the Slack app
 
-Once a DM gets an answer as in [Checking the result](/kube-agents/install/upgrade/#slack), edit the app as
-[Slack app setup → Moving an app made for the Hermes listener](/kube-agents/install/slack-app/#moving-an-app-made-for-the-hermes-listener)
+Once a DM gets an answer as in [Checking the result](../../site/src/content/docs/install/upgrade.md#slack), edit the app as
+[Slack app setup → Moving an app made for the Hermes listener](../../site/src/content/docs/install/slack-app.md#moving-an-app-made-for-the-hermes-listener)
 describes. Delete the slash commands from its manifest and leave interactivity on, since the gateway
 answers the buttons it draws. Edit the app rather than pasting the gateway's manifest over it: a
 manifest replaces the app's whole configuration, including its name. Do it after the upgrade rather
@@ -209,13 +206,13 @@ than before, because the Hermes listener answers slash commands until then. Unti
 command gets Slack's timeout error.
 
 A rollback to a release before the stack was unconditional keeps the stack: that release's
-operator reads `spec.mode: next` on the migrated object ([Rolling back a release](/kube-agents/deploy/rollback/)).
+operator reads `spec.mode: next` on the migrated object ([Rolling back a release](../../site/src/content/docs/deploy/rollback.md)).
 Slack returns to the credential broker and the Hermes listener only after that release's own
 switch back. A full run with `PLATFORM_AGENT_MODE=today` alone renders no field and changes
 nothing, so patch `spec.mode` to `today` first (the rollback page has the command). They answer
 the slash commands again then, so put the `commands` block back in the app's manifest. Conversations and cards started on the gateway do not carry back,
 for the same reasons as above. The bus volume and its credentials Secret stay;
-[Uninstall](/kube-agents/install/uninstall/#what-the-a2a-stack-leaves-behind) says how to remove
+[Uninstall](../../site/src/content/docs/install/uninstall.md#what-the-a2a-stack-leaves-behind) says how to remove
 them.
 
 
@@ -269,7 +266,7 @@ Terraform apply itself, so a full upgrade it stops has already applied the new r
   which kept its settings in the retired `k8s-operator/scripts/vars.sh` and never gained an
   `install.env`, is refused here: copy those settings into an `install.env` first.
   If the machine that held the file is gone, see
-  [Recovering `install.env`](/kube-agents/install/upgrade-recovery/).
+  [Recovering `install.env`](../../site/src/content/docs/install/upgrade-recovery.md).
 - **`GITHUB_APP_ID` is not a number.** The token minter needs the GitHub App's numeric ID, the "App
   ID" on the App's General settings page, not its name or slug. `--dry-run` refuses it too.
 - **The move leaves behind a commit marked as a breaking change.** When the target does not
@@ -278,7 +275,7 @@ Terraform apply itself, so a full upgrade it stops has already applied the new r
   before the Secret backfills if any has a `type!:` subject or a `BREAKING CHANGE:` footer, and
   names each one. Read them, then re-run with `--allow-breaking-downgrade`, in any mode. `--plan`
   warns instead. A move between two release tags to the newer one is not checked, and neither is a
-  run whose tag is read off the install. See [Rolling back a release](/kube-agents/deploy/rollback/).
+  run whose tag is read off the install. See [Rolling back a release](../../site/src/content/docs/deploy/rollback.md).
 - **The apply would destroy the gVisor node pool.** A full upgrade whose `ENABLE_GVISOR` resolves
   to `false` on a Standard install that runs the gVisor pool stops before `terraform apply`, after
   the CRDs (see above). With no

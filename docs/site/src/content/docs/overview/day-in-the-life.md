@@ -31,7 +31,7 @@ The run publishes to the GitOps repository:
 
 The privileged container gets no pull request. Its fix is `manual`, because dropping privilege can break a workload that needs one capability, so the ledger gives the steps and the owner decides. The harness opens pull requests and never merges them ([what the agent can and cannot do](/kube-agents/reference/security-and-iam/#what-the-agent-can-and-cannot-do)).
 
-Chat gets a short report on every enabled platform. The card shows the headline "Security & RBAC Posture Audit: 2 critical findings", lists up to ten critical findings, and links to the ledger issue ([Proactive alerts](/kube-agents/concepts/chatops-proactive-alerts/)). Replying in that thread reaches the Planning Agent with the report attached.
+Chat gets a short report on every enabled platform. The card shows the headline "Security & RBAC Posture Audit: 2 critical findings", lists up to ten critical findings, and links to the ledger issue ([Proactive alerts](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-proactive-alerts.md)). Replying in that thread reaches the Planning Agent with the report attached.
 
 The next morning nothing has changed, so the run rewrites the ledger quietly and stays silent in chat. Once a reviewer merges the PR and your GitOps tool applies it, the next run marks **1 resolved** and updates the ledger title. When both findings clear, it closes the ledger as completed.
 
@@ -47,7 +47,7 @@ It returns a structured report with three sections — "What's wrong", "Why", an
 
 An engineer replies `apply` or clicks the recommended button. The Platform Agent runs `submit-suggestion`, edits the Deployment manifest on a `platform-agent/` branch, and opens a pull request (or merge request on GitLab). Nothing is written directly to `prod-east`; your team merges and your GitOps controller applies the fix.
 
-If a reviewer wants changes, they comment `/agent ...` on the pull request and the Platform Agent amends the same branch. For full alert triggers, deduplication, and daily rate limits, see [ChatOps: Proactive alerts](/kube-agents/concepts/chatops-proactive-alerts/).
+If a reviewer wants changes, they comment `/agent ...` on the pull request and the Platform Agent amends the same branch. For full alert triggers, deduplication, and daily rate limits, see [ChatOps: Proactive alerts](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-proactive-alerts.md).
 
 ## A developer asks why a deployment is stuck
 

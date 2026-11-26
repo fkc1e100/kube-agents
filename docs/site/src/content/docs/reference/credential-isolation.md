@@ -13,7 +13,7 @@ This page summarizes the architecture. The canonical design — including scope,
 
 ## Pod anatomy
 
-This section has its own dedicated reference page: [Credential isolation: Pod anatomy](/kube-agents/reference/credential-isolation-pod-anatomy/).
+This section has its own dedicated reference page: [Credential isolation: Pod anatomy](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/credential-isolation-pod-anatomy.md).
 
 ## Credential placement
 
@@ -25,7 +25,7 @@ This section has its own dedicated reference page: [Credential isolation: Pod an
 | Session KV API key and HMAC salt | No                                                         | Yes, Secret-backed env                    | Yes, API key only                                                                                                                                                                                                                                                                                                                     |
 | Automatic KSA token mount        | Disabled                                                   | Disabled                                  | Disabled                                                                                                                                                                                                                                                                                                                              |
 | Explicit projected KSA token     | Broker audience                                            | Broker audience and `a2a-bus`             | Read-only, one-hour token                                                                                                                                                                                                                                                                                                             |
-| A2A session pod's broker token   | —                                                          | —                                         | Under the session pods' [cluster view](/kube-agents/operator/platformagent-harness/#the-session-pods-cluster-view), each session pod projects a token for the session audience; `<name>-kube-proxy` accepts it for `read-only-dry-run` `kubectl` (with `Secret` redaction) and the broker confers a role that reaches `gcloud` reads only |
+| A2A session pod's broker token   | —                                                          | —                                         | Under the session pods' [cluster view](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#the-session-pods-cluster-view), each session pod projects a token for the session audience; `<name>-kube-proxy` accepts it for `read-only-dry-run` `kubectl` (with `Secret` redaction) and the broker confers a role that reaches `gcloud` reads only |
 | Cloud identity via metadata      | None — unbound ServiceAccount                              | Yes                                       | Yes                                                                                                                                                                                                                                                                                                                                   |
 | gcloud/kubectl configuration     | No                                                         | No                                        | Private `emptyDir`                                                                                                                                                                                                                                                                                                                    |
 | GitHub installation token/cache  | No                                                         | No                                        | Private `emptyDir`                                                                                                                                                                                                                                                                                                                    |
@@ -50,7 +50,7 @@ Pod-wide `automountServiceAccountToken` is `false` on every pod (the A2A gateway
 | The broker                 | Audience `kubeagents-audit-report-store`                           | `/var/run/secrets/kubeagents/audit-report-store/token`; what it presents to the audit-report store listener. Not in the exec tier.                                            |
 | `agent-api-auth` alone     | Broker token, audience `kubeagents-credential-proxy-watcher`       | For the watchers' fleet and Pub/Sub calls.                                                                                                                                    |
 | The agent container        | Audience `a2a-bus`                                                 | `/var/run/secrets/a2a-bus/token`.                                                                                                                                             |
-| Each session pod           | Broker token, audience `kubeagents-credential-proxy-session`       | Under the session pods' [cluster view](/kube-agents/operator/platformagent-harness/#the-session-pods-cluster-view).                                                               |
+| Each session pod           | Broker token, audience `kubeagents-credential-proxy-session`       | Under the session pods' [cluster view](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#the-session-pods-cluster-view).                                                               |
 | The A2A MCP server's pod   | Broker token, audience `kubeagents-credential-proxy-mcp`           | `/var/run/secrets/a2a-mcp-broker/token`, unless `operator.mcpServer.enabled` is `false`.                                                                                      |
 | The scope publisher's Job  | Broker token, audience `kubeagents-credential-proxy-scope`         | `/var/run/secrets/kubeagents/credential-proxy/token`, while the publisher may run (the audience table's condition).                                                           |
 | The operator's manager pod | Audience `a2a-bus`                                                 | `/var/run/secrets/a2a-bus/token`. It authenticates to nothing until the identity map carries the operator's entry, which publishes `AgentProfile` cards on the A2A directory. |
@@ -116,11 +116,11 @@ Everything the agent executes — the wrappers, `execute_code`, and the file too
 
 ## Denying the sandbox the metadata server
 
-This section has its own dedicated reference page: [Credential isolation: Metadata denial & troubleshooting](/kube-agents/reference/credential-isolation-troubleshooting/).
+This section has its own dedicated reference page: [Credential isolation: Metadata denial & troubleshooting](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/credential-isolation-troubleshooting.md).
 
 ## Troubleshooting
 
-This section has its own dedicated reference page: [Credential isolation: Metadata denial & troubleshooting](/kube-agents/reference/credential-isolation-troubleshooting/).
+This section has its own dedicated reference page: [Credential isolation: Metadata denial & troubleshooting](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/credential-isolation-troubleshooting.md).
 
 ## Where to go next
 

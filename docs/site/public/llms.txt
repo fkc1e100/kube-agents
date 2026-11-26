@@ -19,6 +19,7 @@
 - [Web Console & live demos](https://gke-labs.github.io/kube-agents/deploy/web-console/)
 - [Fleet sizing](https://gke-labs.github.io/kube-agents/deploy/fleet-sizing/)
 - [Upgrade](https://gke-labs.github.io/kube-agents/install/upgrade/)
+- [Recovering install.env](https://gke-labs.github.io/kube-agents/install/upgrade-recovery/)
 
 ## Skill Catalog & Concepts
 - [Skill catalog (70+ GKE skills)](https://gke-labs.github.io/kube-agents/skills/)
@@ -27,25 +28,36 @@
 - [Autonomous watchdogs](https://gke-labs.github.io/kube-agents/concepts/autonomous-watchdogs/)
 - [Declarative workflow](https://gke-labs.github.io/kube-agents/concepts/declarative-workflow/)
 - [Inference gateway](https://gke-labs.github.io/kube-agents/concepts/inference-gateway/)
+- [Inference gateway: LiteLLM hosted providers](https://gke-labs.github.io/kube-agents/concepts/inference-litellm/)
+- [Inference gateway: Self-hosted & OpenAI-compatible](https://gke-labs.github.io/kube-agents/concepts/inference-self-hosted/)
 - [ChatOps](https://gke-labs.github.io/kube-agents/concepts/chatops/)
+- [ChatOps: Slack integration](https://gke-labs.github.io/kube-agents/concepts/chatops-slack/)
 - [Observability](https://gke-labs.github.io/kube-agents/concepts/observability/)
 
-## Operator & CRD Reference
+## Operator & Reference
 - [Operator overview](https://gke-labs.github.io/kube-agents/operator/)
 - [PlatformAgent CRD](https://gke-labs.github.io/kube-agents/operator/platformagent-crd/)
 - [PlatformAgent fields (generated)](https://gke-labs.github.io/kube-agents/operator/platformagent-fields/)
-- [PlatformAgent harness config](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/)
-- [PlatformAgent scope & integrations](https://gke-labs.github.io/kube-agents/operator/platformagent-scope-integrations/)
 - [AgentProfile CRD](https://gke-labs.github.io/kube-agents/operator/agentprofile-crd/)
 - [AgentPlugin CRD](https://gke-labs.github.io/kube-agents/operator/agentplugin-crd/)
 - [AgentSchedule CRD](https://gke-labs.github.io/kube-agents/operator/agentschedule-crd/)
 - [Tier CRD](https://gke-labs.github.io/kube-agents/operator/tier-crd/)
-
-## Security & Reference Specifications
 - [Security & IAM](https://gke-labs.github.io/kube-agents/reference/security-and-iam/)
-- [Security: Kubernetes RBAC](https://gke-labs.github.io/kube-agents/reference/security-rbac/)
 - [Credential isolation](https://gke-labs.github.io/kube-agents/reference/credential-isolation/)
 - [Cron jobs roster (generated)](https://gke-labs.github.io/kube-agents/reference/cron-jobs/)
 - [Container images (generated)](https://gke-labs.github.io/kube-agents/deploy/docker-images/)
 - [Configuration reference](https://gke-labs.github.io/kube-agents/reference/config/)
 - [A2A MCP reference](https://gke-labs.github.io/kube-agents/reference/a2a-mcp/)
+
+## Deep Internal Specifications (GitHub `docs/designs/internals/`)
+- [PlatformAgent harness configuration](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md)
+- [PlatformAgent scope, networking & integrations](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-scope-integrations.md)
+- [PlatformAgent profile config propagation](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-profile-config.md)
+- [Upgrading to the A2A stack & troubleshooting](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/upgrade-a2a-migration.md)
+- [ChatOps A2A gateway & conversations](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-a2a-gateway.md)
+- [ChatOps proactive alerts](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-proactive-alerts.md)
+- [Observability exported telemetry catalog](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/observability-exports.md)
+- [Security: Kubernetes RBAC](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/security-rbac.md)
+- [Security: Change control & safety](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/security-change-control.md)
+- [Credential isolation: Pod anatomy](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/credential-isolation-pod-anatomy.md)
+- [Credential isolation: Metadata denial & troubleshooting](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/credential-isolation-troubleshooting.md)

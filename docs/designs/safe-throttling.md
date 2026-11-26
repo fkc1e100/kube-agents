@@ -161,7 +161,7 @@ eviction fires at the request.
   ([`apply_kanban_scheduling.py`](../../deploy/docker/patches/apply_kanban_scheduling.py)) holds
   one slot for each class of card, user and background, posts `⏳ Queued` in the thread of a
   top-level user card that waits, and logs a saturated board. The CRD page's
-  [Why dispatch is capped by default](../site/src/content/docs/operator/platformagent-harness.md#why-dispatch-is-capped-by-default)
+  [Why dispatch is capped by default](internals/platformagent-harness.md#why-dispatch-is-capped-by-default)
   has the arithmetic behind the six.
 - A per-card `max_runtime_seconds`, enforced in the tick by `enforce_max_runtime()`: SIGTERM, a
   short grace, SIGKILL, then a write transaction that ends the run `timed_out` and returns the card

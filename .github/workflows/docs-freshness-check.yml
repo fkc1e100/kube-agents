@@ -76,11 +76,12 @@ jobs:
             if [ "$HAS_SCRIPTS" -gt 0 ]; then
               echo "- 💡 \`scripts/installer/\` modified: Consider updating \`scripts/installer/README.md\` or \`INSTALL.md\`." >> "$GITHUB_STEP_SUMMARY"
             elif [ "$HAS_OPERATOR" -gt 0 ]; then
-              echo "- 💡 \`k8s-operator/\` modified: Consider updating \`k8s-operator/README.md\` or \`docs/\`." >> "$GITHUB_STEP_SUMMARY"
+              echo "- 💡 \`k8s-operator/\` modified: Route internal edge-case specs to \`docs/designs/internals/\` (not \`docs/site/.../overview/\`); update \`k8s-operator/README.md\` or generated CRD tables via \`make docs-generate\`." >> "$GITHUB_STEP_SUMMARY"
             fi
             if [ "$HAS_SKILLS" -gt 0 ]; then
               echo "- 💡 \`agents/platform/skills/\` modified: Consider updating the corresponding \`SKILL.md\`." >> "$GITHUB_STEP_SUMMARY"
             fi
+            echo "- 📏 **Site tier routing (`.agents/rules/documentation.md`):** Never append internal error codes, retry counts, or edge cases to \`docs/site/src/content/docs/index.mdx\` or \`overview/\`." >> "$GITHUB_STEP_SUMMARY"
 
             echo "::notice title=Documentation Freshness Check::Code changes detected without corresponding documentation updates. Please review if READMEs, INSTALL.md, or docs/ require updates."
           fi

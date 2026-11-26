@@ -49,7 +49,7 @@ A streamed `get` can re-read a finished turn that delegated, outside the stream 
 
 The bridge offers `poll_events` too and forwards it to this server, so card reports that arrive after a `send_message` answer can be read with the `conversation_token` and `since` the answer gives.
 
-A `send_message` that answers a card's report passes `reply_to`, the task the report's heading gave as `on task`; the agent then reads that report before answering. That read happens on the [platform route](/kube-agents/concepts/chatops-a2a-gateway/#session), the install's default; a conversation on its own session pod does not read it yet. Without it, a reply under a report starts from the words alone.
+A `send_message` that answers a card's report passes `reply_to`, the task the report's heading gave as `on task`; the agent then reads that report before answering. That read happens on the [platform route](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-a2a-gateway.md#session), the install's default; a conversation on its own session pod does not read it yet. Without it, a reply under a report starts from the words alone.
 
 To rotate the token, write a new value into the Secret. The server reads the mounted file on every request, so the new token is accepted and the old one refused as soon as the kubelet updates the mount, usually within a minute. A blank value, or one holding a byte no request header could carry, is replaced: the operator mints a new token over it.
 
@@ -95,7 +95,7 @@ Names are the server's own memory, and every caller shares them, since all calle
 - `list` shows the named conversations, most recently used first, with token, description and last use; up to 50 are listed and the rest counted.
 - `new` creates a name, with an optional description of at most 200 characters, and refuses a name already in use.
 - `delete` forgets a name, given as the name or as the conversation's token. The conversation's history stays on the bus, and a session pod for it idles out on its own; to end one now, stop its running task and send `session_off` first.
-- `session_on`, `session_off` and `help` send `/session`, `/session off` or `help` on the conversation, exactly as `send_message` would, and return the answer. The first two are the gateway's commands ([`/session`](/kube-agents/concepts/chatops-a2a-gateway/#session)); `help` is a message to the agent, so it waits for a running turn to end first.
+- `session_on`, `session_off` and `help` send `/session`, `/session off` or `help` on the conversation, exactly as `send_message` would, and return the answer. The first two are the gateway's commands ([`/session`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-a2a-gateway.md#session)); `help` is a message to the agent, so it waits for a running turn to end first.
 
 The original client's `switch`, `debug_on`, `debug_off`, `transcript`, `clear_killed` and `status` are not offered; a call to one is answered with an error that says why, and `task_control` `get` reads a task's progress meanwhile.
 

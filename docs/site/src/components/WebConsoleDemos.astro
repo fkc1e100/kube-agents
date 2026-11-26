@@ -1,0 +1,224 @@
+---
+const BASE = '/kube-agents';
+
+const demos = [
+  {
+    id: 'reliability',
+    label: 'Reliability',
+    headline: 'Triage stalled workloads & PDB drain blockers',
+    summary:
+      'Diagnoses ImagePullBackOff leaving a PodDisruptionBudget at 0 allowed disruptions, opens a fix PR, and verifies Argo CD reaches Healthy and Synced.',
+    video: `${BASE}/web-console-demo-reliability.mp4`,
+  },
+  {
+    id: 'capacity',
+    label: 'Capacity',
+    headline: 'Unblock pending pods & ComputeClass misconfiguration',
+    summary:
+      'Investigates 16 Pending batch pods, detects CrdMisconfigured on ComputeClass, and generates a working fallback ComputeClass YAML.',
+    video: `${BASE}/web-console-demo-capacity.mp4`,
+  },
+  {
+    id: 'security',
+    label: 'Security',
+    headline: 'Audit NetworkPolicy gaps, RBAC & Workload Identity',
+    summary:
+      'Flags missing default-deny NetworkPolicies and unused Workload Identity bindings across clusters while transparently surfacing read-only Secret boundaries.',
+    video: `${BASE}/web-console-demo-security.mp4`,
+  },
+  {
+    id: 'upgrades',
+    label: 'Upgrades',
+    headline: 'Pre-window GKE 1.35 to 1.36 upgrade readiness',
+    summary:
+      'Evaluates control plane release channel, PDB node-drain blockers, and deprecated Kubernetes APIs against 25+ upgrade-readiness rules.',
+    video: `${BASE}/web-console-demo-upgrades.mp4`,
+  },
+  {
+    id: 'cost',
+    label: 'Cost',
+    headline: 'Compare live node utilization against pod requests',
+    summary:
+      'Surfaces over-provisioned CPU and memory requests alongside live node usage to recommend concrete right-sizing and CUD alignment.',
+    video: `${BASE}/web-console-demo-cost.mp4`,
+  },
+  {
+    id: 'rollback',
+    label: 'GitOps & Rollback',
+    headline: 'Verify GitOps sync & safe PR-driven rollbacks',
+    summary:
+      'Pinpoints OutOfSync Argo CD apps and broken Git paths with live kubectl evidence, keeping every remediation inside peer-reviewed GitOps PRs.',
+    video: `${BASE}/web-console-demo-rollback.mp4`,
+  },
+];
+---
+
+<div class="ka-demos not-content" data-ka-demos>
+  <div class="ka-demos-tabs" role="tablist" aria-label="Web Console domain demos">
+    {
+      demos.map((demo, i) => (
+        <button
+          type="button"
+          role="tab"
+          class:list={['ka-demos-tab', i === 0 && 'is-active']}
+          aria-selected={i === 0 ? 'true' : 'false'}
+          aria-controls={`ka-demo-panel-${demo.id}`}
+          id={`ka-demo-tab-${demo.id}`}
+          data-demo-target={demo.id}
+        >
+          {demo.label}
+        </button>
+      ))
+    }
+  </div>
+
+  <div class="ka-demos-panels">
+    {
+      demos.map((demo, i) => (
+        <div
+          role="tabpanel"
+          id={`ka-demo-panel-${demo.id}`}
+          aria-labelledby={`ka-demo-tab-${demo.id}`}
+          class:list={['ka-demos-panel', i === 0 && 'is-active']}
+          hidden={i !== 0}
+          data-demo-panel={demo.id}
+        >
+          <div class="ka-demos-meta">
+            <span class="ka-demos-pill">{demo.label}</span>
+            <h3>{demo.headline}</h3>
+            <p>{demo.summary}</p>
+          </div>
+          <div class="ka-demos-frame">
+            <video
+              controls
+              playsinline
+              muted
+              preload="metadata"
+              src={demo.video}
+            >
+              Your browser does not support embedded video.
+            </video>
+          </div>
+        </div>
+      ))
+    }
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('[data-ka-demos]').forEach((root) => {
+    const tabs = root.querySelectorAll<HTMLButtonElement>('[data-demo-target]');
+    const panels = root.querySelectorAll<HTMLElement>('[data-demo-panel]');
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.demoTarget;
+        tabs.forEach((t) => {
+          const active = t.dataset.demoTarget === target;
+          t.classList.toggle('is-active', active);
+          t.setAttribute('aria-selected', active ? 'true' : 'false');
+        });
+        panels.forEach((p) => {
+          const active = p.dataset.demoPanel === target;
+          p.classList.toggle('is-active', active);
+          p.hidden = !active;
+          const video = p.querySelector('video');
+          if (video && !active) video.pause();
+        });
+      });
+    });
+  });
+</script>
+
+<style>
+  .ka-demos {
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 14px;
+    background: var(--ka-surface);
+    box-shadow: var(--ka-shadow-sm);
+    overflow: hidden;
+    margin: 1.5rem 0 2.5rem;
+  }
+
+  .ka-demos-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0.75rem 1rem;
+    background: var(--ka-surface-alt);
+    border-bottom: 1px solid var(--sl-color-hairline);
+  }
+
+  .ka-demos-tab {
+    appearance: none;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--sl-color-gray-2);
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.45rem 0.9rem;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .ka-demos-tab:hover {
+    background: var(--ka-accent-soft);
+    color: var(--sl-color-accent);
+  }
+
+  .ka-demos-tab.is-active {
+    background: var(--sl-color-accent);
+    color: #ffffff;
+    font-weight: 600;
+  }
+
+  .ka-demos-panel {
+    padding: 1.5rem;
+  }
+
+  .ka-demos-meta {
+    margin-bottom: 1rem;
+  }
+
+  .ka-demos-pill {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--sl-color-accent);
+    background: var(--ka-accent-soft);
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    margin-bottom: 0.5rem;
+  }
+
+  .ka-demos-meta h3 {
+    margin: 0.25rem 0 0.4rem;
+    font-size: 1.25rem;
+    color: var(--sl-color-white);
+  }
+
+  .ka-demos-meta p {
+    margin: 0;
+    color: var(--sl-color-gray-2);
+    font-size: 0.95rem;
+    line-height: 1.55;
+    max-width: 68ch;
+  }
+
+  .ka-demos-frame {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--sl-color-hairline);
+    background: #0f172a;
+  }
+
+  .ka-demos-frame video {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 540px;
+  }
+</style>

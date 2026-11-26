@@ -77,15 +77,15 @@ leaves it alone, because Helm patches only the fields its render changes. The
 
 The memory request is also the dispatcher's admission budget, so the row's 6 GiB admits workers
 up to about 6 GiB of container memory
-([`tuning.admission`](/kube-agents/operator/platformagent-harness/#specharnesstuning)). Setting a
+([`tuning.admission`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#specharnesstuning)). Setting a
 request below `workerRssCapMiB` (`1536` MiB) without raising `admission.memoryBudgetMiB` or
 lowering `admission.workerRssCapMiB` puts one worker's cap above the pod's budget and is refused
 where the validating webhook is enabled or flagged `Degraded`.
 
 The shell sandbox's 2 vCPU and 2 GiB limits are the operator's defaults.
-[`shellSandbox.resources`](/kube-agents/operator/platformagent-harness/#shellsandbox) raises them one
+[`shellSandbox.resources`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#shellsandbox) raises them one
 key at a time. The sandbox runs on the node's default runtime unless
-[`spec.harness.experimental.shellSandbox.runtimeClassName`](/kube-agents/operator/platformagent-harness/#shellsandbox)
+[`spec.harness.experimental.shellSandbox.runtimeClassName`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#shellsandbox)
 names `gvisor`; the gateway pod's class is the separate `availability.runtimeClassName`, which
 the installer sets.
 
@@ -273,7 +273,7 @@ caveat beside it:
   memory limit, `limits.cpu` left at its default because the watcher's `GOMAXPROCS` follows it.
 - `platformAgent.deployment.env`: `KUBEAGENTS_AUDIT_AUTO_PROMOTE=false`, which keeps the fleet
   audits from opening remediation pull requests on their own. The window that folds a workload's
-  later events into [one incident](/kube-agents/concepts/chatops-proactive-alerts/#one-incident-per-workload) is
+  later events into [one incident](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/chatops-proactive-alerts.md#one-incident-per-workload) is
   an hour on every install and is not in the file: an `env` entry for it would override
   `platformAgent.deployment.incidentWorkloadDedupSeconds`, the key that turns it off.
 

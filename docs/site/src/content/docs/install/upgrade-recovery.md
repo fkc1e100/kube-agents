@@ -135,7 +135,7 @@ in the paragraph that starts "That precedence has a sharp edge" and the paragrap
 rebuilt file has more cases:
 
 - Without the GitHub App keys, a full upgrade stops while the token minter runs, and prints the
-  lines to set. See [When an upgrade is refused](/kube-agents/install/upgrade-a2a-migration/#when-an-upgrade-is-refused).
+  lines to set. See [When an upgrade is refused](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/upgrade-a2a-migration.md#when-an-upgrade-is-refused).
 - Without the GitLab keys, the `PlatformAgent` loses its GitLab repository.
 - Without the GitHub Enterprise Server keys, the `PlatformAgent` names its repository on github.com, and the agent loses its repositories on the instance.
 - Without `MODEL_PROVIDER=vertex_ai`, the upgrade deletes the LiteLLM service account and its

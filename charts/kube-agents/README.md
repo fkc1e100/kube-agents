@@ -779,7 +779,7 @@ When deploying via GitOps tools like ArgoCD, `helm template` passes the destinat
 `operator.metrics` is the operator's own listener: the manager serves controller-runtime's
 series and every `PlatformAgent`'s `status.usage`, `status.phase` and `status.inference` as gauges
 (`kubeagents_platformagent_usage`, `kubeagents_platformagent_usage_time_seconds`,
-`kubeagents_platformagent_phase`, `kubeagents_platformagent_model`; [Observability](https://gke-labs.github.io/kube-agents/concepts/observability-exports/#prometheus-metrics))
+`kubeagents_platformagent_phase`, `kubeagents_platformagent_model`; [Observability](https://gke-labs.github.io../../docs/designs/internals/observability-exports.md#prometheus-metrics))
 on port `8080` (container port `metrics`), plain HTTP on the pod network.
 `operator.metrics.podMonitoring` renders `<release>-operator-monitoring` over the operator's
 pods, the same `null` tri-state as `platformAgent.podMonitoring`, `litellm.podMonitoring`
@@ -797,7 +797,7 @@ a release that predates `operator.metrics` renders with the listener off until t
 `Rules` object in the release namespace with the install's At-Risk and Friction alerts over the
 operator's gauges (plus one over the A2A gateway's Slack connection gauge and one over the scrape
 jobs' `up`), and the recording rules for their ratios; the alerts are listed on
-[Observability](https://gke-labs.github.io/kube-agents/concepts/observability-exports/#health-cohorts-and-alerts).
+[Observability](https://gke-labs.github.io../../docs/designs/internals/observability-exports.md#health-cohorts-and-alerts).
 Off by default, and a plain boolean rather than the tri-state above: on means alerts fire,
 into Managed Prometheus's managed Alertmanager, which routes them by the `alertmanager` Secret
 in `gmp-public`; configure that first, since a Cloud Monitoring alerting policy does not read a
@@ -1148,7 +1148,7 @@ chart looks up the installed CRD and fails the upgrade instead.
 container the same way: forwarded to the CR's
 `spec.harness.experimental.shellSandbox.resources` when any key is set and merged
 over the operator's defaults per key, with the
-[`shellSandbox` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/#shellsandbox)
+[`shellSandbox` section of the CRD reference](https://gke-labs.github.io../../docs/designs/internals/platformagent-harness.md#shellsandbox)
 canonical for the defaults and the refusals. The chart fails the render on the
 same shape faults (a key other than `requests`, `limits` and `claims`, a name
 the container does not declare, a quantity it cannot read) and leaves the
@@ -1180,7 +1180,7 @@ the render, because the operator forwards only literal values. Each apply that c
 that the chart renders replaces the full list on the CR, so entries added to the CR by hand are
 lost. Move them to `platformAgent.deployment.env` first. A re-tag to a chart without the value needs
 `upgrade.sh --drop-undeclared-values`. The
-[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#daily-alert-ceiling) gives
+[chatops page](https://gke-labs.github.io../../docs/designs/internals/chatops-proactive-alerts.md#daily-alert-ceiling) gives
 the buckets, the defaults and a sizing method.
 
 `platformAgent.deployment.incidentMaxOpenPullRequests` limits how many triage pull requests are open
@@ -1189,7 +1189,7 @@ or being opened at once when `INCIDENT_TRIAGE_OPEN_PULL_REQUEST` is `"true"` in
 entry in the CR's `spec.deployment.env`; `0`, the default, is no limit and renders no entry. The same
 rules as `alertDailyLimits` apply: an entry with the same name in `platformAgent.deployment.env`
 wins, and a `valueFrom` entry for it fails the render while the key is above `0`. The
-[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#limiting-the-open-triage-pull-requests)
+[chatops page](https://gke-labs.github.io../../docs/designs/internals/chatops-proactive-alerts.md#limiting-the-open-triage-pull-requests)
 says what is counted and what a held triage does.
 
 `platformAgent.deployment.evalRunTags` is for eval installs that run the replay proxy in front of
@@ -1222,7 +1222,7 @@ pod restart (at the next pod restart if the agent image is older than the operat
 install, apply the chart's `crds/` first: against a CRD that predates the field, the chart fails the
 upgrade instead of letting the API server prune the rules. A `helm upgrade` that removes the last
 rule also removes an `enabled: false` set on the CR by hand. The
-[`spec.harness.eventWatcher` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/#specharnesseventwatcher)
+[`spec.harness.eventWatcher` section of the CRD reference](https://gke-labs.github.io../../docs/designs/internals/platformagent-harness.md#specharnesseventwatcher)
 gives the rule parts, how they match, and an example.
 
 `platformAgent.deployment.incidentWorkloadDedupSeconds` is the window in which a broken workload's
@@ -1233,7 +1233,7 @@ renders into the agent container, the same hour. The same precedence rules as th
 an entry of that name in `platformAgent.deployment.env` wins, and a `valueFrom` entry for it fails
 the render while the key is set. A re-tag to a chart that does not declare the key, after it was
 set, needs `upgrade.sh --drop-undeclared-values`. The
-[chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#one-incident-per-workload)
+[chatops page](https://gke-labs.github.io../../docs/designs/internals/chatops-proactive-alerts.md#one-incident-per-workload)
 has the fold rules.
 
 #### PlatformAgent annotations
@@ -1334,7 +1334,7 @@ These knobs need context beyond the chart:
   `excludeNamespaces`, `minStallAgeMinutes` and `kinds`. The default `{}`
   renders no block, and the watch keeps its own defaults. The operator delivers
   the values in the agent's managed `.env`, so a change rolls the agent pod. The
-  [`spec.harness.stallWatch` section of the CRD reference](https://gke-labs.github.io/kube-agents/operator/platformagent-harness/#specharnessstallwatch)
+  [`spec.harness.stallWatch` section of the CRD reference](https://gke-labs.github.io../../docs/designs/internals/platformagent-harness.md#specharnessstallwatch)
   is canonical for each field and for the opt-out annotation. If a field is
   set, the chart fails the render against an installed CRD that predates
   `spec.harness.stallWatch`.

@@ -1,9 +1,6 @@
----
-title: "PlatformAgent: Profile config propagation"
-description: "How PlatformAgent configuration reaches the Planning, Platform, and Cluster Agent profiles."
----
+# PlatformAgent: Profile config propagation
 
-Part of [PlatformAgent CRD](/kube-agents/operator/platformagent-crd/).
+Part of [PlatformAgent CRD](../../site/src/content/docs/operator/platformagent-crd.md).
 
 ## How config reaches each profile
 
@@ -17,7 +14,7 @@ read-only **managed scope** pinned over it.
 | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
 | `default`                                                     | Image-built base, writable on the PVC + `profile-default.overlay.yaml` merged at startup + a narrow set of keys pinned read-only at `/etc/hermes`                          | Agent owns the file, operator the pins                 |
 | `platform`                                                    | Image-built base + `profile-platform.overlay.yaml` merged at startup                                                                                                       | Image owns the base, operator the overlay              |
-| `platform`, with [`platformFrontDoor`](/kube-agents/operator/platformagent-harness/#platformfrontdoor) on | The same two inputs, but the base is back-filled rather than force-synced — and the `/etc/hermes` pins land here too, because that mount is machine-global                 | Agent owns the file, operator the overlay and the pins |
+| `platform`, with [`platformFrontDoor`](platformagent-harness.md#platformfrontdoor) on | The same two inputs, but the base is back-filled rather than force-synced — and the `/etc/hermes` pins land here too, because that mount is machine-global                 | Agent owns the file, operator the overlay and the pins |
 | `cluster-*`                                                   | Image-built base, copied when the profile is scaffolded and back-filled at startup + `profileclass-cluster.overlay.yaml`, plus `profile-<name>.overlay.yaml` if one exists | Image owns the base, operator the overlay              |
 | `tse` (optional, when enabled)                                | Image-built base at `/opt/tse-template`, force-synced at startup when `KUBE_AGENTS_ENABLED_PROFILES` contains `tse` + `profile-tse.overlay.yaml` if one exists             | Image owns the base, operator the overlay              |
 
@@ -29,7 +26,7 @@ wins any conflict.
 **Why `default` is also pinned.** The pins are the one change-control boundary the front door has:
 the agent's own config file is writable, so without them a bad runtime edit survives a restart. (It
 is _not_ a security sandbox — see the
-[AgentPlugin trust boundary](/kube-agents/reference/security-and-iam/#change-control--safety).)
+[AgentPlugin trust boundary](../../site/src/content/docs/reference/security-and-iam.md#change-control--safety).)
 
 **What is pinned is narrow, on purpose.** `/etc/hermes` is machine-global — one file for every
 profile in the pod, not just `default` — so it carries only what is identical for every profile
@@ -89,7 +86,7 @@ Hermes builds the terminal for some turns, among them a scheduled run and the tu
 starts, from the profile's own `.env` and `config.yaml`, so the managed `terminal.*` leaves do not
 reach them on their own. The entrypoint copies them into every profile's `.env` at
 start-up and refuses to start while a profile still resolves something else — see
-[Container entrypoint](/kube-agents/deploy/docker-images/#container-entrypoint).
+[Container entrypoint](../../site/src/content/docs/deploy/docker-images.md#container-entrypoint).
 
 `platforms.<platform>.home_channel` is deliberately **not** pinned, so `/sethome` can still set it
 from chat. The platform credentials and endpoints that have no `config.yaml` equivalent are pinned
@@ -116,7 +113,7 @@ The third is `KUBEAGENTS_MODE`, pinned to `next` until no supported agent image 
 removal of `today`, for an agent image older than the operator that still reads it. It is pinned because an absent key is a key the agent may write.
 
 The fourth is `KUBEAGENTS_SCOPE_FILE=/etc/kube-agents/scope.json`, where the reconcile finds the
-[`spec.scope`](/kube-agents/operator/platformagent-scope-integrations/#specscope) declaration. The container env carries it too, for the same reason as
+[`spec.scope`](platformagent-scope-integrations.md#specscope) declaration. The container env carries it too, for the same reason as
 `HERMES_HOME_MODE`: a line the agent writes into the PVC `.env` would otherwise outrank it and hand
 the reconcile a declaration the agent authored. Its readers are `agents/platform/scripts/cluster_agent_reconcile.py`, which resolves it every hour, and `fleet_scope_targets.py`, which reads it when no reconcile snapshot answers, or when the last snapshot recorded no boundary, for these callers:
 
@@ -148,7 +145,7 @@ none of whose entries is a member ID is pinned as `none`, which also matches nob
 a dial change against it before it records one. Unpinned, a line the agent wrote into the PVC `.env`
 could name who may change what the agent may change. It is not in the container env.
 
-The stall watch's three knobs from [`spec.harness.stallWatch`](/kube-agents/operator/platformagent-harness/#specharnessstallwatch) are pinned too:
+The stall watch's three knobs from [`spec.harness.stallWatch`](platformagent-harness.md#specharnessstallwatch) are pinned too:
 `STALL_WATCH_EXCLUDE_NAMESPACES` (a comma list), `STALL_WATCH_MIN_AGE_MINUTES` and
 `STALL_WATCH_KINDS` (a comma list, or `all`). They are pinned on every install, empty when the CR
 does not set them, and the watch reads an empty value as its default. Each one changes what the
@@ -158,7 +155,7 @@ alerts for a namespace nobody excluded. They are not in the container env.
 The earned-autonomy switches `KUBEAGENTS_POST_MERGE_CHECK`, `KUBEAGENTS_AUTOMERGE` and
 `KUBEAGENTS_DIAL` are pinned the same way, on every install, from `spec.deployment.env`, each
 normalised to a value it knows or `off`. They are not in the container env; the
-[credential isolation reference](/kube-agents/reference/credential-isolation/) describes them.
+[credential isolation reference](../../site/src/content/docs/reference/credential-isolation.md) describes them.
 
 One consequence of the render is worth knowing: the managed overlay is a
 leaf-level merge, and a list is a leaf, so a list rendered here **replaces** the image's rather than
@@ -193,7 +190,7 @@ names the image's list has and it lacks (below). Its overlay is merged after tha
 back-fill, so the operator's settings are not undone by it.
 
 The platform profile's `config.yaml` becomes a second exception under
-[`platformFrontDoor`](/kube-agents/operator/platformagent-harness/#platformfrontdoor), and for the same reason: the gateway is homed there, so
+[`platformFrontDoor`](platformagent-harness.md#platformfrontdoor), and for the same reason: the gateway is homed there, so
 that file is now the one `/sethome` and the monitoring policy write to. It leaves the force-sync
 list and is back-filled from the image template instead, on exactly the terms `default` gets — keys
 the template declares and the live file has lost are restored, keys it already holds are left
@@ -220,7 +217,7 @@ the pass on the next start. Without the stamp script every profile is refreshed 
 stamped.
 
 The remote MCP server entries inside both of these files do follow the image (see
-[the config reference](/kube-agents/reference/config/)). The back-fill recurses only through
+[the config reference](../../site/src/content/docs/reference/config.md)). The back-fill recurses only through
 mappings and a server's `args` is a list, so it would otherwise stay as the image that scaffolded
 the profile spelled it for the life of the volume.
 

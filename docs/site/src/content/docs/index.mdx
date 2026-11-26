@@ -1,7 +1,7 @@
 ---
 title: kube-agents
 description: An open-source GKE operations teammate. Read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests — backed by Google.
-template: doc
+template: splash
 tableOfContents: false
 hero:
   title: kube-agents
@@ -11,12 +11,12 @@ hero:
       link: /kube-agents/install/quickstart-gke/
       icon: right-arrow
       variant: primary
-    - text: Why kube-agents
+    - text: Explore docs
       link: /kube-agents/overview/what-is-kube-agents/
       icon: right-arrow
       variant: secondary
-    - text: Live demos
-      link: /kube-agents/deploy/web-console/
+    - text: Watch demos
+      link: "#see-it-in-action"
       icon: right-arrow
       variant: secondary
     - text: GitHub
@@ -25,87 +25,199 @@ hero:
       variant: minimal
 ---
 
-import { Aside, Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
+import { Aside, CardGrid, LinkCard } from "@astrojs/starlight/components";
 import ChatDemo from "../../components/ChatDemo.astro";
+import WebConsoleDemos from "../../components/WebConsoleDemos.astro";
 
 <ChatDemo />
 
-## What platform teams are measured on
+<section class="ka-section not-content">
+  <div class="ka-section-header">
+    <span class="ka-eyebrow">What platform owners are measured on</span>
+    <h2>Three goals, in priority order</h2>
+    <p>
+      <code>kube-agents</code> runs continuously inside your GKE environment to give your
+      platform team more reach on each goal while keeping your engineers in control.
+    </p>
+  </div>
+  <div class="ka-grid-3">
+    <div class="ka-card">
+      <span class="ka-card-tag">A · Priority 1</span>
+      <h3>Keep production healthy</h3>
+      <p>
+        Checks every cluster against 25+ upgrade-readiness rules and watches drift,
+        stalled controllers, crash loops, security posture, and capacity around the clock.
+      </p>
+    </div>
+    <div class="ka-card">
+      <span class="ka-card-tag">B · Priority 2</span>
+      <h3>Developer velocity</h3>
+      <p>
+        Developers ask in Google Chat, Slack, or the Web Console why a pod is failing or
+        how to scale a service, and get a grounded answer or a pull request to approve.
+      </p>
+    </div>
+    <div class="ka-card">
+      <span class="ka-card-tag">C · Priority 3</span>
+      <h3>Team efficiency</h3>
+      <p>
+        Takes on routine upgrade checks, security patches, and repeat triage across your
+        fleet so platform engineers focus on architecture and hard incidents.
+      </p>
+    </div>
+  </div>
+  <div class="ka-control-bar">
+    <strong>Your team stays in control:</strong> read-only in your clusters, isolated
+    credentials in an Envoy broker, and every production change delivered as a reviewed
+    pull request in Git.
+  </div>
+</section>
 
-Platform owners are measured on three goals, in priority order. `kube-agents` runs continuously inside your GKE environment to give your team more reach on each one while keeping your engineers in control.
+<section class="ka-section" id="see-it-in-action">
+  <div class="ka-section-header not-content">
+    <span class="ka-eyebrow">Live Web Console demos</span>
+    <h2>See it work across six GKE domains</h2>
+    <p>
+      Real cluster investigations from the Web Console: root-cause triage, manifest and
+      ComputeClass fixes, security posture audits, upgrade checks, cost right-sizing, and
+      GitOps sync verification.
+    </p>
+  </div>
+  <WebConsoleDemos />
+</section>
 
-<CardGrid>
-  <Card title="Keep production healthy" icon="approve-check-circle">
-    Checks every cluster against 25+ upgrade-readiness rules and watches drift,
-    stalled controllers, crash loops, security posture, and capacity around the
-    clock — flagging blockers before they page anyone.
-  </Card>
-  <Card title="Developer velocity" icon="rocket">
-    Developers ask in Google Chat, Slack, or the Web Console why a pod is
-    failing or how to right-size a service, and get a grounded answer or a pull
-    request to approve instead of waiting in a ticket queue.
-  </Card>
-  <Card title="Team efficiency" icon="setting">
-    Takes on routine upgrade checks, security patches, and repeat triage across
-    your fleet so platform engineers spend their time on hard architecture and
-    incident work.
-  </Card>
-  <Card title="Your team stays in control" icon="shield">
-    Read-only in your clusters, isolated credentials in a broker, and every
-    production change delivered as a pull request your team reviews and merges.
-  </Card>
-</CardGrid>
+<section class="ka-section not-content">
+  <div class="ka-section-header">
+    <span class="ka-eyebrow">Architecture overview</span>
+    <h2>Read-only in your clusters. Every change a pull request.</h2>
+    <p>
+      <code>kube-agents</code> never mutates a cluster directly. Six steps from alert or
+      question to a merged GitOps change.
+    </p>
+  </div>
+  <div class="ka-flow">
+    <div class="ka-step">
+      <div class="ka-step-num">1</div>
+      <h3>Ask or get alerted</h3>
+      <p>Google Chat, Slack, Microsoft Teams, Web Console, or 24/7 watchdogs.</p>
+    </div>
+    <div class="ka-step">
+      <div class="ka-step-num">2</div>
+      <h3>Read your fleet</h3>
+      <p>Read-only Kubernetes and GKE APIs with Secret values redacted.</p>
+    </div>
+    <div class="ka-step">
+      <div class="ka-step-num">3</div>
+      <h3>Reason with a model</h3>
+      <p>One LiteLLM gateway: Gemini default, Claude, GPT, SAP AI Core, or Gemma.</p>
+    </div>
+    <div class="ka-step">
+      <div class="ka-step-num">4</div>
+      <h3>Open a pull request</h3>
+      <p>Short-lived Cloud KMS token to GitHub, GHES, GitLab, Bitbucket, or Gitea.</p>
+    </div>
+    <div class="ka-step">
+      <div class="ka-step-num">5</div>
+      <h3>Review and merge</h3>
+      <p>Your team approves every change; the broker has no merge verb.</p>
+    </div>
+    <div class="ka-step">
+      <div class="ka-step-num">6</div>
+      <h3>GitOps applies</h3>
+      <p>Argo CD, Flux, or Config Sync rolls the approved change out safely.</p>
+    </div>
+  </div>
+</section>
 
-## Three reasons you can trust it
+<section class="ka-section not-content">
+  <div class="ka-section-header">
+    <span class="ka-eyebrow">Why you can trust it</span>
+    <h2>Built for production safety, tested every release</h2>
+    <p>
+      Connecting a bot to chat is easy. Keeping an operations agent safe, accurate, and
+      current across GKE releases is the hard part.
+    </p>
+  </div>
+  <div class="ka-grid-3">
+    <div class="ka-card">
+      <span class="ka-card-tag is-green">13 Exam Domains</span>
+      <h3>Built and tested in the open</h3>
+      <p>
+        Apache 2.0 open source built by Google engineers. Ships 70+ GKE skills gated by
+        hands-on <code>devops-bench</code> failure exams on every release.
+      </p>
+    </div>
+    <div class="ka-card">
+      <span class="ka-card-tag is-green">Zero Direct Writes</span>
+      <h3>Never acts alone</h3>
+      <p>
+        Wire-level read-only Kubernetes proxy, gVisor credentialless shell sandbox, and
+        a deterministic &lt;100ms pre-push outage guard on every pull request.
+      </p>
+    </div>
+    <div class="ka-card">
+      <span class="ka-card-tag">Roadmap Direction</span>
+      <h3>Earns autonomy over time</h3>
+      <p>
+        Starts read-only as a New hire, drafts reviewed PRs as Junior, and builds toward
+        staging-tested Senior and admin-granted Expert levels you control.
+      </p>
+    </div>
+  </div>
+</section>
 
-Many platform teams have tried building their own SRE agent; connecting a bot to chat was never the hard part. `kube-agents` is built around three design commitments.
-
-<CardGrid>
-  <LinkCard
-    title="Built and tested in the open"
-    description="Apache 2.0 open source, built and maintained by Google engineers. Ships 70+ GKE skills gated by hands-on exams across 13 operational domains on every release."
-    href="/kube-agents/overview/trust-and-autonomy/"
-  />
-  <LinkCard
-    title="Never acts alone"
-    description="Wire-level read-only Kubernetes access (Secrets redacted), credentialless shell sandbox, short-lived Cloud KMS forge tokens, and GitOps pull requests for every fix."
-    href="/kube-agents/reference/security-and-iam/#what-the-agent-can-and-cannot-do"
-  />
-  <LinkCard
-    title="Models, cost, and BYOT"
-    description="$0 software license, co-exists on any GKE Standard or Autopilot cluster, and brings your own tokens across Gemini, Claude, GPT, SAP AI Core, or self-hosted Gemma."
-    href="/kube-agents/overview/models-and-cost/"
-  />
-  <LinkCard
-    title="See it in action"
-    description="Watch six live Web Console walkthroughs covering reliability, capacity, security, GKE upgrades, cost right-sizing, and Argo CD fleet drift."
-    href="/kube-agents/deploy/web-console/"
-  />
-</CardGrid>
-
-## How it works in six steps
-
-```mermaid
-flowchart LR
-    U["1. Ask or get alerted<br/>Google Chat · Slack · Teams · Web Console"]
-    R["2. Read your GKE fleet<br/>Read-only K8s & GKE APIs<br/>(Secrets redacted)"]
-    M["3. Reason with your model<br/>LiteLLM gateway<br/>Gemini · Claude · GPT · SAP · Gemma"]
-    P["4. Open a pull request<br/>Short-lived KMS token<br/>GitHub · GHES · GitLab · Bitbucket · Gitea"]
-    H["5. Review and merge<br/>Approved by your team"]
-    G["6. GitOps applies<br/>Argo CD · Flux · Config Sync"]
-
-    U --> R --> M --> P --> H --> G
-```
-
-`kube-agents` never mutates a cluster directly. Every diagnostic runs under a read-only identity, and every proposed fix lands as a pull request for your existing GitOps pipeline to apply. See [Architecture](/kube-agents/overview/architecture/) for the full pod topology and component map.
+<section class="ka-section not-content">
+  <div class="ka-section-header">
+    <span class="ka-eyebrow">Bring Your Own Tokens (BYOT)</span>
+    <h2>$0 software license, co-exists on any GKE cluster</h2>
+    <p>
+      Apache 2.0 open source with no license fee or token markup. Installs into its own
+      <code>kubeagents-system</code> namespace on any existing GKE Standard or Autopilot
+      cluster, using your own Gemini, Claude, GPT, SAP AI Core, or self-hosted Gemma tokens.
+    </p>
+  </div>
+  <div class="ka-cost-strip">
+    <div class="ka-metric">
+      <div class="ka-metric-val">~$0.06</div>
+      <div class="ka-metric-label">Quick alert check</div>
+      <div class="ka-metric-sub">
+        Modeled on Gemini 3.8 Flash (~285k tokens, 81% cached). Pro: ~$0.17.
+      </div>
+    </div>
+    <div class="ka-metric">
+      <div class="ka-metric-val">~$0.25</div>
+      <div class="ka-metric-label">Deep troubleshooting</div>
+      <div class="ka-metric-sub">
+        Modeled on Gemini 3.8 Flash (~1.1M tokens, 81% cached). Pro: ~$0.68.
+      </div>
+    </div>
+    <div class="ka-metric">
+      <div class="ka-metric-val">~$0.47</div>
+      <div class="ka-metric-label">End-to-end fix &amp; PR</div>
+      <div class="ka-metric-sub">
+        Modeled on Gemini 3.8 Flash (~2.4M tokens, 84% cached). Pro: ~$1.28.
+      </div>
+    </div>
+  </div>
+</section>
 
 ## Explore the documentation
 
 <CardGrid>
   <LinkCard
     title="Why kube-agents"
-    description="Platform goals, why home-built SRE agents stall, and how always-on fleet care complements IDE coding agents."
+    description="Platform goals, why home-built SRE agents stall, and Urgent Care vs. Preventive Fleet Care alongside IDE coding agents."
     href="/kube-agents/overview/what-is-kube-agents/"
+  />
+  <LinkCard
+    title="Models, cost, and BYOT"
+    description="Supported model providers, Vertex AI Workload Identity, automatic prompt caching, and optional spend caps."
+    href="/kube-agents/overview/models-and-cost/"
+  />
+  <LinkCard
+    title="Trust, security, and autonomy"
+    description="Read-only RBAC boundaries, 13-domain devops-bench exams, two-layer memory, and the earned autonomy ladder."
+    href="/kube-agents/overview/trust-and-autonomy/"
   />
   <LinkCard
     title="A day with kube-agents"
@@ -113,9 +225,9 @@ flowchart LR
     href="/kube-agents/overview/day-in-the-life/"
   />
   <LinkCard
-    title="Proactive autonomy"
-    description="Ten scheduled watchdogs covering security, upgrades, cost, capacity, stalls, and drift — with reproducible commands on every finding."
-    href="/kube-agents/overview/proactive-autonomy/"
+    title="Architecture"
+    description="Component map, request flows, pod topology, and GKE deployment footprint."
+    href="/kube-agents/overview/architecture/"
   />
   <LinkCard
     title="Skill catalog"
@@ -132,9 +244,7 @@ flowchart LR
 
 ## Install
 
-`kube-agents` is Apache 2.0 open source with no license fee or token markup. It installs into its own isolated `kubeagents-system` namespace on an existing GKE Standard or Autopilot cluster, or can bootstrap a new cluster for you.
-
-Install from an unpacked official release archive (recommended):
+Install from an unpacked official release archive (recommended) onto an existing GKE Standard or Autopilot cluster, or let the installer provision a cluster for you:
 
 ```bash
 curl -fsSL https://github.com/gke-labs/kube-agents/releases/download/<RELEASE_VERSION>/kube-agents-<RELEASE_VERSION>.tar.gz | tar -xz
@@ -150,7 +260,7 @@ Or run the one-liner directly in Google Cloud Shell or your terminal:
 curl -fsSL https://raw.githubusercontent.com/gke-labs/kube-agents/<RELEASE_VERSION>/install.sh | bash
 ```
 
-See the [Quick start (GKE)](/kube-agents/install/quickstart-gke/) for prerequisites, existing-cluster vs. new-cluster options, and non-interactive flags.
+See [Quick start (GKE)](/kube-agents/install/quickstart-gke/) for prerequisites, existing-cluster options, and non-interactive flags.
 
 ## Disclaimer
 

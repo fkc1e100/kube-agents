@@ -1,19 +1,16 @@
----
-title: "ChatOps: Proactive alerts"
-description: "How watchdogs and event watchers format, rate-limit, and route proactive alerts across chat channels."
----
+# ChatOps: Proactive alerts
 
-Part of [ChatOps](/kube-agents/concepts/chatops/).
+Part of [ChatOps](../../site/src/content/docs/concepts/chatops.md).
 
 ## Proactive alerts (both channels)
 
-The harness doesn't only reply to messages. A cluster event posted to the in-pod triage endpoint (`inject_message` in [`agents/platform/scripts/session_kv_server.py`](https://github.com/gke-labs/kube-agents/blob/main/agents/platform/scripts/session_kv_server.py)) opens a thread unprompted: it posts the alert first, then runs the triage turn in the thread that alert created. If the agent gateway cannot start that turn, even after retries, a notice in the thread says that triage did not start, whether the alert comes back, and that you can ask about it there ([details](https://github.com/gke-labs/kube-agents/blob/main/agents/platform/docs/session_management.md#when-a-triage-cannot-start)). On Slack and on Google Chat, the triage then [edits the alert itself](/kube-agents/concepts/chatops-slack/#buttons) through the gateway.
+The harness doesn't only reply to messages. A cluster event posted to the in-pod triage endpoint (`inject_message` in [`agents/platform/scripts/session_kv_server.py`](https://github.com/gke-labs/kube-agents/blob/main/agents/platform/scripts/session_kv_server.py)) opens a thread unprompted: it posts the alert first, then runs the triage turn in the thread that alert created. If the agent gateway cannot start that turn, even after retries, a notice in the thread says that triage did not start, whether the alert comes back, and that you can ask about it there ([details](https://github.com/gke-labs/kube-agents/blob/main/agents/platform/docs/session_management.md#when-a-triage-cannot-start)). On Slack and on Google Chat, the triage then [edits the alert itself](../../site/src/content/docs/concepts/chatops-slack.md#buttons) through the gateway.
 
 The first-run inventory report arrives the same way, into the thread `bootstrap_onboarding` bound, when that first message comes within a day of the sweep. After that the report is an issue in the GitOps repository when it is on GitHub, or else in the install's one managed GitHub repository. One line linking it goes to the home channel, kept for the digest while none is set.
 
-On Slack and on Google Chat, with `KAGE_SLACK_UX` on, the inventory report arrives as the card described under [First-run onboarding](/kube-agents/concepts/chatops/#first-run-onboarding), built from the stored findings. The card has a headline counting the things to fix first, one row per listed item with its scored risk and the action to take, and the rest counted. The scan's checks are folded, with a button to fix the first one and, when more items are queued than listed, one to see them all. Clicking one answers as your turn in the thread; a click from someone the agent does not answer changes nothing.
+On Slack and on Google Chat, with `KAGE_SLACK_UX` on, the inventory report arrives as the card described under [First-run onboarding](../../site/src/content/docs/concepts/chatops.md#first-run-onboarding), built from the stored findings. The card has a headline counting the things to fix first, one row per listed item with its scored risk and the action to take, and the rest counted. The scan's checks are folded, with a button to fix the first one and, when more items are queued than listed, one to see them all. Clicking one answers as your turn in the thread; a click from someone the agent does not answer changes nothing.
 
-When no card can be built, the report is posted as text, reshaped with a headline, the listed findings as rows with the sentence under each kept, and its closing lines. The same text goes on an install whose onboarding was bound to a chat thread before the upgrade that moved its chat to the gateway, when Slack refuses the card or the post fails. A report that does not parse to that shape is posted as written. The report closes with a short note on the first-run audits (see [First-run onboarding](/kube-agents/concepts/chatops/#first-run-onboarding)); beside the card, that note is a separate message after it. Where an unprompted message lands:
+When no card can be built, the report is posted as text, reshaped with a headline, the listed findings as rows with the sentence under each kept, and its closing lines. The same text goes on an install whose onboarding was bound to a chat thread before the upgrade that moved its chat to the gateway, when Slack refuses the card or the post fails. A report that does not parse to that shape is posted as written. The report closes with a short note on the first-run audits (see [First-run onboarding](../../site/src/content/docs/concepts/chatops.md#first-run-onboarding)); beside the card, that note is a separate message after it. Where an unprompted message lands:
 
 - **Google Chat**: to the space that owns the interaction, or the space set via `GOOGLE_CHAT_HOME_CHANNEL` or learned from the first mention.
 - **Slack**: to `SLACK_HOME_CHANNEL`.
@@ -23,7 +20,7 @@ An alert goes to **one** of them, not both: it opens a thread that the triage tu
 
 A scheduled report has no such constraint. The default jobs' `deliver: chat` relays it to every enabled platform among Google Chat and Slack, and to Microsoft Teams while the gateway's Teams backend is armed. On the Hermes path a job whose `deliver` names `teams` posts to the Teams home channel instead. [The relay design](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/cron-report-relay.md) is canonical for both rules.
 
-A governance watchdog's findings live on its ledger issue and the remediation pull requests that link back to it. Its scheduled report on this path is usually one line of counts ending with the ledger link, so the report to read is the issue — see [Proactive autonomy](/kube-agents/overview/proactive-autonomy/) and [Autonomous watchdogs](/kube-agents/concepts/autonomous-watchdogs/) for the schedules.
+A governance watchdog's findings live on its ledger issue and the remediation pull requests that link back to it. Its scheduled report on this path is usually one line of counts ending with the ledger link, so the report to read is the issue — see [Proactive autonomy](../../site/src/content/docs/overview/proactive-autonomy.md) and [Autonomous watchdogs](../../site/src/content/docs/concepts/autonomous-watchdogs.md) for the schedules.
 
 With `KAGE_SLACK_UX` on, Slack gets a card built from the open ledger issue, and so does Google Chat. Its headline carries one number, how many findings of the most severe level the issue lists ("Security & RBAC Posture Audit: 2 critical findings"). Up to ten critical findings are listed under it, each led by its severity and tagged "new" when it was not there on the last run. With none critical listed, the headline counts the most severe level listed and lists the top two.
 
@@ -93,7 +90,7 @@ The daily recap has the line "N alerts from M workloads withheld by the daily ce
 
 Drift refusals never appear in the recap. The `GitOpsDrift` row of `/v1/alert-quota` and the session server log show them. The drift detector does not offer a refused record again, so that alert is lost from chat.
 
-The recap line "N events from M workloads were silenced by alert-exclude rules" counts the events that the [alert-exclude rules](/kube-agents/operator/platformagent-harness/#specharnesseventwatcher) held back, and names the five workloads that sent the most. These events never reached the ceiling, and `GET /v1/intercepted-events` lists them with the status `excluded`.
+The recap line "N events from M workloads were silenced by alert-exclude rules" counts the events that the [alert-exclude rules](platformagent-harness.md#specharnesseventwatcher) held back, and names the five workloads that sent the most. These events never reached the ceiling, and `GET /v1/intercepted-events` lists them with the status `excluded`.
 
 The recap line "N alerts failed to post to chat" is a different problem. It means that chat refused the post, or did not confirm it. Some of these alerts can be in the channel. A higher ceiling does not change this count. Look in the session server log for the cause.
 
@@ -114,7 +111,7 @@ The same workload means the same cluster, namespace and kind, and either the sam
 
 If the watcher cannot read a pod's owner, for example because its identity may not read Pods on that cluster, or the owner is not a Deployment, StatefulSet, DaemonSet or Job, only a Deployment's pods fold. They fold by the ReplicaSet hash in their names (such as `checkout-6cfdb6b98b-zwv24`), and other pods each still alert.
 
-An alert says when a workload broke, once: while the same pods keep retrying a failing image pull, the workload is not announced again. For a Deployment, StatefulSet or DaemonSet that it judges, the daily Workload Reliability audit keeps the standing record. It files a finding on its ledger at each run that finds a pod ten minutes into a failed pull, and the finding leaves at the first run that finds none ([what each SOP checks](/kube-agents/concepts/governance-sops/#what-each-sop-checks)).
+An alert says when a workload broke, once: while the same pods keep retrying a failing image pull, the workload is not announced again. For a Deployment, StatefulSet or DaemonSet that it judges, the daily Workload Reliability audit keeps the standing record. It files a finding on its ledger at each run that finds a pod ten minutes into a failed pull, and the finding leaves at the first run that finds none ([what each SOP checks](../../site/src/content/docs/concepts/governance-sops.md#what-each-sop-checks)).
 
 A Critical event after a Warning alert is announced, so a workload that gets worse is announced again. A restart of the agent pod ends every open window, so the first event after one is announced again, unless its fix is waiting for review (below). The feed `GET /v1/intercepted-events` lists a folded event with the status `folded`. The value is a whole number of seconds; `0` turns folding off, a larger value than `86400` counts as `86400`, a negative value counts as `0`, and a value that is not a number counts as the default.
 

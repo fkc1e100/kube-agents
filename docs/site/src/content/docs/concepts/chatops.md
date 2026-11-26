@@ -38,7 +38,7 @@ Google Chat is the reference channel. Setup is automated by the install: the [`c
 
 ### Allowed users
 
-Google Chat ingress is gated by `spec.integration.googleChat.allowedUsers` (a list of user emails, collected by the installer as `ALLOWED_USERS`). Leaving it empty allows everyone the Chat app is visible to. A sender not on the list gets one notice and nothing else ([Which messages it answers](/kube-agents/concepts/chatops-a2a-gateway/#which-messages-it-answers)).
+Google Chat ingress is gated by `spec.integration.googleChat.allowedUsers` (a list of user emails, collected by the installer as `ALLOWED_USERS`). Leaving it empty allows everyone the Chat app is visible to. A sender not on the list gets one notice and nothing else ([Which messages it answers](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#which-messages-it-answers)).
 
 ### Home channel
 
@@ -48,7 +48,7 @@ The operator hands the field to the A2A gateway, which posts the agent's proacti
 
 With the field unset and `spec.integration.googleChat.homeChannelPolicy` `auto` (the default), the first top-level mention of the agent in a named space makes that space the home channel. A direct message or a group chat never does, and neither does a reply inside a thread or a command. The gateway checks the space first: the app is a member, and the space does not admit people outside your organization. It then posts one line in that thread saying so, and proactive posts follow within about a minute with no pod restarted.
 
-`manual` turns the learn off, so `homeChannel` alone decides. A set `homeChannel` wins over a learned space. To move a learned space, set the field. To forget it, remove the `gchat` keys from the `<agent>-home-channel` ConfigMap and mention the agent again. Both platforms share that ConfigMap, so deleting it forgets Slack's learned channel too ([the learned home channel](/kube-agents/operator/platformagent-scope-integrations/#specintegrationslack-on-the-a2a-gateway) has the record).
+`manual` turns the learn off, so `homeChannel` alone decides. A set `homeChannel` wins over a learned space. To move a learned space, set the field. To forget it, remove the `gchat` keys from the `<agent>-home-channel` ConfigMap and mention the agent again. Both platforms share that ConfigMap, so deleting it forgets Slack's learned channel too ([the learned home channel](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-scope-integrations.md#specintegrationslack-on-the-a2a-gateway) has the record).
 
 The agent sends home posts to each platform on the gateway that has a home channel. A channel or space the gateway learned counts. When no platform has one, the gateway refuses them and keeps each platform's posts apart, up to fifty for thirty days. It posts one digest once that platform's home channel is set.
 
@@ -59,7 +59,7 @@ The agent sends home posts to each platform on the gateway that has a home chann
 1. User DMs the app or @-mentions it in a space.
 2. Chat sends the message event to the topic; the gateway pulls it from the subscription and publishes it as a task, and the `hermes-bridge` container runs it as a Planning Agent turn.
 3. The Planning Agent picks the right specialist from the injected roster and files a kanban card with the full request context (`kanban_create`). The two questions the roster answers itself, which GCP projects are in scope and where the host cluster is, get a direct reply and no card.
-4. The gateway's kanban dispatcher spawns the specialist — for infrastructure work, the Platform Agent (`hermes -p platform`) — which runs the tool loop and completes the card with a one-line `summary` and the full answer in `result`. A card filed from chat goes ahead of background triage, and one worker slot is held for it ([Why dispatch is capped by default](/kube-agents/operator/platformagent-harness/#why-dispatch-is-capped-by-default)). If it has to wait anyway, the thread says `⏳ Queued: the system is busy. Your request will start when a worker frees up.` and the specialist's progress joins that message once it starts. The wait is bounded: after `spec.harness.tuning.admission.queueBoundSeconds` (600 s by default) the dispatcher blocks the card with kind `capacity`, the queued line settles as stopped, and the Planning Agent replies in the thread with the reason and the alternatives.
+4. The gateway's kanban dispatcher spawns the specialist — for infrastructure work, the Platform Agent (`hermes -p platform`) — which runs the tool loop and completes the card with a one-line `summary` and the full answer in `result`. A card filed from chat goes ahead of background triage, and one worker slot is held for it ([Why dispatch is capped by default](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#why-dispatch-is-capped-by-default)). If it has to wait anyway, the thread says `⏳ Queued: the system is busy. Your request will start when a worker frees up.` and the specialist's progress joins that message once it starts. The wait is bounded: after `spec.harness.tuning.admission.queueBoundSeconds` (600 s by default) the dispatcher blocks the card with kind `capacity`, the queued line settles as stopped, and the Planning Agent replies in the thread with the reason and the alternatives.
 5. The gateway posts the card's progress into the thread (one plan message edited in place with `KAGE_SLACK_UX` on, a message per note with it off) and then its report. The Planning Agent is woken for none of it; it is woken when a card blocks or fails.
 
 A file the card produced is not attached: Chat's `media.upload` refuses app authentication, so an install reaching Chat through the credential proxy can never produce a native attachment, and the gateway posts the report without it.
@@ -74,11 +74,11 @@ This section has its own dedicated reference page: [ChatOps: Slack integration](
 
 ## Sending another message while it works
 
-Through the gateway, a message sent while the Planning Agent is still answering an earlier one in the same conversation is queued as a follow-up behind the running task; see [Follow-ups while a task runs](/kube-agents/concepts/chatops-a2a-gateway/#follow-ups-while-a-task-runs).
+Through the gateway, a message sent while the Planning Agent is still answering an earlier one in the same conversation is queued as a follow-up behind the running task; see [Follow-ups while a task runs](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md#follow-ups-while-a-task-runs).
 
 ## Conversations through the A2A gateway
 
-This section has its own dedicated reference page: [ChatOps: A2A gateway & conversations](/kube-agents/concepts/chatops-a2a-gateway/).
+This section has its own dedicated reference page: [ChatOps: A2A gateway & conversations](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-a2a-gateway.md).
 
 ## How a chat question is answered
 
@@ -125,7 +125,7 @@ The commands below assume the default resource names (`platform-agent`) and the 
 
    At startup `chat.notify route armed` should carry `"conversations":true`. Each `notify posted` line names the conversation it posted into in its `thread` field, the same key as the `conversation` field on the question's `ingress` line.
 
-The session pods that [Security and IAM](/kube-agents/reference/security-rbac/#each-a2a-session-pod-is-its-own-bus-identity) describes are a different path. The gateway starts one only for a message that begins with the word `delegate` (`delegate: check prod-east`), which runs that one task in its own pod, or for a conversation moved onto its session route with the `/session` command. Such a pod reads the cluster only under the session pods' [cluster view](/kube-agents/operator/platformagent-harness/#the-session-pods-cluster-view): on by default when the install sets `defaultRoute: session`, or with the operator's `A2A_SESSION_CLUSTER_VIEW=true`. Any other message follows the steps above, which that setting does not affect.
+The session pods that [Security and IAM](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/security-rbac.md#each-a2a-session-pod-is-its-own-bus-identity) describes are a different path. The gateway starts one only for a message that begins with the word `delegate` (`delegate: check prod-east`), which runs that one task in its own pod, or for a conversation moved onto its session route with the `/session` command. Such a pod reads the cluster only under the session pods' [cluster view](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#the-session-pods-cluster-view): on by default when the install sets `defaultRoute: session`, or with the operator's `A2A_SESSION_CLUSTER_VIEW=true`. Any other message follows the steps above, which that setting does not affect.
 
 ## Microsoft Teams
 
@@ -141,7 +141,7 @@ What this means for an evaluator: enabling `spec.integration.teams` alone gives 
 
 ## Proactive alerts (both channels)
 
-This section has its own dedicated reference page: [ChatOps: Proactive alerts](/kube-agents/concepts/chatops-proactive-alerts/).
+This section has its own dedicated reference page: [ChatOps: Proactive alerts](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/chatops-proactive-alerts.md).
 
 ## First-run onboarding
 

@@ -1,10 +1,23 @@
 ---
-// Dark-only site: force data-theme='dark' on <html> before hydration
-// so Starlight's light-mode CSS never applies, regardless of the
-// user's OS `prefers-color-scheme` setting or any prior localStorage
-// value.
+// Light-default ThemeProvider compatible with Starlight's native ThemeSelect.
+// Defaults to light mode when no explicit preference is saved in localStorage,
+// while honoring 'light' or 'dark' chosen via the navbar theme switcher.
 ---
 
 <script is:inline>
-  document.documentElement.dataset.theme = 'dark';
+  window.StarlightThemeProvider = (() => {
+    const storedTheme =
+      typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+    const theme =
+      storedTheme === 'dark' || storedTheme === 'light' ? storedTheme : 'light';
+    document.documentElement.dataset.theme = theme;
+    return {
+      updatePickers(newTheme = theme) {
+        document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+          const select = picker.querySelector('select');
+          if (select) select.value = newTheme;
+        });
+      },
+    };
+  })();
 </script>

@@ -9,99 +9,75 @@
 
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'dark',
-  // `loose` is needed for htmlLabels: <br/> in labels + subgraph names
-  // with parentheses. Content is authored in-repo, not user-submitted,
-  // so the XSS surface is bounded to what we ship in git.
-  securityLevel: 'loose',
-  flowchart: { htmlLabels: true, curve: 'basis' },
-  themeVariables: {
-    // Match the terminal-navy site palette so diagrams don't look
-    // pasted in from another site. Node fills rotate between the
-    // cyan/violet tints used elsewhere for the same reason the
-    // sidebar hues do — a flat diagram reads as one gray mass.
-    background: '#0f1728',
-    primaryColor: '#172136',
-    primaryTextColor: '#e8ecf4',
-    primaryBorderColor: '#2acaca',
-    secondaryColor: '#272745',
-    secondaryBorderColor: '#bd86f9',
-    tertiaryColor: '#13303f',
-    tertiaryBorderColor: '#2090af',
-    lineColor: '#9aa3b8',
-    textColor: '#e8ecf4',
-    nodeBorder: '#2acaca',
-    clusterBkg: '#131c30',
-    clusterBorder: '#3f4553',
-    titleColor: '#b1baf5',
-    // Matches `.mermaid-rendered`'s panel fill in theme.css, so the
-    // label knockouts sit flush with the surface behind them.
-    edgeLabelBackground: '#172136',
-    fontFamily:
-      "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif",
-  },
-  // themeVariables only reaches a handful of roles, so every node in a
-  // flowchart lands on primaryColor and the diagram reads as one gray
-  // mass. Rotate the outline through the same six hues the sidebar
-  // groups use, keyed off sibling position, and back each with a faint
-  // wash of its own hue. Label text stays one bright value: colouring
-  // the outline is free, colouring 11px text is not.
-  //
-  // `!important` is load-bearing. Mermaid emits its own rules prefixed
-  // with the per-diagram id selector (`#mermaid-0 .node rect { … }`),
-  // which out-specifies anything unprefixed we inject here.
-  themeCSS: `
-    .node rect,
-    .node polygon,
-    .node circle,
-    .node path {
-      stroke-width: 1.5px !important;
-    }
-    .nodes > g:nth-of-type(6n + 1) rect { stroke: #2acaca !important; fill: rgba(42, 202, 202, 0.1) !important; }
-    .nodes > g:nth-of-type(6n + 2) rect { stroke: #bd86f9 !important; fill: rgba(189, 134, 249, 0.1) !important; }
-    .nodes > g:nth-of-type(6n + 3) rect { stroke: #fcc140 !important; fill: rgba(252, 193, 64, 0.09) !important; }
-    .nodes > g:nth-of-type(6n + 4) rect { stroke: #58c660 !important; fill: rgba(88, 198, 96, 0.1) !important; }
-    .nodes > g:nth-of-type(6n + 5) rect { stroke: #fb7081 !important; fill: rgba(251, 112, 129, 0.09) !important; }
-    .nodes > g:nth-of-type(6n + 6) rect { stroke: #b1baf5 !important; fill: rgba(177, 186, 245, 0.1) !important; }
-    .nodeLabel,
-    .nodeLabel p,
-    .node .label {
-      color: #f8f8f3 !important;
-      fill: #f8f8f3 !important;
-    }
-    /* Edge captions default to a dim gray that disappears on navy. */
-    .edgeLabel,
-    .edgeLabel p,
-    .edgeLabel .label {
-      color: #ced2d6 !important;
-      fill: #ced2d6 !important;
-      background-color: #172136 !important;
-    }
-    .edgeLabel rect { fill: #172136 !important; opacity: 0.92 !important; }
-    /* Subgraph frames: periwinkle title over a barely-there panel. */
-    .cluster rect {
-      fill: #131c30 !important;
-      stroke: #3f4553 !important;
-      stroke-dasharray: 4 3 !important;
-    }
-    /* Reach the span itself, not just the <g> wrapping it: mermaid
-     * gives a subgraph title the same .nodeLabel class as a node's,
-     * so an ancestor rule loses to the .nodeLabel rule above.
-     * Colour only — a font-size bump here would overflow the frame,
-     * whose geometry was measured before this stylesheet applied. */
-    .cluster-label,
-    .cluster-label p,
-    .cluster-label .nodeLabel,
-    .cluster-label .nodeLabel p,
-    .cluster text {
-      color: #b1baf5 !important;
-      fill: #b1baf5 !important;
-      font-weight: 600 !important;
-    }
-  `,
-});
+const isDark = () => document.documentElement.dataset.theme === 'dark';
+
+function mermaidConfig() {
+  const dark = isDark();
+  return {
+    startOnLoad: false,
+    theme: dark ? 'dark' : 'default',
+    securityLevel: 'loose',
+    flowchart: { htmlLabels: true, curve: 'basis' },
+    themeVariables: dark
+      ? {
+          background: '#0f172a',
+          primaryColor: '#1e293b',
+          primaryTextColor: '#f1f5f9',
+          primaryBorderColor: '#60a5fa',
+          secondaryColor: '#1e1b4b',
+          secondaryBorderColor: '#a78bfa',
+          tertiaryColor: '#172554',
+          tertiaryBorderColor: '#38bdf8',
+          lineColor: '#94a3b8',
+          textColor: '#f1f5f9',
+          nodeBorder: '#60a5fa',
+          clusterBkg: '#151f32',
+          clusterBorder: '#334155',
+          titleColor: '#93c5fd',
+          edgeLabelBackground: '#151f32',
+          fontFamily:
+            "'Google Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+        }
+      : {
+          background: '#ffffff',
+          primaryColor: '#e8f0fe',
+          primaryTextColor: '#202124',
+          primaryBorderColor: '#1a73e8',
+          secondaryColor: '#f3e8fd',
+          secondaryBorderColor: '#9334e6',
+          tertiaryColor: '#e6f4ea',
+          tertiaryBorderColor: '#1e8e3e',
+          lineColor: '#5f6368',
+          textColor: '#202124',
+          nodeBorder: '#1a73e8',
+          clusterBkg: '#f8f9fa',
+          clusterBorder: '#dadce0',
+          titleColor: '#174ea6',
+          edgeLabelBackground: '#ffffff',
+          fontFamily:
+            "'Google Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+        },
+    themeCSS: dark
+      ? `
+        .node rect, .node polygon, .node circle, .node path { stroke-width: 1.5px !important; }
+        .nodeLabel, .nodeLabel p, .node .label { color: #f1f5f9 !important; fill: #f1f5f9 !important; }
+        .edgeLabel, .edgeLabel p, .edgeLabel .label { color: #cbd5e1 !important; fill: #cbd5e1 !important; background-color: #151f32 !important; }
+        .edgeLabel rect { fill: #151f32 !important; opacity: 0.95 !important; }
+        .cluster rect { fill: #151f32 !important; stroke: #334155 !important; stroke-dasharray: 4 3 !important; }
+        .cluster-label, .cluster-label p, .cluster-label .nodeLabel, .cluster text { color: #93c5fd !important; fill: #93c5fd !important; font-weight: 600 !important; }
+      `
+      : `
+        .node rect, .node polygon, .node circle, .node path { stroke-width: 1.5px !important; }
+        .nodeLabel, .nodeLabel p, .node .label { color: #202124 !important; fill: #202124 !important; }
+        .edgeLabel, .edgeLabel p, .edgeLabel .label { color: #3c4043 !important; fill: #3c4043 !important; background-color: #ffffff !important; }
+        .edgeLabel rect { fill: #ffffff !important; opacity: 0.95 !important; }
+        .cluster rect { fill: #f8f9fa !important; stroke: #dadce0 !important; stroke-dasharray: 4 3 !important; }
+        .cluster-label, .cluster-label p, .cluster-label .nodeLabel, .cluster text { color: #174ea6 !important; fill: #174ea6 !important; font-weight: 600 !important; }
+      `,
+  };
+}
+
+mermaid.initialize(mermaidConfig());
 
 /**
  * Extract the mermaid source from an expressive-code <pre>. Naïve

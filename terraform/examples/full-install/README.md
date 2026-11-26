@@ -77,7 +77,7 @@ install without the interview.
   changes the env list that the chart renders replaces the `PlatformAgent`'s
   `spec.deployment.env`, and entries added to the CR by hand are lost. Set
   those through `platformAgent.deployment.env` in `extra_helm_values`. The
-  [chatops page](https://gke-labs.github.io/kube-agents/concepts/chatops-proactive-alerts/#daily-alert-ceiling)
+  [chatops page](https://gke-labs.github.io../../../docs/designs/internals/chatops-proactive-alerts.md#daily-alert-ceiling)
   gives the buckets, the defaults and a sizing method.
 - With `install_helm_releases = false`, neither chart is installed: the apply
   builds only the Google Cloud side, and

@@ -9,7 +9,7 @@ The Platform Agent (Hermes) Deployment exports OpenTelemetry traces and two sets
 
 ## What gets exported
 
-This section has its own dedicated reference page: [Observability: Exported telemetry](/kube-agents/concepts/observability-exports/).
+This section has its own dedicated reference page: [Observability: Exported telemetry](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/observability-exports.md).
 
 ## Session metadata plumbing
 

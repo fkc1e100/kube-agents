@@ -26,7 +26,7 @@ This is the canonical answer. Other pages summarize it and link here; if they ap
 - **Persona rules are guidance, not enforcement.** A prompt-injection or reasoning failure is bounded by IAM, not by `SOUL.md`. Keep the default `read-only` set if "read-only on the cloud plane" must be an enforced property of the deployment rather than an intended behaviour of the model (see [Configuring read-only mode](#configuring-read-only-auditing-mode)).
 - **The intended write path is always GitOps** — the agent proposes, a human merges, your reconciler applies. The second half is enforced rather than intended: the credential proxy refuses `gh pr merge`, `gh pr review --approve`, mutating `gh api` calls, workflow and release triggers, and repository administration, so the actor that opens a pull request cannot also complete it. See [Secure write path](#secure-write-path-gitops) and [Credential isolation](/kube-agents/reference/credential-isolation/) for the rule ids.
 - **The chat front door holds no infrastructure tools at all.** Chat ingress terminates at the Planning Agent (the pod's `default` Hermes profile), whose config pins every surface to routing, kanban-delegation, and per-user memory tools only: no GKE, file, or GitOps write tools. A prompt injected through chat must still be delegated to the Platform Agent, where the IAM and RBAC boundaries above apply. See [ChatOps](/kube-agents/concepts/chatops/).
-  - The experimental [`platformFrontDoor`](/kube-agents/operator/platformagent-harness/#platformfrontdoor) flag gives that up on purpose: it points chat ingress straight at the Platform Agent's toolset, so this row does not hold on an install that has turned it on. It also hands that profile's `config.yaml` to the agent, so the security and approval keys in it (`security.*`, `approvals.*`) stop being restored from the image on every restart. It is off by default and unsupported.
+  - The experimental [`platformFrontDoor`](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/platformagent-harness.md#platformfrontdoor) flag gives that up on purpose: it points chat ingress straight at the Platform Agent's toolset, so this row does not hold on an install that has turned it on. It also hands that profile's `config.yaml` to the agent, so the security and approval keys in it (`security.*`, `approvals.*`) stop being restored from the image on every restart. It is off by default and unsupported.
 - **Cluster Agents are scoped-down, not scoped-up.** Each per-cluster [Cluster Agent](/kube-agents/concepts/cluster-agents/) profile shares the Platform Agent's identity path: the same gateway Pod and KSA, and the same credential broker for every proxied `kubectl` and `gcloud`, so the same RBAC and IAM ceilings apply. Its config template exposes only the read-only `gke` and `developer_knowledge` MCP servers, with no `platform_control` and no GitOps write path, and its `KUBECONFIG` is pinned to one cluster. It proposes fixes back over the kanban card; only the Platform Agent can turn them into PRs.
   - **The management cluster now has a Cluster Agent too,** so one of these profiles is scoped to the cluster kube-agents itself runs in and can read the harness's own namespace, including the namespace holding `platform-agent-secrets`. **How far that reach goes is set by the GSA's permission set, not by the Kubernetes RBAC row above.** A Cluster Agent does not reach its cluster as the KSA: `cluster_agent_profile.create_profile` runs `gcloud container clusters get-credentials` (through the credential broker, or answered by the shim after one relay read when the kube-api proxy is in use) and pins the resulting kubeconfig. Its Kubernetes API calls therefore authenticate as the broker's GSA (the kube-api proxy runs as the same identity), and the `kubeagents:minimal:*` ClusterRole does not bound them.
   - On an install that has armed the [scoped service account pool](#the-scoped-service-account-pool), `kubectl` under such a kubeconfig authenticates as its project's pool member instead. That is moot today, since the pool is suspended and off by default.
@@ -43,7 +43,7 @@ The rest of this page details the two enforced planes.
 
 ## Identity model
 
-The agent uses [GKE Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) to bind its in-cluster KSA to a GSA, so no static GCP key lands in the cluster on a standard install. Clusters without Workload Identity can use the chart-only `litellm.vertex.credentialsSecretRef` escape hatch covered under [The Vertex AI gateway is a separate identity](/kube-agents/reference/security-rbac/#the-vertex-ai-gateway-is-a-separate-identity) below.
+The agent uses [GKE Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) to bind its in-cluster KSA to a GSA, so no static GCP key lands in the cluster on a standard install. Clusters without Workload Identity can use the chart-only `litellm.vertex.credentialsSecretRef` escape hatch covered under [The Vertex AI gateway is a separate identity](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/security-rbac.md#the-vertex-ai-gateway-is-a-separate-identity) below.
 
 ```mermaid
 flowchart LR
@@ -176,7 +176,7 @@ The `gke` MCP server goes through the broker too, on the broker's own credential
 
 ## Kubernetes RBAC
 
-This section has its own dedicated reference page: [Security: Kubernetes RBAC](/kube-agents/reference/security-rbac/).
+This section has its own dedicated reference page: [Security: Kubernetes RBAC](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/security-rbac.md).
 
 ## Configuring read-only (auditing) mode
 
@@ -262,7 +262,7 @@ yet, so turning `KUBEAGENTS_DIAL` on today makes the install explain-only.
 
 ## Change control & safety
 
-This section has its own dedicated reference page: [Security: Change control & safety](/kube-agents/reference/security-change-control/).
+This section has its own dedicated reference page: [Security: Change control & safety](https://github.com/gke-labs/kube-agents/blob/main/docs/designs/internals/../../../../../designs/internals/security-change-control.md).
 
 ## Secrets Encryption & Local State Security
 
