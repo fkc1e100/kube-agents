@@ -11,13 +11,16 @@
     const theme =
       storedTheme === 'dark' || storedTheme === 'light' ? storedTheme : 'light';
     document.documentElement.dataset.theme = theme;
-    return {
+    const provider = {
       updatePickers(newTheme = theme) {
+        const value = newTheme === 'dark' || newTheme === 'light' ? newTheme : theme;
         document.querySelectorAll('starlight-theme-select').forEach((picker) => {
           const select = picker.querySelector('select');
-          if (select) select.value = newTheme;
+          if (select) select.value = value;
         });
       },
     };
+    document.addEventListener('DOMContentLoaded', () => provider.updatePickers(theme));
+    return provider;
   })();
 </script>

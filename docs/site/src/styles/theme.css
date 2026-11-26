@@ -178,42 +178,137 @@ header.header {
   overflow-x: auto;
 }
 
-/* Splash landing page layout */
-[data-has-hero] .hero {
-  padding-block: clamp(2.5rem, 6vw, 4.5rem) clamp(1.5rem, 4vw, 2.5rem);
-  text-align: center;
-  max-width: 56rem;
-  margin-inline: auto;
+/* Widen splash homepage container for 3-col cards and video demos,
+ * while keeping documentation pages at a comfortable 55rem prose width. */
+html[data-has-hero]:not([data-has-sidebar]) {
+  --sl-content-width: 68rem;
 }
 
-[data-has-hero] .hero .copy {
+/* Splash landing page hero */
+.hero {
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 1rem;
+  text-align: center;
+  padding-block: clamp(2.5rem, 6vw, 4rem) clamp(1.75rem, 3.5vw, 2.5rem);
+  max-width: 52rem;
+  margin-inline: auto;
+  gap: 1.5rem;
 }
 
-[data-has-hero] .hero h1 {
-  font-size: clamp(2.25rem, 5vw, 3.5rem);
-  line-height: 1.1;
-  letter-spacing: -0.025em;
+.hero .stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.5rem;
+  width: 100%;
+}
+
+.hero .copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2.4rem, 5vw, 3.6rem);
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.03em;
   color: var(--sl-color-white);
 }
 
-[data-has-hero] .hero .tagline {
-  font-size: clamp(1.05rem, 2vw, 1.3rem);
+.hero .tagline {
+  margin: 0;
+  font-size: clamp(1.05rem, 2vw, 1.28rem);
   line-height: 1.55;
   color: var(--sl-color-gray-3);
-  max-width: 44rem;
+  max-width: 42rem;
 }
 
-[data-has-hero] .hero .actions {
-  justify-content: center;
+.hero .actions {
+  display: flex;
   flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
   gap: 0.75rem;
-  margin-top: 0.5rem;
+}
+
+.hero .sl-link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 0.68rem 1.35rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.hero .sl-link-button.primary {
+  background: var(--sl-color-accent);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.25);
+}
+
+.hero .sl-link-button.primary:hover {
+  background: var(--sl-color-accent-high);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.hero .sl-link-button.secondary {
+  background: var(--ka-surface);
+  color: var(--sl-color-white);
+  border-color: var(--sl-color-hairline-shade);
+  box-shadow: var(--ka-shadow-sm);
+}
+
+.hero .sl-link-button.secondary:hover {
+  border-color: var(--sl-color-accent);
+  color: var(--sl-color-accent);
+  background: var(--ka-accent-soft);
+  transform: translateY(-1px);
+}
+
+.hero .sl-link-button.minimal.icon-only {
+  width: 2.65rem;
+  height: 2.65rem;
+  padding: 0;
+  background: var(--ka-surface);
+  color: var(--sl-color-gray-2);
+  border-color: var(--sl-color-hairline-shade);
+  box-shadow: var(--ka-shadow-sm);
+}
+
+.hero .sl-link-button.minimal.icon-only:hover {
+  border-color: var(--sl-color-accent);
+  color: var(--sl-color-accent);
+  background: var(--ka-accent-soft);
 }
 
 .ka-section {
   margin: 3.25rem 0;
+}
+
+.ka-section + .ka-section {
+  padding-top: 2.75rem;
+  border-top: 1px solid var(--sl-color-hairline-light);
+}
+
+.ka-section code {
+  font-family: var(--sl-font-system-mono);
+  font-size: 0.86em;
+  background: var(--sl-color-bg-inline-code);
+  padding: 0.08rem 0.34rem;
+  border-radius: 5px;
 }
 
 .ka-section-header {
@@ -231,8 +326,8 @@ header.header {
 }
 
 .ka-section-header h2 {
-  margin: 0 0 0.4rem;
-  font-size: clamp(1.5rem, 3vw, 2rem);
+  margin: 0 0 0.45rem;
+  font-size: clamp(1.5rem, 2.8vw, 2rem);
   letter-spacing: -0.02em;
   color: var(--sl-color-white);
 }
@@ -241,24 +336,31 @@ header.header {
   margin: 0;
   color: var(--sl-color-gray-3);
   font-size: 1.02rem;
-  max-width: 64ch;
+  line-height: 1.6;
+  max-width: 68ch;
 }
 
 .ka-grid-3 {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1.25rem;
+}
+
+@media (max-width: 52rem) {
+  .ka-grid-3 {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ka-card {
   border: 1px solid var(--sl-color-hairline);
   border-radius: 12px;
-  padding: 1.35rem 1.4rem;
+  padding: 1.4rem 1.45rem;
   background: var(--ka-surface);
   box-shadow: var(--ka-shadow-sm);
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.55rem;
 }
 
 .ka-card h3 {
@@ -270,7 +372,7 @@ header.header {
 .ka-card p {
   margin: 0;
   font-size: 0.93rem;
-  line-height: 1.55;
+  line-height: 1.58;
   color: var(--sl-color-gray-2);
 }
 
@@ -279,7 +381,7 @@ header.header {
   align-self: flex-start;
   font-size: 0.72rem;
   font-weight: 600;
-  padding: 0.18rem 0.55rem;
+  padding: 0.18rem 0.6rem;
   border-radius: 999px;
   background: var(--ka-accent-soft);
   color: var(--sl-color-accent);
@@ -298,19 +400,32 @@ header.header {
   background: var(--ka-accent-soft);
   color: var(--sl-color-white);
   font-size: 0.95rem;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
+/* Symmetric 3x2 grid on desktop, 2x3 on tablet, 1x6 on mobile (no orphan 6th card) */
 .ka-flow {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
-  gap: 0.85rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+@media (max-width: 56rem) {
+  .ka-flow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 34rem) {
+  .ka-flow {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ka-step {
   border: 1px solid var(--sl-color-hairline);
   border-radius: 12px;
-  padding: 1rem 1.05rem;
+  padding: 1.2rem 1.25rem;
   background: var(--ka-surface);
   box-shadow: var(--ka-shadow-sm);
 }
@@ -319,60 +434,66 @@ header.header {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.65rem;
-  height: 1.65rem;
+  width: 1.75rem;
+  height: 1.75rem;
   border-radius: 999px;
   background: var(--sl-color-accent);
   color: #ffffff;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 700;
-  margin-bottom: 0.55rem;
+  margin-bottom: 0.6rem;
 }
 
 .ka-step h3 {
-  margin: 0 0 0.3rem;
-  font-size: 0.98rem;
+  margin: 0 0 0.35rem;
+  font-size: 1.02rem;
   color: var(--sl-color-white);
 }
 
 .ka-step p {
   margin: 0;
-  font-size: 0.85rem;
-  line-height: 1.45;
+  font-size: 0.88rem;
+  line-height: 1.5;
   color: var(--sl-color-gray-3);
 }
 
 .ka-cost-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.25rem;
   margin: 1.25rem 0;
+}
+
+@media (max-width: 52rem) {
+  .ka-cost-strip {
+    grid-template-columns: 1fr;
+  }
 }
 
 .ka-metric {
   border: 1px solid var(--sl-color-hairline);
   border-radius: 12px;
-  padding: 1.25rem;
+  padding: 1.35rem 1.4rem;
   background: var(--ka-surface-alt);
 }
 
 .ka-metric-val {
-  font-size: 1.65rem;
+  font-size: 1.75rem;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--sl-color-accent);
-  margin-bottom: 0.2rem;
-}
-
-.ka-metric-label {
-  font-size: 0.92rem;
-  font-weight: 600;
-  color: var(--sl-color-white);
   margin-bottom: 0.25rem;
 }
 
+.ka-metric-label {
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: var(--sl-color-white);
+  margin-bottom: 0.3rem;
+}
+
 .ka-metric-sub {
-  font-size: 0.82rem;
+  font-size: 0.86rem;
   color: var(--sl-color-gray-3);
-  line-height: 1.45;
+  line-height: 1.5;
 }
