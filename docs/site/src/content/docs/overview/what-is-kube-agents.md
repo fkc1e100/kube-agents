@@ -30,13 +30,13 @@ Teams often ask why an always-on cluster agent matters when engineers already us
 | **When it runs** | On-demand sessions triggered by an engineer for an incident, ticket, or feature; stops when the session closes. | 24/7 inside your cluster across 10 scheduled watchdogs, 30-minute stall sweeps, and live event triage. |
 | **State and memory** | Scoped to the active branch, pasted logs, and current window. | Longitudinal fleet record: standing audit ledgers, peer-cluster drift baselines, upgrade retros, and curated team decisions in Git. |
 | **Security boundary** | Usually runs with the engineer's workstation shell, local `kubeconfig`, and personal Git tokens. | Isolated read-only Kubernetes proxy (Secrets redacted), credentialless sandbox, short-lived KMS tokens, PR-only writes. |
-| **Primary strength** | Inner-loop code authoring, refactoring, and acute break-fix. | Continuous GKE-certified upkeep across 70+ skills and 13 exam domains. |
+| **Primary strength** | Inner-loop code authoring, refactoring, and acute break-fix. | Continuous GKE fleet checks tested across 70+ skills and 13 operational benchmark domains. |
 
 **Better together via MCP:** Engineers can keep using their preferred IDE or CLI coding agent and connect it to `kube-agents`'s opt-in read-only A2A MCP endpoint (`A2A_MCP_DOOR=true`, over port-forward with no forge credentials). Local tools can request fleet diagnostics and inspect PRs without standing cluster write access. See [Using kube-agents over MCP](/kube-agents/install/mcp/).
 
 ## What installs on your cluster
 
-`kube-agents` installs into a single `kubeagents-system` namespace and co-exists safely on an existing GKE Standard or Autopilot cluster (no dedicated cluster required):
+`kube-agents` installs into a single `kubeagents-system` namespace and co-exists alongside other workloads on an existing GKE Standard or Autopilot cluster (no dedicated cluster required):
 
 - **Kubernetes operator (`k8s-operator/`)** — reconciles `PlatformAgent`, `AgentProfile`, `AgentPlugin`, `AgentSchedule`, and `Tier` custom resources.
 - **Agent runtime** — hosts the **Planning Agent** (chat front door and router), the **Platform Agent** (fleet audits, GitOps PRs, and skills), and per-cluster read-only **Cluster Agents** (single-cluster runtime debugging).

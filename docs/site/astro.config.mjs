@@ -23,7 +23,7 @@ export default defineConfig({
     starlight({
       title: 'kube-agents',
       description:
-        'An open-source GKE operations teammate. Read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests — backed by Google.',
+        'An open-source GKE operations teammate in the gke-labs organization: read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests.',
       logo: undefined,
       social: [
         {

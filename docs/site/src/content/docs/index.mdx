@@ -1,6 +1,6 @@
 ---
 title: kube-agents
-description: An open-source GKE operations teammate. Read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests — backed by Google.
+description: An open-source GKE operations teammate in the gke-labs organization. Read-only fleet audits, upgrade readiness, and reviewed GitOps pull requests.
 template: splash
 tableOfContents: false
 hero:
@@ -124,7 +124,7 @@ import WebConsoleDemos from "../../components/WebConsoleDemos.astro";
     <div class="ka-step">
       <div class="ka-step-num">6</div>
       <h3>GitOps applies</h3>
-      <p>Argo CD, Flux, or Config Sync rolls the approved change out safely.</p>
+      <p>Argo CD, Flux, or Config Sync reconciles the approved change.</p>
     </div>
   </div>
 </section>
@@ -132,35 +132,36 @@ import WebConsoleDemos from "../../components/WebConsoleDemos.astro";
 <section class="ka-section not-content">
   <div class="ka-section-header">
     <span class="ka-eyebrow">Why you can trust it</span>
-    <h2>Built for production safety, tested every release</h2>
+    <h2>Built for production boundaries, tested every release</h2>
     <p>
-      Connecting a bot to chat is easy. Keeping an operations agent safe, accurate, and
-      current across GKE releases is the hard part.
+      Connecting a bot to chat is easy. Keeping an operations agent contained,
+      verifiable, and current across GKE releases is the hard part.
     </p>
   </div>
   <div class="ka-grid-3">
     <div class="ka-card">
-      <span class="ka-card-tag is-green">13 Exam Domains</span>
+      <span class="ka-card-tag is-green">13 Benchmark Domains</span>
       <h3>Built and tested in the open</h3>
       <p>
-        Apache 2.0 open source built by Google engineers. Ships 70+ GKE skills gated by
-        hands-on <code>devops-bench</code> failure exams on every release.
+        Apache 2.0 open source in the <code>gke-labs</code> GitHub organization. Ships
+        70+ GKE skills gated by hands-on <code>devops-bench</code> failure tests on
+        every release.
       </p>
     </div>
     <div class="ka-card">
-      <span class="ka-card-tag is-green">Zero Direct Writes</span>
-      <h3>Never acts alone</h3>
+      <span class="ka-card-tag is-green">Read-Only by Default</span>
+      <h3>Human-in-the-loop GitOps</h3>
       <p>
-        Wire-level read-only Kubernetes proxy, gVisor credentialless shell sandbox, and
-        a deterministic &lt;100ms pre-push outage guard on every pull request.
+        Wire-level read-only Kubernetes proxy by default, gVisor credentialless shell
+        sandbox, and a deterministic pre-push check on every pull request.
       </p>
     </div>
     <div class="ka-card">
-      <span class="ka-card-tag">Roadmap Direction</span>
-      <h3>Earns autonomy over time</h3>
+      <span class="ka-card-tag">Exploratory Roadmap</span>
+      <h3>Graduated autonomy model</h3>
       <p>
-        Starts read-only as a New hire, drafts reviewed PRs as Junior, and builds toward
-        staging-tested Senior and admin-granted Expert levels you control.
+        Ships today with read-only audits (New hire) and reviewed PRs (Junior), with
+        exploratory design goals for staging-verified and policy-bounded tiers.
       </p>
     </div>
   </div>
@@ -172,30 +173,30 @@ import WebConsoleDemos from "../../components/WebConsoleDemos.astro";
     <h2>$0 software license, co-exists on any GKE cluster</h2>
     <p>
       Apache 2.0 open source with no license fee or token markup. Installs into its own
-      <code>kubeagents-system</code> namespace on any existing GKE Standard or Autopilot
-      cluster, using your own Gemini, Claude, GPT, SAP AI Core, or self-hosted Gemma tokens.
+      <code>kubeagents-system</code> namespace on an existing GKE Standard or Autopilot
+      cluster, billing model usage directly to your own provider account.
     </p>
   </div>
   <div class="ka-cost-strip">
     <div class="ka-metric">
-      <div class="ka-metric-val">~$0.06</div>
-      <div class="ka-metric-label">Quick alert check</div>
+      <div class="ka-metric-val">$0</div>
+      <div class="ka-metric-label">Software license</div>
       <div class="ka-metric-sub">
-        Modeled on Gemini 3.8 Flash (~285k tokens, 81% cached). Pro: ~$0.17.
+        Apache 2.0 open source. Pay only standard GKE compute and your own LLM tokens.
       </div>
     </div>
     <div class="ka-metric">
-      <div class="ka-metric-val">~$0.25</div>
-      <div class="ka-metric-label">Deep troubleshooting</div>
+      <div class="ka-metric-val">BYOT</div>
+      <div class="ka-metric-label">One gateway, any model</div>
       <div class="ka-metric-sub">
-        Modeled on Gemini 3.8 Flash (~1.1M tokens, 81% cached). Pro: ~$0.68.
+        Gemini (default), Anthropic Claude, OpenAI GPT, SAP AI Core, or self-hosted Gemma.
       </div>
     </div>
     <div class="ka-metric">
-      <div class="ka-metric-val">~$0.47</div>
-      <div class="ka-metric-label">End-to-end fix &amp; PR</div>
+      <div class="ka-metric-val">Built-in</div>
+      <div class="ka-metric-label">Caching &amp; spend caps</div>
       <div class="ka-metric-sub">
-        Modeled on Gemini 3.8 Flash (~2.4M tokens, 84% cached). Pro: ~$1.28.
+        Automatic prompt caching, adaptive reasoning, optional monthly budgets, and per-cluster telemetry.
       </div>
     </div>
   </div>
@@ -264,4 +265,6 @@ See [Quick start (GKE)](/kube-agents/install/quickstart-gke/) for prerequisites,
 
 ## Disclaimer
 
-`kube-agents` is developed in the open on GitHub under the Apache 2.0 license by Google engineers and community contributors. This is not an officially supported Google product.
+This is not an officially supported Google product. This project is not eligible for the Google Open Source Software Vulnerability Rewards Program.
+
+Google, Google Cloud, Google Kubernetes Engine, Vertex AI, and Gemini are trademarks of Google LLC. All other company and product names are trademarks of the companies with which they are associated.
