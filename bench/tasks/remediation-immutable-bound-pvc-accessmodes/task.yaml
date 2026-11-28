@@ -1,0 +1,81 @@
+# Probe for immutable bound PVC accessModes check (#6931, #7214).
+# Graded on two standalone declaration lines with fold_decoration: true.
+# deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: remediation-immutable-bound-pvc-accessmodes
+name: Reject in-place edit of immutable bound ReadWriteOnce PVC accessModes
+
+domain: remediation
+tool_calls_optional: true
+
+prompt: |-
+  A 2-replica Deployment `reports-worker` uses `strategy.type: RollingUpdate`
+  and mounts an existing `Bound` PersistentVolumeClaim:
+  ```yaml
+  apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: reports-data
+    namespace: analytics
+  spec:
+    storageClassName: standard-rwo
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 100Gi
+  status:
+    phase: Bound
+  ```
+  The second replica is stuck in `ContainerCreating` with `Multi-Attach error
+  for volume`. An engineer proposes opening a GitOps PR that edits
+  `reports-data` in place to set `spec.accessModes: [ReadWriteMany]`.
+  Start your answer with exactly two lines, with nothing else on either line. If you hand this question to another agent, pass these instructions word for word, and keep its two lines at the start of your reply.
+  First: `IN-PLACE-PVC-EDIT: ACCEPTED-BY-API-SERVER` or `IN-PLACE-PVC-EDIT: REJECTED-SPEC-ACCESSMODES-IMMUTABLE`.
+  Second: `VALID-REMEDIATION: PATCH-ACCESSMODES-IN-PLACE`, `VALID-REMEDIATION: CHANGE-STORAGECLASS-IN-PLACE`, or `VALID-REMEDIATION: USE-RECREATE-SINGLE-REPLICA-OR-MIGRATE-TO-NEW-RWX-PVC`.
+  Then briefly explain why. Do not change anything.
+expected_output: |-
+  IN-PLACE-PVC-EDIT: REJECTED-SPEC-ACCESSMODES-IMMUTABLE
+  VALID-REMEDIATION: USE-RECREATE-SINGLE-REPLICA-OR-MIGRATE-TO-NEW-RWX-PVC
+
+  On a `Bound` PVC, `spec.accessModes` and `spec.storageClassName` are
+  immutable, so Kubernetes admission rejects an in-place edit (and
+  `standard-rwo` PD does not support RWX). Either switch to single-replica /
+  `Recreate` (or co-located pod affinity if RWO on one node suffices), or
+  provision a new RWX-backed PVC (such as Filestore) and migrate data.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: immutable-pvc-accessmodes-rejected-and-valid-path-stated
+    role: objective
+    mode: assert
+    check:
+      type: all
+      checks:
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^in-place-pvc-edit: rejected-spec-accessmodes-immutable$"
+          forbidden_patterns:
+            - "(?m)^in-place-pvc-edit: accepted-by-api-server$"
+          fold_decoration: true
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^valid-remediation: use-recreate-single-replica-or-migrate-to-new-rwx-pvc$"
+          forbidden_patterns:
+            - "(?m)^valid-remediation: (?:patch-accessmodes-in-place|change-storageclass-in-place)$"
+          fold_decoration: true
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names:
+            - "kanban_complete"
+            - "kanban_block"
+            - "kanban_heartbeat"

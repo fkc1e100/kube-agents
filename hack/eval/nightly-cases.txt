@@ -1666,6 +1666,11 @@
 # it runs alone in the writers part.
 ./tasks/remediation-context-repository-owns-the-fix/task.yaml
 
+# Probe for immutable bound PVC accessModes remediation (#6931, #7214):
+# reject in-place ReadWriteOnce to ReadWriteMany edits on a bound PVC.
+# Structured two-line declaration check; deployer: noop, read-only.
+./tasks/remediation-immutable-bound-pvc-accessmodes/task.yaml
+
 # Stateful Config Connector (KCC) deletion-policy and IP guard (#1883, #7183):
 # production SQLInstance manifests require cnrm.cloud.google.com/deletion-policy:
 # abandon and ipv4Enabled: false (private IP). deployer: noop, no fixture.
