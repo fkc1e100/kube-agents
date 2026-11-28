@@ -1671,6 +1671,11 @@
 # abandon and ipv4Enabled: false (private IP). deployer: noop, no fixture.
 ./tasks/remediation-kcc-stateful-deletion-policy-abandon/task.yaml
 
+# Probe for compound livenessProbe remediation (#6703, #7212): diagnose
+# and fix both a wrong port and a 404 HTTP path in one pass rather than
+# fixing port alone. Structured two-line declaration check; deployer: noop.
+./tasks/remediation-liveness-probe-port-and-path/task.yaml
+
 # A fleet question on an install whose spec.scope.exclude.clusters names
 # seeded-b: the answer names seeded-a and seeded-c and does not report on
 # seeded-b (#3081, #3100). The runner excludes slot b for this case's

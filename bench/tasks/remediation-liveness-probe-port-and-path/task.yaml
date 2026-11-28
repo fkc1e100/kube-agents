@@ -1,0 +1,80 @@
+# Probe for compound livenessProbe port and path fix (#6703, #7212).
+# Graded on two standalone declaration lines with fold_decoration: true.
+# deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: remediation-liveness-probe-port-and-path
+name: Fix both livenessProbe port and HTTP path on failing Deployment
+
+domain: remediation
+tool_calls_optional: true
+
+prompt: |-
+  A Deployment's pods are restarting with `Liveness probe failed`. Here is
+  the container spec and recent startup/access log excerpt:
+  ```yaml
+  containers:
+    - name: web
+      image: us-docker.pkg.dev/prod-proj/apps/web@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      ports:
+        - containerPort: 8080
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: 9090
+  ```
+  Container logs & local curl check from inside the pod:
+  ```text
+  INFO listening on :8080
+  GET http://localhost:8080/        -> 200 OK
+  GET http://localhost:8080/healthz -> 404 Not Found
+  GET http://localhost:9090/healthz -> connection refused
+  ```
+  An engineer proposes a one-line patch changing `livenessProbe.httpGet.port`
+  from `9090` to `8080` and merging immediately.
+  Start your answer with exactly two lines, with nothing else on either line. If you hand this question to another agent, pass these instructions word for word, and keep its two lines at the start of your reply.
+  First: `PORT-ONLY-FIX-SUFFICIENT: YES-PORT-8080-RESOLVES-PROBE` or `PORT-ONLY-FIX-SUFFICIENT: NO-PATH-ALSO-FAILS-404`.
+  Second: `REQUIRED-PATCH: CHANGE-PORT-TO-8080-ONLY`, `REQUIRED-PATCH: CHANGE-PORT-TO-8080-AND-PATH-TO-ROOT`, or `REQUIRED-PATCH: REMOVE-LIVENESS-PROBE`.
+  Then briefly explain why. Do not change anything.
+expected_output: |-
+  PORT-ONLY-FIX-SUFFICIENT: NO-PATH-ALSO-FAILS-404
+  REQUIRED-PATCH: CHANGE-PORT-TO-8080-AND-PATH-TO-ROOT
+
+  Changing only `port` from `9090` to `8080` leaves `path: /healthz`, which
+  returns `404 Not Found` on port `8080`, so pods keep restarting. Patch both
+  `port: 8080` and `path: /` in one change.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: liveness-probe-port-and-path-both-fixed
+    role: objective
+    mode: assert
+    check:
+      type: all
+      checks:
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^port-only-fix-sufficient: no-path-also-fails-404$"
+          forbidden_patterns:
+            - "(?m)^port-only-fix-sufficient: yes-port-8080-resolves-probe$"
+          fold_decoration: true
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^required-patch: change-port-to-8080-and-path-to-root$"
+          forbidden_patterns:
+            - "(?m)^required-patch: (?:change-port-to-8080-only|remove-liveness-probe)$"
+          fold_decoration: true
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names:
+            - "kanban_complete"
+            - "kanban_block"
+            - "kanban_heartbeat"
