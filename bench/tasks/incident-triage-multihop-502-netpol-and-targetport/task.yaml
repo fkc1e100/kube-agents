@@ -1,0 +1,110 @@
+# Probe for multi-hop HTTP 502 NetworkPolicy + targetPort triage (#6704, #7213).
+# Graded on two standalone declaration lines with fold_decoration: true.
+# deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: incident-triage-multihop-502-netpol-and-targetport
+name: Multi-hop HTTP 502 triage catches both NetworkPolicy and Service targetPort
+
+domain: incident-triage
+tool_calls_optional: true
+
+prompt: |-
+  External requests routed by an Ingress controller running in namespace
+  `edge-gw` (serving an Ingress in namespace `orders`) to backend service
+  `orders-svc` in namespace `orders` return HTTP 502. Here are the
+  three manifests on the path:
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: orders-ingress
+    namespace: orders
+  spec:
+    podSelector:
+      matchLabels:
+        app: orders-api
+    policyTypes: [Ingress]
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: legacy-gw
+  ---
+  apiVersion: v1
+  kind: Service
+  metadata:
+    name: orders-svc
+    namespace: orders
+  spec:
+    selector:
+      app: orders-api
+    ports:
+      - port: 80
+        targetPort: 8081
+  ---
+  apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    name: orders-api
+    namespace: orders
+  spec:
+    template:
+      metadata:
+        labels:
+          app: orders-api
+      spec:
+        containers:
+          - name: api
+            ports:
+              - containerPort: 8080
+  ```
+  An on-call engineer proposes updating `orders-ingress` to allow `edge-gw`
+  and closing the incident.
+  Start your answer with exactly two lines, with nothing else on either line. If you hand this question to another agent, pass these instructions word for word, and keep its two lines at the start of your reply.
+  First: `FAULTS-ON-PATH: NETWORKPOLICY-ONLY`, `FAULTS-ON-PATH: TARGETPORT-ONLY`, `FAULTS-ON-PATH: BOTH-NETWORKPOLICY-AND-TARGETPORT`, or `FAULTS-ON-PATH: SELECTOR-MISMATCH`.
+  Second: `SINGLE-PR-FIX: UPDATE-NETWORKPOLICY-ONLY`, `SINGLE-PR-FIX: UPDATE-TARGETPORT-ONLY`, or `SINGLE-PR-FIX: UPDATE-NETWORKPOLICY-AND-SERVICE-TARGETPORT`.
+  Then briefly explain why. Do not change anything.
+expected_output: |-
+  FAULTS-ON-PATH: BOTH-NETWORKPOLICY-AND-TARGETPORT
+  SINGLE-PR-FIX: UPDATE-NETWORKPOLICY-AND-SERVICE-TARGETPORT
+
+  There are two chained faults: `orders-ingress` allows only `legacy-gw`
+  instead of `edge-gw`, and `orders-svc` forwards to `targetPort: 8081` while
+  the `orders-api` container listens on `containerPort: 8080`. Fixing only
+  the NetworkPolicy still leaves HTTP 502; fix both in a single PR.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: multihop-netpol-and-targetport-both-identified
+    role: objective
+    mode: assert
+    check:
+      type: all
+      checks:
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^faults-on-path: both-networkpolicy-and-targetport$"
+          forbidden_patterns:
+            - "(?m)^faults-on-path: (?:networkpolicy-only|targetport-only|selector-mismatch)$"
+          fold_decoration: true
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^single-pr-fix: update-networkpolicy-and-service-targetport$"
+          forbidden_patterns:
+            - "(?m)^single-pr-fix: (?:update-networkpolicy-only|update-targetport-only)$"
+          fold_decoration: true
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names:
+            - "kanban_complete"
+            - "kanban_block"
+            - "kanban_heartbeat"

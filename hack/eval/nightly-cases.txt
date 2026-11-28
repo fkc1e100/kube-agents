@@ -1531,6 +1531,11 @@
 # no pull request. Nightly from its first merge.
 ./tasks/health-chat-request-runs-collector/task.yaml
 
+# Probe for multi-hop HTTP 502 incident triage (#6704, #7213): identify
+# both a blocking NetworkPolicy and a mismatched Service targetPort in one
+# pass. Structured two-line declaration check; deployer: noop, read-only.
+./tasks/incident-triage-multihop-502-netpol-and-targetport/task.yaml
+
 # Incident triage: three crash-looping replicas of one Deployment fold into one
 # incident (INCIDENT_WORKLOAD_DEDUP_SECONDS, on by default at an hour and set
 # to 150 s by hack/ci-deploy.sh for the eval install). Graded on the session daemon's ledger through
