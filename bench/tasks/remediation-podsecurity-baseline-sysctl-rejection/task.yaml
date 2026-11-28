@@ -1,0 +1,76 @@
+# Probe for PodSecurity baseline sysctl rejection (#6932, #7215).
+# Graded on two standalone declaration lines with fold_decoration: true.
+# deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: remediation-podsecurity-baseline-sysctl-rejection
+name: Reject moving net.core.somaxconn into securityContext.sysctls under PodSecurity baseline
+
+domain: security
+tool_calls_optional: true
+
+prompt: |-
+  A Deployment in namespace `app-ns` (labeled
+  `pod-security.kubernetes.io/enforce: baseline`) is failing in
+  `Init:CrashLoopBackOff` because a non-privileged `initContainer` tries to
+  run `sysctl -w net.core.somaxconn=1024` and gets `Read-only file system` /
+  `permission denied`. An engineer proposes removing the `initContainer` and
+  instead adding this block to the Pod spec:
+  ```yaml
+  spec:
+    securityContext:
+      sysctls:
+        - name: net.core.somaxconn
+          value: "1024"
+  ```
+  Evaluate whether Kubernetes admission in `app-ns` will accept this Pod spec
+  and what to do instead.
+  Start your answer with exactly two lines, with nothing else on either line. If you hand this question to another agent, pass these instructions word for word, and keep its two lines at the start of your reply.
+  First: `PODSECURITY-BASELINE-ADMISSION: ALLOWED-SAFE-SYSCTL` or `PODSECURITY-BASELINE-ADMISSION: REJECTED-FORBIDDEN-SYSCTL`.
+  Second: `RECOMMENDATION: MOVE-TO-POD-SECURITY-CONTEXT-SYSCTLS`, `RECOMMENDATION: MAKE-INITCONTAINER-PRIVILEGED`, or `RECOMMENDATION: REMOVE-SYSCTL-OR-ADJUST-POLICY-AT-CLUSTER-LEVEL`.
+  Then briefly explain why. Do not change anything.
+expected_output: |-
+  PODSECURITY-BASELINE-ADMISSION: REJECTED-FORBIDDEN-SYSCTL
+  RECOMMENDATION: REMOVE-SYSCTL-OR-ADJUST-POLICY-AT-CLUSTER-LEVEL
+
+  `net.core.somaxconn` is an unsafe (though namespaced) sysctl excluded from
+  both kubelet's default safe sysctl allowlist and the Kubernetes Pod Security
+  Standards (`baseline`) allowlist, so Pod creation fails at admission with
+  `violates PodSecurity "baseline": forbidden sysctls`.
+  Making the initContainer privileged also violates `baseline`. Remove the
+  unneeded sysctl override or address it via node/namespace policy governance.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: podsecurity-baseline-sysctl-rejection-stated
+    role: objective
+    mode: assert
+    check:
+      type: all
+      checks:
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^podsecurity-baseline-admission: rejected-forbidden-sysctl$"
+          forbidden_patterns:
+            - "(?m)^podsecurity-baseline-admission: allowed-safe-sysctl$"
+          fold_decoration: true
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^recommendation: remove-sysctl-or-adjust-policy-at-cluster-level$"
+          forbidden_patterns:
+            - "(?m)^recommendation: (?:move-to-pod-security-context-sysctls|make-initcontainer-privileged)$"
+          fold_decoration: true
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names:
+            - "kanban_complete"
+            - "kanban_block"
+            - "kanban_heartbeat"

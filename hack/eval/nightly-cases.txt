@@ -1671,6 +1671,11 @@
 # abandon and ipv4Enabled: false (private IP). deployer: noop, no fixture.
 ./tasks/remediation-kcc-stateful-deletion-policy-abandon/task.yaml
 
+# Probe for PodSecurity baseline sysctl admission guard (#6932, #7215):
+# net.core.somaxconn in pod securityContext.sysctls is rejected under
+# PodSecurity baseline. Structured two-line declaration check; deployer: noop.
+./tasks/remediation-podsecurity-baseline-sysctl-rejection/task.yaml
+
 # A fleet question on an install whose spec.scope.exclude.clusters names
 # seeded-b: the answer names seeded-a and seeded-c and does not report on
 # seeded-b (#3081, #3100). The runner excludes slot b for this case's
