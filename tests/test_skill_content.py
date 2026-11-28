@@ -598,5 +598,82 @@ class KubeDnsAutoscalingDiagnosticsTest(unittest.TestCase):
                 self.assertIn(expected, content, f"{rel} missing {expected!r}")
 
 
+class ServiceMeshSkewAndChannelPreflightTest(unittest.TestCase):
+    """Pins Part of #2797 mesh version skew, Envoy xDS NACK, and release-channel pre-change checks."""
+
+    def test_service_connectivity_and_pod_crashloop_cover_mesh_skew_and_envoy_nacks(self):
+        for rel in (
+            "agents/cluster/skills/service-connectivity/SKILL.md",
+            "agents/cluster/persona/skills/service-connectivity/SKILL.md",
+        ):
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for expected in (
+                "istio-system",
+                "asm-system",
+                "controlplanerevisions.mesh.cloud.google.com",
+                "istio-proxy",
+                "istio.io/rev",
+                "proxy.istio.io/config",
+                "istio_authn",
+                "no_healthy_upstream",
+                "gcloud container fleet mesh describe",
+                "Do not recommend raising `istio-proxy` `resources.limits.memory`",
+            ):
+                self.assertIn(expected, content, f"{rel} missing {expected!r}")
+
+        for rel in (
+            "agents/cluster/skills/pod-crashloop-oom/SKILL.md",
+            "agents/cluster/persona/skills/pod-crashloop-oom/SKILL.md",
+        ):
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn("istio_authn", content, rel)
+            self.assertIn("service-connectivity", content, rel)
+
+    def test_routing_exempts_mesh_nacks_from_system_namespace_folding(self):
+        cluster_soul = (REPO_ROOT / "agents/cluster/SOUL.md").read_text(encoding="utf-8")
+        section = cluster_soul[cluster_soul.index("## 3. Skill Discovery") : cluster_soul.index("## 4.")]
+        self.assertIn("service-mesh / Envoy NACK symptoms", section)
+        self.assertIn("istio_authn", section)
+
+        session_persona = (REPO_ROOT / "a2a/persona/session/persona.md").read_text(encoding="utf-8")
+        self.assertIn("Envoy xDS NACK loops", session_persona)
+
+        for rel in (
+            "agents/cluster/skills/workload-triage-scan/SKILL.md",
+            "agents/cluster/persona/skills/workload-triage-scan/SKILL.md",
+            "agents/cluster/skills/gke-workload-troubleshooting/SKILL.md",
+            "agents/cluster/persona/skills/gke-workload-troubleshooting/SKILL.md",
+        ):
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            self.assertIn("istio_authn", content, rel)
+            self.assertIn("asm-system", content, rel)
+
+    def test_gke_upgrades_and_sops_warn_before_release_channel_change_on_managed_mesh(self):
+        for rel in (
+            "agents/platform/skill-overlays/gke-upgrades/append.md",
+            "agents/platform/skills/gke-upgrades/SKILL.md",
+            "agents/platform/governance/fleet_consistency_drift_sop.md",
+            "agents/platform/governance/security_patch_orchestrator_sop.md",
+        ):
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for expected in (
+                "Managed Cloud Service Mesh",
+                "mesh_skew_check.py",
+                "--kubeconfig",
+                "gcloud container fleet mesh describe",
+                "istio-proxy",
+                "no_healthy_upstream",
+            ):
+                self.assertIn(expected, content, f"{rel} missing {expected!r}")
+
+        for rel in (
+            "agents/cluster/skills/workload-triage-scan/SKILL.md",
+            "agents/cluster/persona/skills/workload-triage-scan/SKILL.md",
+        ):
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            step3 = content[content.index("3. If the scan ends") : content.index("4. Otherwise,")]
+            self.assertIn("service-mesh / Envoy NACK symptoms", step3, rel)
+
+
 if __name__ == "__main__":
     unittest.main()

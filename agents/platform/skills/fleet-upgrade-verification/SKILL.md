@@ -21,7 +21,7 @@ exclusion or window, node pools too far below the target, or a blocker one of th
 of the upgrade-failure catalogue files, and, as risks that do not block, what those rules name to
 watch, a zonal control plane among them (see "Check upgrade readiness"). For upgrade plans,
 runbooks and checklists, use the
-`gke-upgrades` skill; it links back here when the question is one these two scripts answer.
+`gke-upgrades` skill; it links back here when the question is one these scripts answer. For pre-change in-cluster service-mesh sidecar skew and Envoy xDS NACK checks (`scripts/mesh_skew_check.py`), see [`references/mesh-skew-check.md`](references/mesh-skew-check.md).
 
 "Version skew" here is the gap between a member's versions and the target. It is not
 configuration drift: the fleet-consistency audit compares a cluster's configuration against its

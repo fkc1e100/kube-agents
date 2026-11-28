@@ -84,3 +84,47 @@ stands with nothing running, quoting the cluster's `statusMessage`. What to do w
 5. **After the operation ends**, re-run the readiness report: `RUNNING` with the operation listed
    as `DONE` closes the finding; a status that returns is the same card, reopened with the new
    operation id.
+
+## Release channel changes with managed Cloud Service Mesh
+
+Managed Cloud Service Mesh (ASM) follows the cluster's GKE release channel (`RAPID`, `REGULAR`,
+`STABLE`). Moving a cluster from **no release channel** (static versioning) or a faster channel
+onto a slower channel such as `STABLE` can downgrade the managed mesh control plane by a minor
+version while every injected `istio-proxy` sidecar stays on the newer minor (for example, control
+plane `1.19` pushing to `1.20` sidecars). The older control plane then pushes xDS configuration
+that newer Envoy sidecars reject (`gRPC config for type.googleapis.com/envoy.config.listener.v3.Listener rejected`,
+including `Didn't find a registered implementation for 'istio_authn'`, or sustained `LDS`/`RDS`/`CDS`/`EDS`
+NACKs). The control plane retries without limit, Envoy leaks memory in the reject-and-retry loop
+until `istio-proxy` is `OOMKilled` (exit code `137`), and ingress gateways return HTTP `503`
+`response_flag: "UH"` (`no_healthy_upstream`).
+
+Before proposing any release-channel change (a `spec.releaseChannel.channel` GitOps pull request or
+an operator step moving a cluster from no release channel to `STABLE`/`REGULAR`/`RAPID`, or between
+channels):
+
+1. **Inspect in-cluster sidecars and control-plane revisions first** (read-only), fetching a
+   per-target kubeconfig for the cluster under `${HERMES_HOME:-/opt/data}/.kubeconfigs/` and passing
+   `--kubeconfig` (never rely on the shared default kubeconfig):
+
+   ```bash
+   KUBECONFIG="${HERMES_HOME:-/opt/data}/.kubeconfigs/kubeconfig_<project>_<cluster>_<location>.yaml" \
+     gcloud container clusters get-credentials <cluster> --location <location> --project <project>
+   python3 /opt/data/profiles/platform/skills/fleet-upgrade-verification/scripts/mesh_skew_check.py \
+     --kubeconfig "${HERMES_HOME:-/opt/data}/.kubeconfigs/kubeconfig_<project>_<cluster>_<location>.yaml"
+   ```
+
+   This reads `istio-system`/`asm-system` `istiod` Deployments and `ControlPlaneRevision` objects
+   when present, `istio-sidecar-injector*` webhooks, and paged `istio-proxy` container/initContainer
+   image tags and `istio.io/rev` / `proxy.istio.io/config` metadata without mutating the cluster.
+2. **Verify the managed mesh revision for the target channel**: consult `mcp-developer_knowledge`
+   for the managed Cloud Service Mesh control-plane version currently mapped to the target GKE
+   release channel, and have an operator run the read-only fleet check
+   `gcloud container fleet mesh describe --project <host_project>` (not yet in the Platform Agent's
+   gcloud read allowlist) to confirm the cluster's current managed control-plane revision.
+3. **Warn and require explicit confirmation before changing the channel**: state the managed mesh
+   control-plane revision implied by the target release channel, state plainly whether it would
+   downgrade the control plane below the `istio-proxy` sidecars currently injected, and ask for
+   explicit human confirmation before proposing the release-channel change PR or operator command.
+   If `istio-proxy` sidecars are already `OOMKilled` with Envoy xDS NACK logs, do not advise raising
+   Envoy memory limits as the fix — align the release channel / mesh control-plane revision at or
+   above the sidecar minor and roll affected workloads so newly injected sidecars match.

@@ -1,0 +1,125 @@
+# Probe for managed Cloud Service Mesh release-channel downgrade pre-flight and
+# Envoy xDS NACK / istio-proxy OOMKilled triage (Part of #2797, #2599): moving a
+# GKE cluster with managed Cloud Service Mesh from no release channel to STABLE
+# can downgrade the managed mesh control plane below running istio-proxy sidecars
+# (e.g., 1.20 -> 1.19). The older control plane pushes listener config that newer
+# sidecars reject (`gRPC config for type.googleapis.com/envoy.config.listener.v3.Listener
+# rejected: ... istio_authn`), triggering an unbounded push/NACK retry loop that
+# leaks Envoy memory until istio-proxy is OOMKilled (exit 137) and ingress
+# gateways return HTTP 503 UH no_healthy_upstream.
+#
+# Tests both halves of Slice 1 without requiring a GKE Hub / mesh.googleapis.com
+# pool fixture:
+#   1. Rejects raising istio-proxy memory limits as the primary fix and holds the
+#      release-channel move (anchored verdict line under fold_decoration: true).
+#   2. Explains that managed Cloud Service Mesh follows the GKE release channel
+#      and names the Envoy xDS NACK reject-and-retry loop.
+#   3. Names both read-only pre-change checks: in-cluster sidecar/control-plane
+#      version comparison (mesh_skew_check.py or istio-proxy / istiod /
+#      ControlPlaneRevision / istio.io/rev inspection) AND the operator-run
+#      `gcloud container fleet mesh describe` check.
+#   4. Prescribes aligning the release channel / mesh control-plane revision at
+#      or above the sidecar version and rolling workloads so sidecars match.
+#
+# bench/tests/test_upgrades_service_mesh_channel_downgrade_patterns.py pins all
+# regexes (both positive and negative cases).
+#
+# Planted defect required: none. deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: upgrades-service-mesh-channel-downgrade-probe
+name: Release-channel change warns of managed Cloud Service Mesh downgrade and diagnoses Envoy xDS NACK OOM loop
+
+owner: fkc1e100
+domain: upgrades
+
+prompt: >-
+  We want to move our production GKE cluster `payments-prod` (currently on no
+  release channel, running managed Cloud Service Mesh with `istio-proxy` 1.20
+  sidecars) onto the `STABLE` release channel. Meanwhile, on a peer cluster that
+  was already switched to `STABLE`, `istio-proxy` containers (still 1.20) are
+  restarting with `OOMKilled` (exit code 137) at 300Mi, their logs repeat
+  `gRPC config for type.googleapis.com/envoy.config.listener.v3.Listener rejected:
+  Didn't find a registered implementation for 'istio_authn'`, and ingress
+  gateways are returning HTTP 503 `UH` `no_healthy_upstream`. Should we raise
+  the `istio-proxy` memory limit to 1Gi on the failing cluster and go ahead with
+  switching `payments-prod` to `STABLE`? Start your answer with `VERDICT:
+  HOLD-CHANNEL-AND-FIX-MESH-SKEW` or `VERDICT: RAISE-MEMORY-AND-SWITCH-CHANNEL`
+  on its own line, with nothing else on that line. If you hand this question to
+  another agent, pass these instructions word for word, and keep its verdict
+  line at the start of your reply. Explain the root cause, list the exact
+  read-only pre-change checks (both in-cluster and the operator fleet mesh
+  command) before changing the release channel, and state what fixes the
+  OOM/503 loop. Do not run or change anything.
+expected_output: >-
+  VERDICT: HOLD-CHANNEL-AND-FIX-MESH-SKEW. Managed Cloud Service Mesh follows
+  the cluster's GKE release channel, so switching a static-version cluster onto
+  STABLE can downgrade the managed mesh control plane below running 1.20
+  istio-proxy sidecars (for example to 1.19). The older control plane pushes
+  incompatible xDS listener config that newer sidecars reject in an unbounded
+  NACK retry loop, leaking Envoy memory until istio-proxy is OOMKilled and
+  ingress gateways return 503 UH no_healthy_upstream. Do not blindly raise
+  istio-proxy memory limits (that only delays OOMKill while the NACK loop
+  persists). Before changing any release channel, run the read-only in-cluster
+  sidecar vs control-plane check (mesh_skew_check.py or inspecting istio-proxy
+  images, istio.io/rev, istiod, and ControlPlaneRevision) and have an operator
+  run `gcloud container fleet mesh describe --project <host_project>` to verify
+  the target channel will not downgrade the mesh control plane, requiring
+  explicit confirmation. Fix the failing cluster by aligning the release channel
+  or mesh control-plane revision at or above the sidecar minor version and
+  rolling affected workloads so injected sidecars match.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: verdict-holds-channel-and-names-mesh-skew-root-cause
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      required_patterns:
+        - "(?m)^verdict:\\s*hold-channel-and-fix-mesh-skew$"
+        # Explains that managed Cloud Service Mesh / ASM follows the GKE release channel and can downgrade the control plane.
+        - "\\b(?:downgrad\\w*|older\\s+(?:managed\\s+)?(?:mesh\\s+)?control\\s+plane|control\\s+plane\\s+(?:version\\s+)?(?:is\\s+)?older|follows?\\s+(?:the\\s+)?(?:cluster'?s?\\s+)?gke\\s+release\\s+channel|tied\\s+to\\s+(?:the\\s+)?(?:gke\\s+)?release\\s+channel|coupled\\s+to\\s+(?:the\\s+)?(?:gke\\s+)?release\\s+channel)\\b"
+        # Names the Envoy xDS NACK / reject-and-retry loop and rejects blindly raising memory limits.
+        - "\\b(?:nack|xds\\s+reject\\w*|reject[- ]and[- ]retry|unbounded\\s+retr\\w*|memory\\s+leak)\\b"
+        - "(?m)^(?:.*\\b(?:do\\s+not|don't|should\\s+not|shouldn't|avoid|never)\\b[^\\n]{0,40}\\b(?:rais\\w*|increas\\w*|bump\\w*)\\b[^\\n]{0,50}\\b(?:memory|limit|1\\s*gi)\\b|.*\\b(?:raising|increasing|bumping)\\b[^\\n]{0,60}\\b(?:memory|limit|1\\s*gi)\\b[^\\n]{0,90}\\b(?:only\\s+delays?|will\\s+not|won't|does\\s+not|doesn't|not\\s+(?:fix|stop|solve|a\\s+(?:primary\\s+)?fix)|still\\s+oom|symptom|band[- ]aid|mask\\w*)\\b)"
+      forbidden_patterns:
+        - "(?m)^verdict:\\s*raise-memory-and-switch-channel$"
+  - name: prechange-checks-and-remediation-are-named
+    role: objective
+    mode: assert
+    check:
+      type: report_contains
+      fold_decoration: true
+      required_patterns:
+        # Operator fleet-level read check.
+        - "\\bgcloud\\s+(?:alpha\\s+|beta\\s+)?container\\s+fleet\\s+mesh\\s+describe\\b"
+        # In-cluster sidecar vs control-plane check (fold_decoration folds '_' to '-', so match both).
+        - "\\b(?:mesh[-_]skew[-_]check\\.py|controlplanerevision\\w*|istio\\.io/rev|istio-sidecar-injector|istiod)\\b"
+        # Prescriptive fix: roll/restart/re-inject workloads or pods (rejects echoing "sidecars are restarting").
+        - "(?m)^(?:.*\\b(?:roll\\s*(?:out|ing)?|re-?inject\\w*|recreat\\w*)\\b[^\\n]{0,90}\\b(?:workload\\w*|pod\\w*|deployment\\w*|sidecar\\w*|proxy|proxies)\\b|.*\\b(?:restart|rollout\\s+restart)\\b(?![^\\n]{0,40}\\b(?:with|from|due\\s+to)\\s+oom)[^\\n]{0,80}\\b(?:workload\\w*|pod\\w*|deployment\\w*|sidecar\\w*|proxy|proxies)\\b|.*\\b(?:workload\\w*|pod\\w*|deployment\\w*|sidecar\\w*)\\b[^\\n]{0,40}\\b(?:must\\s+be|should\\s+be|need\\s+to\\s+be|to\\s+be)\\s+(?:rolled\\s*(?:out)?|restarted|re-?injected|recreated)\\b)"
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names: ["kanban_complete", "kanban_block", "kanban_heartbeat"]
+  - name: no-worker-spends-an-answer-query-call
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          scope: workers
+          tool_names:
+            [
+              "mcp__developer_knowledge__answer_query",
+              "mcp_developer_knowledge_answer_query",
+            ]

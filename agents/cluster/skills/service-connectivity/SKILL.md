@@ -1,11 +1,11 @@
 ---
 name: service-connectivity
-description: Finds why one workload cannot reach another service in the cluster or hits DNS resolution failures. Use for connection timeouts, "dial tcp i/o timeout", "connection refused" to a Service, a Service with no endpoints, traffic blocked by a NetworkPolicy, and DNS resolution timeouts ("lookup ... i/o timeout", "no such host", "Temporary failure in name resolution", "SERVFAIL") or kube-dns saturation during rapid node scaling. Reads the Service, its endpoints, NetworkPolicies, and kube-system DNS components (kube-dns, kube-dns-autoscaler, node-local-dns) plus cluster DNS settings, and proposes the fix.
+description: Finds why one workload cannot reach another service in the cluster, hits DNS resolution failures, or suffers Istio / Cloud Service Mesh sidecar version skew and Envoy xDS NACK loops. Use for connection timeouts, "dial tcp i/o timeout", "connection refused" to a Service, a Service with no endpoints, traffic blocked by a NetworkPolicy, DNS resolution timeouts ("lookup ... i/o timeout", "no such host", "Temporary failure in name resolution", "SERVFAIL") or kube-dns saturation during rapid node scaling, and service-mesh Envoy NACK loops (`gRPC config for type.googleapis.com/envoy.config.* rejected`, `istio_authn`), `istio-proxy` OOMKilled restarts, or ingress gateway HTTP 503 `UH` (`no_healthy_upstream`). Reads the Service, its endpoints, NetworkPolicies, kube-system DNS components, and `istio-system`/`asm-system` mesh control-plane revisions alongside `istio-proxy` versions and logs, and proposes the fix.
 ---
 
 # Task
 
-Name why traffic from a source workload to a target Service fails or why DNS resolution times out, quote the evidence, and propose the fix.
+Name why traffic from a source workload to a target Service fails, why DNS resolution times out, or why service-mesh `istio-proxy` sidecars hit Envoy xDS NACK loops and OOMKills, quote the evidence, and propose the fix.
 
 # Workflow
 
@@ -70,6 +70,41 @@ When workloads report DNS errors (`lookup ... i/o timeout`, `no such host`, `Tem
      - Enable NodeLocal DNSCache (`addonsConfig.dnsCacheConfig.enabled: true`) when disabled — or confirm its active status if already enabled — to cache lookups locally on each node (`kube-dns` + NodeLocal DNSCache keeps the `kube-dns` Service ClusterIP in `/etc/resolv.conf` intercepted locally and upgrades upstream queries to TCP, eliminating per-lookup UDP conntrack exhaustion; enabling it on Standard recreates nodes, so schedule a maintenance window).
      - Recommend migrating node pools to Cloud DNS for GKE (`networkConfig.dnsConfig.clusterDns: CLOUD_DNS`) when scaling velocity routinely exceeds `kube-dns` autoscaler headroom (`CLOUD_DNS` + NodeLocal DNSCache uses `169.254.20.10` forwarding misses to `169.254.169.254`, while `CLOUD_DNS` without NodeLocal DNSCache queries `169.254.169.254` directly; existing Standard node pools must be recreated during migration, and `Deployment/kube-dns` continues running on migrated clusters until manually scaled to 0).
 
+## Service mesh (Istio / Cloud Service Mesh) version skew and Envoy NACK loops
+
+When `istio-proxy` sidecars restart with `OOMKilled` (exit code `137`), emit Envoy xDS rejection logs (`gRPC config for type.googleapis.com/envoy.config.* rejected`, such as `Listener` / `RouteConfiguration` / `Cluster` / `ClusterLoadAssignment` NACKs or `Didn't find a registered implementation for 'istio_authn'`), or ingress gateways return HTTP `503` with `response_flag: "UH"` and `response_details: "no_healthy_upstream"` (especially after a GKE release-channel change), inspect `istio-system` and `asm-system` directly without skipping them:
+
+1. Compare active mesh control-plane revisions against injected `istio-proxy` sidecar image tags (both `containers` and native-sidecar `initContainers`), `istio.io/rev` labels, `proxy.istio.io/config` annotations, and `istio-proxy` `OOMKilled` restarts using bounded read-only projections:
+
+   ```bash
+   kubectl get deployments -n istio-system --ignore-not-found -o custom-columns='NAME:.metadata.name,REV:.metadata.labels.istio\.io/rev,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[*].image'
+   kubectl get deployments -n asm-system --ignore-not-found -o custom-columns='NAME:.metadata.name,REV:.metadata.labels.istio\.io/rev,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[*].image'
+   kubectl get controlplanerevisions.mesh.cloud.google.com -A --ignore-not-found -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name,CHANNEL:.spec.channel,VERSION:.metadata.annotations.mesh\.cloud\.google\.com/version'
+   kubectl get mutatingwebhookconfigurations -o custom-columns='NAME:.metadata.name,REV:.metadata.labels.istio\.io/rev' | grep -i istio || true
+   kubectl get pods -n <affected_namespace> -o json | jq '[.items[] | {name: .metadata.name, rev: .metadata.labels["istio.io/rev"], proxyConfig: .metadata.annotations["proxy.istio.io/config"], proxyImages: ([.spec.containers[], (.spec.initContainers // [])[]] | map(select(.name == "istio-proxy") | .image)), proxyStatus: ([(.status.containerStatuses // [])[], (.status.initContainerStatuses // [])[]] | map(select(.name == "istio-proxy") | {restarts: .restartCount, lastReason: .lastState.terminated.reason, lastExit: .lastState.terminated.exitCode}))} | select((.proxyImages | length) > 0)]'
+   ```
+
+   If the cluster uses managed Cloud Service Mesh (`asm-managed*` revision with no in-cluster `istiod` Deployment image version), note that the managed control-plane minor version must also be confirmed by an operator running `gcloud container fleet mesh describe --project <host_project>` (read-only operator check; not in the Cluster Agent's gcloud allowlist).
+
+2. Inspect bounded logs from one affected `istio-proxy` (both `--previous` if restarted and current), `istiod` (when present in `istio-system`/`asm-system`), and the ingress gateway proxy:
+
+   ```bash
+   kubectl logs <affected_pod> -n <affected_namespace> -c istio-proxy --previous --tail=200
+   kubectl logs <affected_pod> -n <affected_namespace> -c istio-proxy --tail=200
+   kubectl logs -n istio-system -l app=istiod --tail=200
+   kubectl logs -n <gateway_namespace> -l istio=ingressgateway -c istio-proxy --tail=200
+   ```
+
+3. Join all four signals into **one root-cause finding** when they occur together:
+   - Control-plane minor version older than running `istio-proxy` sidecars (for example, `1.19` control plane pushing xDS to `1.20` sidecars)
+   - Envoy xDS NACK rejections (`LDS`/`RDS`/`CDS`/`EDS` — `Listener`, `RouteConfiguration`, `Cluster`, `ClusterLoadAssignment`, including `Didn't find a registered implementation for 'istio_authn'`) in `istio-proxy` or `ADS:...: NACK` in `istiod` logs
+   - `istio-proxy` containers restarting with `OOMKilled` (exit code `137`)
+   - Ingress gateway access logs showing HTTP `503` with `response_flag: "UH"` and `response_details: "no_healthy_upstream"`
+
+   Name **managed Cloud Service Mesh control-plane downgrade** (for example after moving a cluster from no release channel or a faster channel onto `STABLE`, because managed Cloud Service Mesh follows the cluster's GKE release channel) as the cause when control-plane minor < sidecar minor.
+
+   **Do not recommend raising `istio-proxy` `resources.limits.memory` as the primary fix** when xDS NACK loops are present: Envoy leaks memory on every unbounded reject-and-retry cycle, so a higher memory limit only delays OOMKill while the loop persists. Propose aligning the cluster's GKE release channel / managed Cloud Service Mesh control-plane revision at or above the injected sidecar minor version (after verifying `gcloud container fleet mesh describe --project <host_project>`) and then rolling affected workloads so newly injected sidecars match the active control plane.
+
 ## Reporting
 
 Record the finding as [`workload-triage-scan/references/reporting.md`](../workload-triage-scan/references/reporting.md) describes. Stop once the cause, the evidence and the patch are written.
@@ -84,9 +119,10 @@ Record the finding as [`workload-triage-scan/references/reporting.md`](../worklo
 - DNS timeouts during scale-outs with `DaemonSet/node-local-dns` absent and `addonsConfig.dnsCacheConfig` omitted or disabled: every pod UDP lookup to the `kube-dns` ClusterIP takes a node conntrack entry (multiplied by `ndots:5`) and saturates `kube-dns` before `kube-dns-autoscaler` adds replicas; recommend enabling NodeLocal DNSCache (in a maintenance window on Standard) or migrating to Cloud DNS (`CLOUD_DNS`), plus tighter `kube-dns-autoscaler` overrides if staying on `kube-dns`.
 - DNS timeouts on GKE Autopilot, or on a `CLOUD_DNS` cluster with `Deployment/kube-dns` absent or scaled to 0: confirm `CLOUD_DNS` and NodeLocal DNSCache status, do not propose `ConfigMap/kube-dns-autoscaler` edits, and check `NetworkPolicy` egress to `169.254.20.10` / `169.254.169.254`, `node-local-dns` pod health/logs, and Cloud DNS quotas or forwarding latency.
 - `Deployment/kube-dns-autoscaler` below desired replicas or crashing: `kube-dns` cannot scale out with new nodes; inspect `kube-dns-autoscaler` pods and events.
+- `istio-proxy` `OOMKilled` (exit code `137`) + `gRPC config for type.googleapis.com/envoy.config.* rejected` (`Listener`/`RouteConfiguration`/`Cluster`/`ClusterLoadAssignment` NACKs, including `Didn't find a registered implementation for 'istio_authn'`) + ingress gateway `503` `UH` `no_healthy_upstream`: control-plane/sidecar version skew (often triggered by a GKE release-channel move downgrading managed Cloud Service Mesh below running sidecars); do not fix by blindly raising `istio-proxy` memory limits — align the release channel / mesh control-plane revision at or above the sidecar minor and roll affected workloads so sidecars match the control plane.
 
 # Rules
 
-- Budget about five commands for service-to-service checks, or up to eight batched read-only commands for DNS diagnostics. Do not `exec` into pods to test connectivity, and never run mutating `kubectl` (`patch`, `apply`, `edit`, `scale`, `delete`) or `gcloud` (`--update-addons`, `update`) commands — not even to probe whether Autopilot or RBAC blocks them; the boundary is read-only. Once `gcloud container clusters describe` confirms Autopilot, or confirms `CLOUD_DNS` with `Deployment/kube-dns` absent or scaled to 0, stop inspecting `kube-dns-autoscaler`.
+- Budget about five commands for service-to-service checks, up to eight batched read-only commands for DNS diagnostics, or up to nine batched read-only commands for service-mesh version-skew and Envoy NACK diagnostics. Do not `exec` into pods to test connectivity, and never run mutating `kubectl` (`patch`, `apply`, `edit`, `scale`, `delete`) or `gcloud` (`--update-addons`, `update`) commands — not even to probe whether Autopilot or RBAC blocks them; the boundary is read-only. Once `gcloud container clusters describe` confirms Autopilot, or confirms `CLOUD_DNS` with `Deployment/kube-dns` absent or scaled to 0, stop inspecting `kube-dns-autoscaler`.
 - If a live read fails or is refused, do not retry the cluster in a loop or write a patch from workspace manifests: when the cluster API is unreachable before any evidence is gathered, block the card as `needs_input` as [`workload-triage-scan/references/reporting.md`](../workload-triage-scan/references/reporting.md) ("Cannot proceed") describes, quoting the exact stderr line; when an individual `kubectl` read mid-investigation is refused (`Error from server (Forbidden)`, HTTP 403), treat it as terminal for that query only and complete with what you read, naming that refusal as the gap.
 - Do not run `gcloud container clusters get-credentials`. Preflight has pinned the kubeconfig.

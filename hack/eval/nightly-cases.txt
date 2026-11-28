@@ -2103,6 +2103,14 @@
 # Nightly from its first merge.
 ./tasks/upgrades-rollout-family-held-by-canary-gate/task.yaml
 
+# Pure Q&A probe for managed Cloud Service Mesh release-channel downgrade
+# pre-flight and Envoy xDS NACK / istio-proxy OOMKilled triage (Part of #2797):
+# complements upgrades-managed-mesh-channel-downgrade-guard (rapid -> stable
+# channel downgrade only) by probing static-to-STABLE enrolment, Envoy xDS NACK
+# + OOMKilled + 503 UH triage, rejecting memory-limit bumps, and requiring both
+# in-cluster skew checks and operator-run `gcloud container fleet mesh describe`.
+# deployer: noop, read-only, no fixture. Nightly from its first merge.
+./tasks/upgrades-service-mesh-channel-downgrade-probe/task.yaml
 
 # The weekly upgrade readiness brief's on-request route: a brief in the SOP's shape
 # whose Decide-now lines name slot b's singleton budget and keep the webhook outage
