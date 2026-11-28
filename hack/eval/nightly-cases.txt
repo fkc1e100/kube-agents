@@ -1691,6 +1691,11 @@
 # ServiceEntry CRD when none is served; graded on the report store's finding ids.
 ./tasks/security-serviceentry-host-collision/task.yaml
 
+# Probe for stale ValidatingAdmissionPolicy CEL admission diagnostics
+# (#6465, #7216): identify the blocking policy/binding and remediate the
+# policy rather than inventing bypass labels. Structured check; deployer: noop.
+./tasks/security-stale-validating-admission-policy-cel/task.yaml
+
 # #5191: a /session turn that asks for a profile by name delegates to it,
 # graded by delegated_to (#5194 moved it to the cluster profile). Needs the
 # inject door and the AgentProfile dispatcher, which every CI eval install
