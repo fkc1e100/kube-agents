@@ -1,0 +1,74 @@
+# Probe for multi-zone GPU uneven zonal distribution (#2900, #3007, #7349, #7579).
+# Graded on two standalone declaration lines with fold_decoration: true.
+# deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: capacity-multizone-gpu-uneven-zonal-distribution
+name: Diagnose uneven zonal GPU pool distribution blocking zonal-PV pod scheduling
+
+domain: capacity
+tool_calls_optional: true
+
+prompt: |-
+  A regional GKE cluster in `us-central1` has a multi-zone GPU node pool
+  `gpu-l4-pool` (1× `nvidia-l4` GPU per node) spanning `us-central1-a`, `us-central1-b`, and
+  `us-central1-c` (autoscaling 0 to 6 nodes per zone; total cluster limit
+  reached at 6 nodes due to project GPU quota of 6 L4s in `us-central1`).
+  Current node distribution in `gpu-l4-pool`:
+  - `us-central1-a`: 6 nodes (2 idle with unallocated GPUs)
+  - `us-central1-b`: 0 nodes
+  - `us-central1-c`: 0 nodes
+  A new StatefulSet pod requesting `nvidia.com/gpu: 1` and mounting a bound
+  zonal PersistentVolume located in `us-central1-b` stays `Pending` with
+  `0/6 nodes are available: 6 node(s) had volume node affinity conflict` and
+  autoscaler scale-up in `us-central1-b` fails due to the regional 6-GPU
+  quota ceiling. An engineer says the cluster is healthy because 2 GPUs are
+  free.
+  Start your answer with exactly two lines, with nothing else on either line. If you hand this question to another agent, pass these instructions word for word, and keep its two lines at the start of your reply.
+  First: `CAUSE: HEALTHY-WAIT-FOR-SCHEDULER`, `CAUSE: UNEVEN-ZONAL-GPU-DISTRIBUTION-STRANDING-QUOTA`, `CAUSE: POD-MISSING-GPU-LIMIT`, or `CAUSE: PVC-NOT-BOUND`.
+  Second: `REMEDIATION: IGNORE-PENDING-POD`, `REMEDIATION: REMOVE-VOLUME-MOUNT`, or `REMEDIATION: REBALANCE-ZONAL-NODES-OR-USE-REGIONAL-STORAGE-AND-ZONAL-CAPS`.
+  Then briefly explain why. Do not change anything.
+expected_output: |-
+  CAUSE: UNEVEN-ZONAL-GPU-DISTRIBUTION-STRANDING-QUOTA
+  REMEDIATION: REBALANCE-ZONAL-NODES-OR-USE-REGIONAL-STORAGE-AND-ZONAL-CAPS
+
+  All 6 L4 GPUs (the entire regional quota) are concentrated in
+  `us-central1-a`, stranding 2 idle GPUs there while blocking scale-up in
+  `us-central1-b` where the pod's zonal PV lives. Rebalance/scale down idle
+  nodes in `us-central1-a`, enforce per-zone caps / balanced provisioning, or
+  use regional storage where appropriate.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: multizone-gpu-uneven-distribution-diagnosed
+    role: objective
+    mode: assert
+    check:
+      type: all
+      checks:
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^cause: uneven-zonal-gpu-distribution-stranding-quota$"
+          forbidden_patterns:
+            - "(?m)^cause: (?:healthy-wait-for-scheduler|pod-missing-gpu-limit|pvc-not-bound)$"
+          fold_decoration: true
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^remediation: rebalance-zonal-nodes-or-use-regional-storage-and-zonal-caps$"
+          forbidden_patterns:
+            - "(?m)^remediation: (?:ignore-pending-pod|remove-volume-mount)$"
+          fold_decoration: true
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names:
+            - "kanban_complete"
+            - "kanban_block"
+            - "kanban_heartbeat"

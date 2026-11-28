@@ -977,6 +977,11 @@
 # deployer: noop, no fixture.
 ./tasks/capacity-multipool-ca-scan-delay-capacitybuffer/task.yaml
 
+# Probe for multi-zone GPU node pool uneven zonal distribution (#2900,
+# #3007, #7349, #7579): identify zonal skew against a zonal PV rather than
+# assuming cluster-wide GPU shortage. Structured check; deployer: noop.
+./tasks/capacity-multizone-gpu-uneven-zonal-distribution/task.yaml
+
 # chat-answer-writes-a-table: a direct answer asked for as a table is a
 # markdown pipe table, not "Label: value | Label: value" lines. Red on the
 # api_server prompt hint that told the model to assume plain text (the Teams
