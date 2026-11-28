@@ -1231,6 +1231,11 @@
 # full audit and band as consistency-drift-outlier.
 ./tasks/consistency-boot-disk-pool-outlier/task.yaml
 
+# Probe for namespace-scoped devteam profile RBAC guardrail (#2900, #3009,
+# #7355, #7578): deny cross-namespace Secret reads and cluster-scoped RBAC
+# mutations. Structured two-line declaration check; deployer: noop.
+./tasks/consistency-devteam-namespace-rbac-guardrail/task.yaml
+
 # Node-pool kubelet cpuCfsQuota=false enforcement probe (#2599, #2799, #7179):
 # disabling cpuCfsQuota turns off kernel CPU limit enforcement for multi-tenant
 # workloads on that pool. deployer: noop, no fixture.
