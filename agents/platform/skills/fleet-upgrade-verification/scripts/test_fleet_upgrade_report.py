@@ -2222,10 +2222,11 @@ class ReadinessTest(unittest.TestCase):
         crd_gate["webhooks"][0]["rules"][0]["scope"] = "Namespaced"
         objects = {**self.objects, "seeded-a": self.objects["seeded-a"] + [crd_gate]}
         # Default self.clusters has seeded-a on 1.35.1-gke.1000 (self.TARGET >= 1.35): graded blocking.
-        _, _, on135_data = self._run(FakeReadinessCommands(self.clusters, {}, objects))
+        _, on135_text, on135_data = self._run(FakeReadinessCommands(self.clusters, {}, objects))
         on135_a = next(m for m in on135_data["members"] if m["cluster"] == "seeded-a")["readiness"]
         self.assertEqual([f["webhook"] for f in on135_a["webhooks"]["blocking"]], ["seeded-crd-gate/crd-gate.seeded.invalid"])
         self.assertEqual(on135_a["status"], "blocked")
+        self.assertIn("or (on clusters running or upgrading to GKE >= 1.35) intercepting non-add-on system CRD writes", on135_text)
         # Both master and target below 1.35: stays outage, not blocking.
         below_clusters = {"p1": [cluster("seeded-a", "us-central1-a", "1.34.11-gke.1000", [("default-pool", "1.34.11-gke.1000")])]}
         _, _, below_data = self._run(FakeReadinessCommands(below_clusters, {}, objects), "--target-version", "1.34.11-gke.1000")
@@ -2282,7 +2283,7 @@ class ReadinessTest(unittest.TestCase):
         self.assertIn("retry with backoff", cells[risks])
         host_row = next(l for l in lines if l.startswith("| p1 | robot-host |") and "| blocked |" in l)
         self.assertNotIn("control plane is zonal", host_row)
-        self.assertIn(f"Readiness at 2026-09-14T15:00:00Z: 2 blocked, 1 ready, 0 unknown; {with_risks} with risks; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, a fail-closed webhook with an unreachable backend in the upgrade's path or able to refuse the control plane's bootstrap RBAC writes (ClusterRoles and ClusterRoleBindings; Roles and RoleBindings in kube-system and kube-public), skew or an other blocker any upgrade; a risk does not block.", text)
+        self.assertIn(f"Readiness at 2026-09-14T15:00:00Z: 2 blocked, 1 ready, 0 unknown; {with_risks} with risks; a maintenance exclusion holds back GKE's automatic upgrades only, a drain-blocking PDB, a fail-closed webhook with an unreachable backend in the upgrade's path, able to refuse the control plane's bootstrap RBAC writes (ClusterRoles and ClusterRoleBindings; Roles and RoleBindings in kube-system and kube-public), or (on clusters running or upgrading to GKE >= 1.35) intercepting non-add-on system CRD writes, skew or an other blocker any upgrade; a risk does not block.", text)
 
     def test_an_unknown_from_a_rule_that_cannot_block_stays_in_the_note(self):
         odd = cluster("odd", "everywhere", self.TARGET, [("p", self.TARGET)])
