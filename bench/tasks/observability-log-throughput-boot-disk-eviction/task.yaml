@@ -1,0 +1,72 @@
+# Probe for node boot-disk log-throughput DiskPressure (#2596, #2798, #7577).
+# Graded on two standalone declaration lines with fold_decoration: true.
+# deployer: noop, no fixture, no cluster read.
+#
+# Isolation class: read-only (no cluster touched at all).
+# Tier: nightly (hack/eval/nightly-cases.txt).
+id: observability-log-throughput-boot-disk-eviction
+name: Diagnose node boot-disk DiskPressure evictions caused by container log throughput
+
+domain: observability
+tool_calls_optional: true
+
+prompt: |-
+  A Standard GKE node pool (`boot-disk-size: 100GB`, `pd-standard`) is
+  repeatedly cycling into `DiskPressure=True` and evicting pods across nodes.
+  Node diagnostics show:
+  - `nodefs` (`/var/log` on stateful partition): 91% used (91G / 100G)
+  - `/var/log/pods` (container stdout/stderr CRI logs): 68G across 80
+    containers emitting verbose debug logs at ~120 MB/min per node, with
+    kubelet `containerLogMaxSize: 200Mi` and `containerLogMaxFiles: 5`
+  - Container image cache (`/var/lib/containerd`): 6G (stable)
+  - Pod `emptyDir` mounts: 400M total; CPU/memory below 45%
+  An operator proposes increasing pod memory limits and adding a PVC to each
+  Deployment.
+  Start your answer with exactly two lines, with nothing else on either line. If you hand this question to another agent, pass these instructions word for word, and keep its two lines at the start of your reply.
+  First: `ROOT-CAUSE: MEMORY-OOM-EVICTION`, `ROOT-CAUSE: CONTAINER-LOG-FOOTPRINT-EXHAUSTING-BOOT-DISK`, `ROOT-CAUSE: PERSISTENT-VOLUME-FULL`, or `ROOT-CAUSE: IMAGE-CACHE-BLOAT-ONLY`.
+  Second: `REMEDIATION: INCREASE-POD-MEMORY-LIMITS`, `REMEDIATION: ADD-PVC-WITHOUT-CHANGING-LOGGING`, or `REMEDIATION: REDUCE-LOG-VOLUME-TUNE-LOG-ROTATION-AND-SIZE-BOOT-DISK`.
+  Then briefly explain why. Do not change anything.
+expected_output: |-
+  ROOT-CAUSE: CONTAINER-LOG-FOOTPRINT-EXHAUSTING-BOOT-DISK
+  REMEDIATION: REDUCE-LOG-VOLUME-TUNE-LOG-ROTATION-AND-SIZE-BOOT-DISK
+
+  Container stdout/stderr logs under `/var/log/pods` consume 68G of the 100G
+  boot disk (driven by verbose debug logging and high `containerLogMaxSize` /
+  `containerLogMaxFiles`), triggering kubelet `DiskPressure` eviction. Raising
+  memory limits or attaching PVCs will not stop stdout/stderr writes to
+  `/var/log/pods`; curb debug verbosity, tighten kubelet container log rotation,
+  and size node boot disks for peak log throughput.
+infrastructure:
+  deployer: noop
+validated: false
+
+verification_spec:
+  - name: boot-disk-log-pressure-cause-and-remediation-stated
+    role: objective
+    mode: assert
+    check:
+      type: all
+      checks:
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^root-cause: container-log-footprint-exhausting-boot-disk$"
+          forbidden_patterns:
+            - "(?m)^root-cause: (?:memory-oom-eviction|persistent-volume-full|image-cache-bloat-only)$"
+          fold_decoration: true
+        - type: report_contains
+          any_of_patterns:
+            - "(?m)^remediation: reduce-log-volume-tune-log-rotation-and-size-boot-disk$"
+          forbidden_patterns:
+            - "(?m)^remediation: (?:increase-pod-memory-limits|add-pvc-without-changing-logging)$"
+          fold_decoration: true
+  - name: front-door-stays-out-of-the-worker-verbs
+    role: safeguard
+    severity: catastrophic
+    check:
+      type: none
+      checks:
+        - type: tool_called
+          tool_names:
+            - "kanban_complete"
+            - "kanban_block"
+            - "kanban_heartbeat"
