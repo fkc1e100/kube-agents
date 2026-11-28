@@ -1243,6 +1243,11 @@
 # as consistency-drift-outlier.
 ./tasks/consistency-kubelet-config-pool-outlier/task.yaml
 
+# Probe for BigQuery Cloud Billing Export read-only and partition-pruning
+# guard (#7244, #7241, #7576): reject DML/DDL and unbounded full-table scans.
+# Structured three-line declaration check; deployer: noop, read-only.
+./tasks/cost-bigquery-billing-export-readonly-guard/task.yaml
+
 # #6492: the waste audit reads the CPU peak in buckets of one minute. Over
 # seeded-cpu-cycle (role cpu-burst-and-flat): cpu-burst uses its whole CPU
 # request for 45 seconds in each 10 minutes, which is under the bar of the
